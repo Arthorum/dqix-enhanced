@@ -516,6 +516,32 @@ static float    fb_depth[192][256];
 static uint8_t  fb_id[192][256];        /* opaque polygon id */
 static uint8_t  fb_tid[192][256];       /* translucent polygon id + 1 (0 = none) */
 static uint8_t  fb_fog[192][256];
+static uint8_t  fb_edge[192][256];      /* opaque pixel on its polygon's boundary (for edge marking) */
+
+/* Edge lines of the polygon being drawn, normalised so the value is the
+ * distance in pixels to that edge (positive inside). */
+static float g_pe_a[MAX_PV], g_pe_b[MAX_PV], g_pe_c[MAX_PV];
+static int g_pe_n;
+static void poly_edges(const Poly* p) {
+    float area = 0;
+    for (int k = 0; k < p->n; k++) { const SVtx* u = &p->v[k]; const SVtx* v = &p->v[(k + 1) % p->n]; area += u->x * v->y - v->x * u->y; }
+    float sg = area < 0 ? -1.0f : 1.0f;
+    g_pe_n = 0;
+    for (int k = 0; k < p->n; k++) {
+        const SVtx* u = &p->v[k]; const SVtx* v = &p->v[(k + 1) % p->n];
+        float a = (u->y - v->y) * -sg, b = (v->x - u->x) * -sg, len = sqrtf(a * a + b * b);
+        if (len < 1e-6f) continue;
+        g_pe_a[g_pe_n] = a / len; g_pe_b[g_pe_n] = b / len; g_pe_c[g_pe_n] = -(g_pe_a[g_pe_n] * u->x + g_pe_b[g_pe_n] * u->y);
+        g_pe_n++;
+    }
+}
+static int on_poly_edge(float px, float py) {
+    for (int k = 0; k < g_pe_n; k++) {
+        float d = g_pe_a[k] * px + g_pe_b[k] * py + g_pe_c[k];
+        if (d < 1.0f && d > -1.0f) return 1;
+    }
+    return 0;
+}
 static int g_3d_have_frame;
 
 static inline uint8_t tex8(uint32_t a) { uint8_t* p = g_tex_slot[(a >> 17) & 3]; return p ? p[a & 0x1FFFF] : 0; }
@@ -676,6 +702,7 @@ static void draw_triangle(const Poly* p, const SVtx* a, const SVtx* b, const SVt
             if (al >= 31) {
                 fb_color[y][x] = col; fb_alpha[y][x] = 31; fb_depth[y][x] = depth;
                 fb_id[y][x] = (uint8_t)id; fb_tid[y][x] = 0; fb_fog[y][x] = (attr >> 15) & 1;
+                fb_edge[y][x] = (uint8_t)on_poly_edge(px, py);
             } else {
                 if (fb_tid[y][x] == id + 1) continue;                  /* same translucent polygon id */
                 int da = fb_alpha[y][x];
@@ -716,7 +743,7 @@ static void render_frame(int buf) {
     for (int y = 0; y < 192; y++)
         for (int x = 0; x < 256; x++) {
             fb_color[y][x] = ccol; fb_alpha[y][x] = calpha; fb_depth[y][x] = clear_d;
-            fb_id[y][x] = cid; fb_tid[y][x] = 0; fb_fog[y][x] = cfog;
+            fb_id[y][x] = cid; fb_tid[y][x] = 0; fb_fog[y][x] = cfog; fb_edge[y][x] = 0;
         }
     int n = g_npoly[buf];
     static const Poly* order[MAX_POLY];
@@ -728,6 +755,7 @@ static void render_frame(int buf) {
     if (!(g_render_flags & 1)) qsort(order + no, nt - no, sizeof order[0], poly_cmp_y);
     for (int i = 0; i < nt; i++) {
         const Poly* p = order[i];
+        poly_edges(p);
         for (int k = 1; k + 1 < p->n; k++) draw_triangle(p, &p->v[0], &p->v[k], &p->v[k + 1], wbuf, disp3d);
     }
     /* edge marking */
@@ -736,7 +764,7 @@ static void render_frame(int buf) {
         for (int y = 0; y < 192; y++)
             for (int x = 0; x < 256; x++) {
                 out[y][x] = fb_color[y][x];
-                if (fb_alpha[y][x] == 0) continue;
+                if (fb_alpha[y][x] == 0 || !fb_edge[y][x]) continue;
                 uint8_t id = fb_id[y][x]; float d = fb_depth[y][x];
                 static const int dx[4] = { -1, 1, 0, 0 }, dy[4] = { 0, 0, -1, 1 };
                 for (int k = 0; k < 4; k++) {
@@ -803,6 +831,15 @@ static void render_frame(int buf) {
             if (!inside) continue;
             fprintf(stderr, "  poly %d: attr %08x teximg %08x (fmt %u, %ux%u, mode %u) pltt %04x, %d verts\n", (int)(p - g_polybuf[buf]), p->attr, p->teximg,
                     (p->teximg >> 26) & 7, 8u << ((p->teximg >> 20) & 7), 8u << ((p->teximg >> 23) & 7), p->teximg >> 30, p->pltt, p->n);
+            if (((p->teximg >> 26) & 7) == 3 && ((p->teximg >> 20) & 7) <= 2 && ((p->teximg >> 23) & 7) <= 2) {
+                int w = 8 << ((p->teximg >> 20) & 7), h = 8 << ((p->teximg >> 23) & 7);
+                uint32_t base = (p->teximg & 0xFFFF) * 8;
+                for (int y = 0; y < h; y++) {
+                    fprintf(stderr, "     ");
+                    for (int x = 0; x < w; x++) { int i = y * w + x; fprintf(stderr, "%x", (tex8(base + i / 2) >> (4 * (i & 1))) & 15); }
+                    fprintf(stderr, "\n");
+                }
+            }
             fprintf(stderr, "     palette:");
             for (int k = 0; k < 16; k++) fprintf(stderr, " %04x", pal16(p->pltt * 16 + k * 2));
             fprintf(stderr, "\n");

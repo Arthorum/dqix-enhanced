@@ -27,6 +27,31 @@ SYM_RE = re.compile(r"^(\S+) kind:(function|label)\((arm|thumb)(?:,size=0x([0-9a
 REL_RE = re.compile(r"^from:0x([0-9a-f]+) kind:(\S+) to:0x([0-9a-f]+) module:(\S+)")
 
 
+
+class write_if_changed:
+    """Like open(path, "w"), but leaves the file (and its timestamp) alone when
+    the new content is identical, so make only recompiles what changed."""
+    def __init__(self, path):
+        self.path = path
+        self.parts = []
+    def write(self, text):
+        self.parts.append(text)
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        if exc[0] is not None:
+            return False
+        new = "".join(self.parts)
+        try:
+            with open(self.path) as f:
+                if f.read() == new:
+                    return False
+        except OSError:
+            pass
+        with open(self.path, "w") as f:
+            f.write(new)
+        return False
+
 @dataclass
 class Func:
     module: "Module"
@@ -529,7 +554,7 @@ def main():
         queue, rc.pending = rc.pending, []
 
     funcs = list(rc.all_funcs())
-    with open(os.path.join(args.out, "funcs.h"), "w") as f:
+    with write_if_changed(os.path.join(args.out, "funcs.h")) as f:
         f.write("#pragma once\n#include \"cpu.h\"\n")
         for fn in funcs:
             f.write(f"void {fn.cname}(Cpu* c);\n")
@@ -539,21 +564,21 @@ def main():
         mf = [m.funcs[a] for a in sorted(m.funcs)]
         for k in range(0, len(mf), args.per_file):
             path = os.path.join(args.out, f"{m.name}_{k // args.per_file:02d}.c")
-            with open(path, "w") as f:
+            with write_if_changed(path) as f:
                 f.write(PRELUDE)
                 for fn in mf[k:k + args.per_file]:
                     f.write(code[(m.name, fn.addr)])
                     f.write("\n\n")
             files.append(path)
 
-    with open(os.path.join(args.out, "dispatch_table.c"), "w") as f:
+    with write_if_changed(os.path.join(args.out, "dispatch_table.c")) as f:
         f.write('#include "funcs.h"\n#include "dispatch.h"\n\nconst RecompFunc g_recomp_funcs[] = {\n')
         for fn in funcs:
             size = 0 if getattr(fn, "interpreted", False) else fn.size
             f.write(f"    {{ {fn.module.ovl_id}, {h(fn.addr | fn.thumb)}, {size}, {fn.cname}, \"{fn.name}\" }},\n")
         f.write("};\nconst unsigned g_recomp_func_count = sizeof(g_recomp_funcs) / sizeof(g_recomp_funcs[0]);\n")
 
-    with open(os.path.join(args.out, "report.txt"), "w") as f:
+    with write_if_changed(os.path.join(args.out, "report.txt")) as f:
         for k in sorted(rc.stats):
             f.write(f"{k}: {rc.stats[k]}\n")
         f.write(f"\nproblems ({len(rc.problems)}):\n")

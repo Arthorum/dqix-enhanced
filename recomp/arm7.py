@@ -24,7 +24,7 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(__file__))
-from build import Func, Module, Recompiler  # noqa: E402
+from build import Func, Module, Recompiler, write_if_changed  # noqa: E402
 from insn import BRANCH, CALL, Decoder, h  # noqa: E402
 
 PRELUDE7 = """/* ARM7 code: memory, BIOS and dispatch go to the ARM7's side of the runtime.
@@ -225,24 +225,24 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
     funcs = list(rc.all_funcs())
-    with open(os.path.join(args.out, "funcs7.h"), "w") as f:
+    with write_if_changed(os.path.join(args.out, "funcs7.h")) as f:
         f.write('#pragma once\n#include "cpu.h"\n' + "".join(f"void {x.cname}(Cpu* c);\n" for x in funcs))
     per = 300
     nfiles = 0
     for m in mods:
         mf = [m.funcs[a] for a in sorted(m.funcs)]
         for k in range(0, len(mf), per):
-            with open(os.path.join(args.out, f"{m.name}_{k // per:02d}.c"), "w") as f:
+            with write_if_changed(os.path.join(args.out, f"{m.name}_{k // per:02d}.c")) as f:
                 f.write(PRELUDE7)
                 for fn in mf[k:k + per]:
                     f.write(code[(m.name, fn.addr)] + "\n\n")
             nfiles += 1
-    with open(os.path.join(args.out, "dispatch7_table.c"), "w") as f:
+    with write_if_changed(os.path.join(args.out, "dispatch7_table.c")) as f:
         f.write('#include "funcs7.h"\n#include "dispatch.h"\n\nconst RecompFunc g_recomp7_funcs[] = {\n')
         for x in funcs:
             f.write(f'    {{ -1, {h(x.addr | x.thumb)}, {x.size}, {x.cname}, "{x.name}" }},\n')
         f.write("};\nconst unsigned g_recomp7_func_count = sizeof(g_recomp7_funcs) / sizeof(g_recomp7_funcs[0]);\n")
-    with open(os.path.join(args.out, "report7.txt"), "w") as f:
+    with write_if_changed(os.path.join(args.out, "report7.txt")) as f:
         for k in sorted(rc.stats):
             f.write(f"{k}: {rc.stats[k]}\n")
         f.write("\n".join(rc.problems))
