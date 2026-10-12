@@ -1,0 +1,20 @@
+# Private project. Never commit anything derived from the ROM: the generated C
+# (build/recomp*, gen*/), the ROM itself, extracted files, saves, reports, dumps.
+*.nds
+*.sav
+*.o
+*.exe
+*.dll
+/dqix
+/dqix-sdl*
+obj/
+build/
+gen/
+gen7/
+reports/
+extract/
+*.ppm
+*.bmp
+*.wav
+__pycache__/
+*.pyc

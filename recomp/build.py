@@ -1,0 +1,455 @@
+"""DQIX static recompiler: turns the game's ARM9 code into C.
+
+Usage:
+    python recomp/build.py --extract <extract/usa> --config <config/usa/arm9> --out <dir>
+
+Inputs come from the dqix-decomp project:
+  * extract/usa      - code images extracted by `dsd rom extract` (from your own ROM)
+  * config/usa/arm9  - symbols.txt / relocs.txt with every function's address,
+                       size and ARM/Thumb mode, and which overlay each call targets
+Output (generated from the game's code, keep private):
+  * <out>/funcs.h, <out>/<module>_NN.c, <out>/dispatch_table.c, <out>/report.txt
+"""
+import argparse
+import os
+import re
+import sys
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+import yaml
+
+sys.path.insert(0, os.path.dirname(__file__))
+from insn import (BRANCH, CALL, CALL_REG, EXC_RET, JUMP_REG, JUMPTABLE, RET, SEQ, STOP,  # noqa: E402
+                  Decoder, h)
+
+SYM_RE = re.compile(r"^(\S+) kind:(function|label)\((arm|thumb)(?:,size=0x([0-9a-f]+))?[^)]*\) addr:0x([0-9a-f]+)")
+REL_RE = re.compile(r"^from:0x([0-9a-f]+) kind:(\S+) to:0x([0-9a-f]+) module:(\S+)")
+
+
+@dataclass
+class Func:
+    module: "Module"
+    name: str
+    addr: int
+    size: int
+    thumb: bool
+
+    @property
+    def cname(self):
+        return f"fn_{self.module.name}_{self.addr:08x}"
+
+
+@dataclass
+class Module:
+    name: str
+    ovl_id: int  # -1 for non-overlays
+    base: int
+    data: bytes
+    funcs: dict = field(default_factory=dict)    # addr -> Func
+    labels: set = field(default_factory=set)
+    sym_addrs: list = field(default_factory=list)  # every symbol address, sorted
+    relocs: dict = field(default_factory=dict)   # from -> module spec
+
+    @property
+    def end(self):
+        return self.base + len(self.data)
+
+    def contains(self, a):
+        return self.base <= a < self.end
+
+
+def load_symbols(mod, path):
+    addrs = set()
+    with open(path) as f:
+        for line in f:
+            ma = re.search(r" addr:0x([0-9a-f]+)", line)
+            if ma:
+                addrs.add(int(ma.group(1), 16))
+            m = SYM_RE.match(line.strip())
+            if not m:
+                continue
+            name, kind, mode, size, addr = m.groups()
+            addr = int(addr, 16)
+            if kind == "function":
+                mod.funcs[addr] = Func(mod, name, addr, int(size, 16), mode == "thumb")
+            else:
+                mod.labels.add(addr)
+    mod.sym_addrs = sorted(addrs)
+
+
+def load_relocs(mod, path):
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            m = REL_RE.match(line.strip())
+            if m and ("call" in m.group(2) or "branch" in m.group(2)):
+                mod.relocs[int(m.group(1), 16)] = m.group(4)
+
+
+def load_modules(extract, config):
+    mods = []
+    rd = lambda p: open(os.path.join(extract, p), "rb").read()
+    y = lambda p: yaml.safe_load(open(os.path.join(extract, p)))
+    main = Module("main", -1, y("arm9/arm9.yaml")["base_address"], rd("arm9/arm9.bin"))
+    load_symbols(main, os.path.join(config, "symbols.txt"))
+    load_relocs(main, os.path.join(config, "relocs.txt"))
+    mods.append(main)
+    for name in ("itcm", "dtcm"):
+        m = Module(name, -1, y(f"arm9/{name}.yaml")["base_address"], rd(f"arm9/{name}.bin"))
+        load_symbols(m, os.path.join(config, name, "symbols.txt"))
+        load_relocs(m, os.path.join(config, name, "relocs.txt"))
+        mods.append(m)
+    for ov in y("arm9_overlays/overlays.yaml")["overlays"]:
+        oid = ov["id"]
+        m = Module(f"ov{oid:03d}", oid, ov["base_address"], rd(f"arm9_overlays/{ov['file_name']}"))
+        load_symbols(m, os.path.join(config, "overlays", m.name, "symbols.txt"))
+        load_relocs(m, os.path.join(config, "overlays", m.name, "relocs.txt"))
+        mods.append(m)
+    return mods
+
+
+class Recompiler:
+    def __init__(self, mods):
+        self.mods = mods
+        self.by_name = {m.name: m for m in mods}
+        self.stats = defaultdict(int)
+        self.problems = []
+        self.pending = []
+
+    # ---------------------------------------------------------- resolution
+    def funcs_at(self, target, from_mod, from_addr, thumb_hint=False):
+        """Return list of Funcs that a call from (from_mod, from_addr) to target may reach."""
+        spec = from_mod.relocs.get(from_addr)
+        cands = []
+        if spec:
+            m = re.match(r"(\w+?)(?:\(([\d,]+)\))?$", spec)
+            kind, ids = m.group(1), m.group(2)
+            if kind in ("main", "itcm", "dtcm"):
+                cands = [self.by_name[kind]]
+            elif kind in ("overlay", "overlays") and ids:
+                cands = [self.by_name[f"ov{int(x):03d}"] for x in ids.split(",")]
+        if not cands:
+            if from_mod.ovl_id >= 0 and from_mod.contains(target):
+                cands = [from_mod]
+            else:
+                cands = [m for m in self.mods if m.ovl_id < 0 and m.contains(target)]
+                if not cands:
+                    cands = [m for m in self.mods if m.ovl_id >= 0 and target in m.funcs]
+        found = [m.funcs[target] for m in cands if target in m.funcs]
+        if not found:
+            # Jump into the middle of a function (shared tail code): make a
+            # secondary entry point that starts there.
+            for m in cands:
+                host = self.containing(m, target)
+                if host:
+                    f = Func(m, f"{host.name}+{target - host.addr:#x}", target,
+                             host.addr + host.size - target, host.thumb)
+                    m.funcs[target] = f
+                    self.pending.append(f)
+                    self.stats["secondary_entries"] += 1
+                    found.append(f)
+            if not found and len(cands) == 1 and cands[0].contains(target):
+                # Called code the symbol map labels as data: a function that
+                # runs until the next symbol.
+                m = cands[0]
+                nxt = min([a for a in m.sym_addrs if a > target] + [m.end])
+                f = Func(m, f"func_{m.name}_{target:08x}", target, nxt - target, bool(thumb_hint))
+                m.funcs[target] = f
+                self.pending.append(f)
+                self.stats["data_promoted_to_function"] += 1
+                found.append(f)
+        return found
+
+    def containing(self, m, a):
+        for fa in m.funcs:
+            f = m.funcs[fa]
+            if f.addr < a < f.addr + f.size:
+                return f
+        return None
+
+    def call_stmt(self, mod, from_addr, target, thumb):
+        fs = self.funcs_at(target, mod, from_addr, thumb)
+        if len(fs) == 1:
+            if fs[0].thumb != thumb:
+                self.stats["mode_mismatch"] += 1
+            return f"{fs[0].cname}(c);"
+        if len(fs) > 1:
+            self.stats["multi_overlay_calls"] += 1
+            parts = [f"if (overlay_is_loaded({f.module.ovl_id})) {f.cname}(c);" for f in fs]
+            parts.append(f"else dispatch_call(c, {h(target | thumb)}, {h(from_addr)});")
+            return " ".join(parts)
+        self.stats["unresolved_calls"] += 1
+        self.problems.append(f"{mod.name} {from_addr:08x}: call to {target:08x} has no known function")
+        return f"dispatch_call(c, {h(target | thumb)}, {h(from_addr)});"
+
+    # ---------------------------------------------------------- functions
+    def discover(self, func, dec):
+        start, end = func.addr, func.addr + func.size
+        thumb = func.thumb
+        insns = {}
+        data = set()
+        labels = {start}
+        extra_labels = {a for a in func.module.labels if start <= a < end}
+        labels |= extra_labels
+        work = [start] + sorted(extra_labels)
+        while work:
+            a = work.pop()
+            while start <= a < end and a not in insns and a not in data:
+                i = dec.thumb(a) if thumb else dec.arm(a)
+                insns[a] = i
+                for ea, sz in i.pool_refs:
+                    for k in range(sz):
+                        data.add(ea + k)
+                uncond = i.cond == ""
+                if i.flow == BRANCH:
+                    if start <= i.target < end:
+                        labels.add(i.target)
+                        work.append(i.target)
+                    if uncond:
+                        break
+                elif i.flow == JUMPTABLE:
+                    k = 0
+                    while True:
+                        ea = a + 8 + 4 * k
+                        if not (start <= ea < end):
+                            break
+                        e = dec.arm(ea)
+                        if e.flow != BRANCH or e.cond != "":
+                            break
+                        labels.add(ea)
+                        work.append(ea)
+                        k += 1
+                    i.table = [a + 8 + 4 * j for j in range(k)]
+                    if uncond:
+                        break
+                elif i.table_words or i.adr >= 0:
+                    # A table of code addresses: `ldr pc, [pc, rX, lsl #2]`, or
+                    # `adr rT, table` followed by a load through rT.
+                    tbl = a + 8 if i.table_words else i.adr
+                    entries = []
+                    ea = tbl
+                    while start <= ea < end and ea % 4 == 0 and ea not in insns:
+                        t = dec.word(ea)
+                        tt = t & ~1 if thumb else t
+                        if not (start <= tt < end) or (bool(t & 1) != thumb and t & 3):
+                            break
+                        entries.append(tt)
+                        ea += 4
+                    if entries:
+                        self.stats["address_tables"] += 1
+                        for k in range(tbl, ea):
+                            data.add(k)
+                        for t in entries:
+                            labels.add(t)
+                            work.append(t)
+                    if i.table_words and uncond:
+                        break
+                elif i.flow == JUMP_REG and thumb and i.mn == "add" and (i.word & 0xFF87) == 0x4487:
+                    # Thumb switch: cmp rI, #N ; ... ldrb/ldrh rX, [..] ; (lsls/asrs) ; add pc, rX
+                    # Table of N+1 byte/halfword offsets right after the add.
+                    tbl = self.thumb_offset_table(insns, a, dec)
+                    if tbl:
+                        n, esize, scale, signed = tbl
+                        self.stats["thumb_offset_tables"] += 1
+                        tstart = a + 2
+                        for k in range(tstart, tstart + n * esize):
+                            data.add(k)
+                        for k in range(n):
+                            ea = tstart + k * esize
+                            v = dec.byte(ea) if esize == 1 else dec.half(ea)
+                            if signed:
+                                v -= (1 << (8 * esize)) if v >> (8 * esize - 1) else 0
+                            t = a + 4 + v * scale
+                            if start <= t < end:
+                                labels.add(t)
+                                work.append(t)
+                    break
+                elif i.flow in (RET, JUMP_REG, EXC_RET, STOP) and uncond:
+                    break
+                a += i.size
+        # drop anything decoded from literal pools
+        for a in [a for a in insns if a in data]:
+            del insns[a]
+        return insns, labels
+
+    @staticmethod
+    def thumb_offset_table(insns, a, dec):
+        """Recognise the instructions before a Thumb `add pc, rX` switch.
+        Returns (entries, entry_size, scale, signed) or None."""
+        n = esize = None
+        scale, signed = 1, False
+        for k in range(1, 9):
+            p = insns.get(a - 2 * k)
+            if p is None:
+                break
+            w = p.word & 0xFFFF
+            if esize is None:
+                if (w >> 11) == 0x0F:        # ldrb rd, [rb, #imm]
+                    esize = 1
+                elif (w >> 11) == 0x11:      # ldrh rd, [rb, #imm]
+                    esize = 2
+                elif (w >> 11) == 0 and (w >> 6) & 31:   # lsls #s (after the load)
+                    scale <<= (w >> 6) & 31
+                elif (w >> 11) == 2:          # asrs: sign extension of the loaded value
+                    signed = True
+            elif (w >> 11) == 5:              # cmp rI, #N
+                n = (w & 0xFF) + 1
+                break
+        if n is None or esize is None:
+            return None
+        # `lsls #16 ; asrs #16` sign-extends a halfword: not a scale
+        if esize == 2 and scale == 1 << 16:
+            scale, signed = 1, True
+        return n, esize, scale, signed
+
+    def emit_func(self, func):
+        mod = func.module
+        dec = Decoder(mod.base, mod.data)
+        insns, labels = self.discover(func, dec)
+        order = sorted(insns)
+        has_jump_reg = any(insns[a].flow == JUMP_REG for a in order)
+        out = [f"/* {func.name} ({'thumb' if func.thumb else 'arm'}, {func.size:#x} bytes) */",
+               f"void {func.cname}(Cpu* c) {{"]
+        start, end = func.addr, func.addr + func.size
+        tbit = 1 if func.thumb else 0
+
+        def branch(target, from_addr):
+            if start <= target < end and target in insns:
+                return f"goto L_{target:08x};"
+            if start <= target < end:
+                self.stats["branch_into_data"] += 1
+            return self.call_stmt(mod, from_addr, target, func.thumb) + " return;"
+
+        def local_switch(expr, from_addr):
+            cases = " ".join(f"case {h(t)}: goto L_{t:08x};" for t in sorted(labels) if t in insns)
+            return (f"switch (({expr}) & ~1u) {{ {cases} default: dispatch_call(c, {expr}, {h(from_addr)}); return; }}")
+
+        prev_sets_lr = False
+        for idx, a in enumerate(order):
+            i = insns[a]
+            self.stats["insns"] += 1
+            if a in labels:
+                out.append(f"L_{a:08x}:;")
+            ret_addr = (a + i.size) | tbit
+            if i.flow == SEQ:
+                s = i.body or ";"
+                if i.mn == "udf" or "cpu_unhandled" in s:
+                    self.stats["unhandled_insns"] += 1
+            elif i.flow == BRANCH:
+                s = branch(i.target, a)
+            elif i.flow == CALL:
+                s = f"c->r[14] = {h(ret_addr)}; " + self.call_stmt(mod, a, i.target, i.target_thumb)
+            elif i.flow == RET:
+                s = (i.body + " " if i.body else "") + "return;"
+            elif i.flow == EXC_RET:
+                s = i.body + " return;"
+            elif i.flow == STOP:
+                s = i.body
+                self.stats["unhandled_insns"] += 1
+            elif i.flow == CALL_REG:
+                self.stats["indirect_calls"] += 1
+                s = f"{{ {i.body} c->r[14] = {h(ret_addr)}; dispatch_call(c, tgt, {h(a)}); }}"
+            elif i.flow == JUMP_REG:
+                if prev_sets_lr:
+                    self.stats["indirect_calls"] += 1
+                    s = f"{{ {i.body} dispatch_call(c, tgt, {h(a)}); }}"
+                else:
+                    self.stats["indirect_jumps"] += 1
+                    s = f"{{ {i.body} {local_switch('tgt', a)} }}"
+            elif i.flow == JUMPTABLE:
+                self.stats["jump_tables"] += 1
+                table = getattr(i, "table", [])
+                cases = " ".join(f"case {k}: goto L_{t:08x};" for k, t in enumerate(table))
+                s = (f"switch ({i.index}) {{ {cases} default: cpu_unhandled(c, {h(a)}, {h(i.word)}); return; }}")
+            else:
+                raise AssertionError(i.flow)
+            if i.cond:
+                s = f"if (COND_{i.cond}) {{ {s} }}"
+            out.append(f"    /* {a:08x} {i.mn} */ {s}")
+            # Does execution continue at a + size?
+            if i.cond:
+                falls = True
+            elif i.flow in (SEQ, CALL, CALL_REG):
+                falls = True
+            elif i.flow == JUMP_REG:
+                falls = prev_sets_lr  # `mov lr, pc; bx rX` is a call
+            else:
+                falls = False
+            prev_sets_lr = i.sets_lr_pc
+            if falls:
+                nxt = a + i.size
+                if idx + 1 >= len(order) or order[idx + 1] != nxt:
+                    out.append(f"    {branch(nxt, a)}")
+        out.append("    return;")
+        out.append("}")
+        self.stats["functions"] += 1
+        return "\n".join(out)
+
+    def all_funcs(self):
+        for m in self.mods:
+            for a in sorted(m.funcs):
+                yield m.funcs[a]
+
+
+PRELUDE = '#include "cpu.h"\n#include "funcs.h"\n\n'
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--extract", required=True)
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--per-file", type=int, default=400)
+    args = ap.parse_args()
+
+    mods = load_modules(args.extract, args.config)
+    rc = Recompiler(mods)
+    os.makedirs(args.out, exist_ok=True)
+
+    # Translate everything in memory first: translating can discover secondary
+    # entry points, which then need translating too.
+    code = {}
+    queue = list(rc.all_funcs())
+    while queue:
+        for fn in queue:
+            code[(fn.module.name, fn.addr)] = rc.emit_func(fn)
+        queue, rc.pending = rc.pending, []
+
+    funcs = list(rc.all_funcs())
+    with open(os.path.join(args.out, "funcs.h"), "w") as f:
+        f.write("#pragma once\n#include \"cpu.h\"\n")
+        for fn in funcs:
+            f.write(f"void {fn.cname}(Cpu* c);\n")
+
+    files = []
+    for m in mods:
+        mf = [m.funcs[a] for a in sorted(m.funcs)]
+        for k in range(0, len(mf), args.per_file):
+            path = os.path.join(args.out, f"{m.name}_{k // args.per_file:02d}.c")
+            with open(path, "w") as f:
+                f.write(PRELUDE)
+                for fn in mf[k:k + args.per_file]:
+                    f.write(code[(m.name, fn.addr)])
+                    f.write("\n\n")
+            files.append(path)
+
+    with open(os.path.join(args.out, "dispatch_table.c"), "w") as f:
+        f.write('#include "funcs.h"\n#include "dispatch.h"\n\nconst RecompFunc g_recomp_funcs[] = {\n')
+        for fn in funcs:
+            f.write(f"    {{ {fn.module.ovl_id}, {h(fn.addr | fn.thumb)}, {fn.size}, {fn.cname} }},\n")
+        f.write("};\nconst unsigned g_recomp_func_count = sizeof(g_recomp_funcs) / sizeof(g_recomp_funcs[0]);\n")
+
+    with open(os.path.join(args.out, "report.txt"), "w") as f:
+        for k in sorted(rc.stats):
+            f.write(f"{k}: {rc.stats[k]}\n")
+        f.write(f"\nproblems ({len(rc.problems)}):\n")
+        f.write("\n".join(rc.problems[:2000]))
+    for k in sorted(rc.stats):
+        print(f"{k:24s} {rc.stats[k]}")
+    print(f"{len(files)} C files written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
