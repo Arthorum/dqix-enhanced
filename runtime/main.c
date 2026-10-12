@@ -1,5 +1,5 @@
 /* DQIX PC runtime entry point: load the ROM, set up the machine the way the
- * DS firmware leaves it, and run the recompiled game. */
+ * DS firmware leaves it, and run the recompiled game on both CPUs. */
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
@@ -7,7 +7,6 @@
 
 uint8_t* g_rom;
 size_t g_rom_size;
-uint64_t g_frame_limit;
 extern unsigned long long g_calls_traced;
 
 static void load_rom(const char* path) {
@@ -24,57 +23,68 @@ static void load_rom(const char* path) {
 static uint32_t rom32(uint32_t off) { uint32_t v; memcpy(&v, g_rom + off, 4); return v; }
 static void ram32(uint32_t a, uint32_t v) { memcpy(&g_main_ram[a & (MAIN_RAM_SIZE - 1)], &v, 4); }
 static void ram16(uint32_t a, uint16_t v) { memcpy(&g_main_ram[a & (MAIN_RAM_SIZE - 1)], &v, 2); }
+static void ram8(uint32_t a, uint8_t v) { g_main_ram[a & (MAIN_RAM_SIZE - 1)] = v; }
 
 /* What the BIOS + firmware leave behind when they start a game card. */
 static void boot_firmware(void) {
-    uint32_t a9_rom = rom32(0x20), a9_entry = rom32(0x24), a9_load = rom32(0x28), a9_size = rom32(0x2C);
+    uint32_t a9_rom = rom32(0x20), a9_load = rom32(0x28), a9_size = rom32(0x2C);
     uint32_t a7_rom = rom32(0x30), a7_load = rom32(0x38), a7_size = rom32(0x3C);
     memcpy(&g_main_ram[a9_load & (MAIN_RAM_SIZE - 1)], g_rom + a9_rom, a9_size);
-    if ((a7_load >> 24) == 2) memcpy(&g_main_ram[a7_load & (MAIN_RAM_SIZE - 1)], g_rom + a7_rom, a7_size);
+    memcpy(&g_main_ram[a7_load & (MAIN_RAM_SIZE - 1)], g_rom + a7_rom, a7_size);
     memcpy(&g_main_ram[0x027FFE00 & (MAIN_RAM_SIZE - 1)], g_rom, 0x170);   /* cartridge header */
     uint32_t chip = 0x00003FC2;
     ram32(0x027FF800, chip); ram32(0x027FF804, chip); ram32(0x027FFC00, chip); ram32(0x027FFC04, chip);
     ram16(0x027FF808, (uint16_t)rom32(0x15E)); ram16(0x027FFC08, (uint16_t)rom32(0x15E));
     ram16(0x027FF80A, (uint16_t)rom32(0x06C)); ram16(0x027FFC0A, (uint16_t)rom32(0x06C));
     ram16(0x027FFC10, 0x5835);
-    ram16(0x027FFC40, 1);   /* booted from a card */
-    /* firmware user settings (0x027FFC80): English, nickname "Player" */
+    ram16(0x027FFC40, 1);                    /* booted from a card */
+    /* firmware user settings (0x027FFC80), same as the firmware image in io7.c */
     uint32_t us = 0x027FFC80;
-    ram16(us + 0x00, 5);                    /* version */
-    g_main_ram[(us + 0x02) & (MAIN_RAM_SIZE - 1)] = 4;    /* favourite colour */
-    g_main_ram[(us + 0x03) & (MAIN_RAM_SIZE - 1)] = 1;    /* birthday month */
-    g_main_ram[(us + 0x04) & (MAIN_RAM_SIZE - 1)] = 1;    /* birthday day */
+    ram16(us + 0x00, 5);
+    ram8(us + 0x02, 4); ram8(us + 0x03, 1); ram8(us + 0x04, 1);
     const char* nick = "Player";
     for (int i = 0; nick[i]; i++) ram16(us + 0x06 + 2 * i, (uint16_t)nick[i]);
     ram16(us + 0x1A, (uint16_t)strlen(nick));
-    ram16(us + 0x64, 0x0001 | 0x0400);       /* language English, backlight */
+    ram16(us + 0x64, 0x0001 | 0x0400);       /* English, backlight */
+    g_io[0x247] = 3;                         /* WRAMCNT: all shared WRAM to the ARM7 */
+    g_io[0x300] = 1; g_io7[0x300] = 1;       /* POSTFLG */
+    /* ARM9: system mode, IRQs masked */
     g_arm9.r[13] = 0x023FFE00;
-    g_arm9.cpsr_ctl = 0xDF;                  /* system mode, IRQ+FIQ masked */
-    LOG_INFO("ARM9 binary: %u bytes at %08x, entry %08x\n", a9_size, a9_load, a9_entry);
+    g_arm9.cpsr_ctl = 0xDF;
+    /* ARM7: system mode with the BIOS's stacks in ARM7 WRAM */
+    g_arm7.cpsr_ctl = 0xDF;
+    g_arm7.r[13] = 0x0380FD80;
+    g_arm7.bank_r13[2] = 0x0380FF80;         /* IRQ */
+    g_arm7.bank_r13[3] = 0x0380FFC0;         /* SVC */
+    LOG_INFO("ARM9: %u bytes at %08x, entry %08x; ARM7: %u bytes at %08x, entry %08x\n",
+             a9_size, a9_load, rom32(0x24), a7_size, a7_load, rom32(0x34));
 }
 
 static void report(void) {
-    fprintf(stderr, "\n--- stopped after %llu frames, %llu function calls traced ---\n",
-            (unsigned long long)g_frame, g_calls_traced);
+    backup_flush();
+    fprintf(stderr, "\n--- stopped after %llu frames, %u thread switches, %llu function calls traced ---\n",
+            (unsigned long long)g_frame, g_thread_switches, g_calls_traced);
     trace_dump(stderr, 40);
 }
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <rom.nds> <extract/usa dir> [frames] [log level]\n", argv[0]);
+        fprintf(stderr, "usage: %s <rom.nds> <extract/usa dir> [frames] [log level] [save file]\n", argv[0]);
         return 2;
     }
     load_rom(argv[1]);
     if (argc > 3) g_frame_limit = strtoull(argv[3], NULL, 0);
     if (argc > 4) g_log_level = atoi(argv[4]);
+    backup_init(argc > 5 ? argv[5] : "dqix.sav");
     atexit(report);
     dispatch_init();
     overlays_init(argv[2]);
+    firmware_init();
     boot_firmware();
     vram_remap();
-    arm7_hle_init();
-    uint32_t entry = rom32(0x24);
-    dispatch_call(&g_arm9, entry, 0);
+    threads_init();
+    threads_start_arm7(rom32(0x34));
+    dispatch_call(&g_arm9, rom32(0x24), 0);
     LOG_WARN("the game's entry function returned\n");
     return 0;
 }

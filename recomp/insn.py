@@ -223,7 +223,9 @@ class Decoder:
             lines.append(f"c->r[{rd}] = {expr};")
             i.body = " ".join(lines)
             if opc == 13 and rd == 14 and not (w >> 25) & 1 and (w & 0xFFF) == 15:
-                i.sets_lr_pc = True
+                i.sets_lr_pc = True   # mov lr, pc
+            if opc == 4 and rd == 14 and rn == 15 and (w >> 25) & 1 and (w & 0xFFF) == 0:
+                i.sets_lr_pc = True   # add lr, pc, #0 (same value as mov lr, pc)
             return i
         # S set, rd != 15
         cin = "c->cf"

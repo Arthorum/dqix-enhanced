@@ -1,13 +1,13 @@
-/* ARM9 I/O registers: timing, IRQs, timers, DMA, cartridge, math unit. */
+/* Shared timing, per-CPU interrupts / timers / DMA, and the ARM9's I/O registers. */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
 
 uint8_t g_io[0x2000];
-uint32_t g_ime, g_ie, g_if;
 uint64_t g_frame;
 uint32_t g_vcount;
+uint64_t g_frame_limit;
 static uint32_t g_subline;   /* extra cycles within the current line */
 
 #define CYCLES_PER_LINE 2130u
@@ -17,176 +17,149 @@ uint64_t time_cycles(void) {
     return (g_frame * LINES_PER_FRAME + g_vcount) * (uint64_t)CYCLES_PER_LINE + g_subline;
 }
 
+void irq_raise(Core* k, int bit) { k->iflags |= 1u << bit; }
+
 /* ---------------------------------------------------------------- timers */
-typedef struct { uint16_t reload, ctl; uint64_t start; uint64_t overflows_seen; uint16_t latched; } Timer;
-static Timer g_timer[4];
 static const uint32_t prescale[4] = { 1, 64, 256, 1024 };
 
-static uint64_t timer_overflows(int n, uint64_t now, uint16_t* counter) {
-    Timer* t = &g_timer[n];
+static uint64_t timer_overflows(Core* k, int n, uint64_t now, uint16_t* counter) {
+    Timer* t = &k->timer[n];
     if (!(t->ctl & 0x80)) { if (counter) *counter = t->latched; return 0; }
     uint64_t period = 0x10000u - t->reload;
     uint64_t ticks;
-    if ((t->ctl & 4) && n > 0) {
-        ticks = timer_overflows(n - 1, now, NULL);  /* count-up: one tick per overflow below */
-        ticks -= t->start;                           /* start holds the lower timer's count at enable */
-    } else {
-        ticks = (now - t->start) / prescale[t->ctl & 3];
-    }
+    if ((t->ctl & 4) && n > 0) ticks = timer_overflows(k, n - 1, now, NULL) - t->start;  /* count-up */
+    else ticks = (now - t->start) / prescale[t->ctl & 3];
     if (counter) *counter = (uint16_t)(t->reload + ticks % period);
     return ticks / period;
 }
 
-uint16_t timer_read(int n) { uint16_t v; timer_overflows(n, time_cycles(), &v); return v; }
-void timer_write_reload(int n, uint16_t v) { g_timer[n].reload = v; }
-void timer_write_ctl(int n, uint16_t v) {
-    Timer* t = &g_timer[n];
+uint16_t timer_read(Core* k, int n) { uint16_t v; timer_overflows(k, n, time_cycles(), &v); return v; }
+
+void timer_write(Core* k, int n, uint32_t off, uint32_t val, int size) {
+    Timer* t = &k->timer[n];
+    if (off == 0) t->reload = (uint16_t)val;
+    uint16_t ctl;
+    if (off == 2) ctl = (uint16_t)val;
+    else if (size == 4) ctl = (uint16_t)(val >> 16);
+    else return;
     uint64_t now = time_cycles();
-    if (!(t->ctl & 0x80) && (v & 0x80)) {  /* starting */
-        t->ctl = v;
-        t->start = ((v & 4) && n > 0) ? timer_overflows(n - 1, now, NULL) : now;
+    if (!(t->ctl & 0x80) && (ctl & 0x80)) {
+        t->ctl = ctl;
+        t->start = ((ctl & 4) && n > 0) ? timer_overflows(k, n - 1, now, NULL) : now;
         t->overflows_seen = 0;
-    } else if ((t->ctl & 0x80) && !(v & 0x80)) {  /* stopping */
-        uint16_t c; timer_overflows(n, now, &c); t->latched = c; t->ctl = v;
+    } else if ((t->ctl & 0x80) && !(ctl & 0x80)) {
+        uint16_t c; timer_overflows(k, n, now, &c); t->latched = c; t->ctl = ctl;
     } else {
-        t->ctl = v;
+        t->ctl = ctl;
     }
 }
-static void timers_update(void) {
+
+static void timers_update(Core* k) {
     uint64_t now = time_cycles();
     for (int n = 0; n < 4; n++) {
-        if (!(g_timer[n].ctl & 0x80)) continue;
-        uint64_t o = timer_overflows(n, now, NULL);
-        if (o > g_timer[n].overflows_seen) {
-            g_timer[n].overflows_seen = o;
-            if (g_timer[n].ctl & 0x40) irq_raise(IRQ_TIMER0 + n);
+        if (!(k->timer[n].ctl & 0x80)) continue;
+        uint64_t o = timer_overflows(k, n, now, NULL);
+        if (o > k->timer[n].overflows_seen) {
+            k->timer[n].overflows_seen = o;
+            if (k->timer[n].ctl & 0x40) irq_raise(k, IRQ_TIMER0 + n);
         }
     }
 }
 
-/* ---------------------------------------------------------------- display timing */
-static void line_events(void) {
-    uint16_t stat = IO16(0x004);
-    uint32_t lyc = (stat >> 8) | ((stat & 0x80) << 1);
-    if (g_vcount == 192) {
-        if (stat & 0x08) irq_raise(IRQ_VBLANK);
-        dma_on_event(1);
-    }
-    if (g_vcount < 192) dma_on_event(2);
-    if ((stat & 0x20) && g_vcount == lyc) irq_raise(IRQ_VCOUNT);
+/* ---------------------------------------------------------------- DMA */
+static int dma_timing(Core* k, uint32_t ctl) {
+    if (k->id == 0) return (ctl >> 27) & 7;
+    switch ((ctl >> 28) & 3) { case 0: return DMA_IMMEDIATE; case 1: return DMA_VBLANK; case 2: return DMA_CARD; default: return 6; }
 }
 
-void time_advance_lines(Cpu* c, uint32_t lines) {
+static void dma_run(Core* k, int ch) {
+    Dma* d = &k->dma[ch];
+    const Bus* b = k->bus;
+    uint32_t ctl = d->ctl;
+    uint32_t count = ctl & (k->id == 0 ? 0x1FFFFF : 0x3FFF);
+    if (!count) count = k->id == 0 ? 0x200000 : 0x4000;
+    int word = (ctl >> 26) & 1, step = word ? 4 : 2;
+    int sctl = (ctl >> 23) & 3, dctl = (ctl >> 21) & 3;
+    uint32_t s = d->src, t = d->dst;
+    for (uint32_t i = 0; i < count; i++) {
+        if (word) b->w32(t, b->r32(s)); else b->w16(t, b->r16(s));
+        if (sctl == 0) s += step; else if (sctl == 1) s -= step;
+        if (dctl == 0 || dctl == 3) t += step; else if (dctl == 1) t -= step;
+    }
+    d->src = s;
+    uint32_t base = 0xB0 + 12 * ch;
+    if (dctl == 3) memcpy(&d->dst, &k->io[base + 4], 4); else d->dst = t;
+    if (ctl & 0x40000000) irq_raise(k, IRQ_DMA0 + ch);
+    if (!(ctl & 0x02000000) || d->pending == DMA_IMMEDIATE) {
+        ctl &= ~0x80000000u;
+        d->ctl = ctl;
+        memcpy(&k->io[base + 8], &ctl, 4);
+        d->pending = DMA_NONE;
+    }
+}
+
+void dma_write_ctl(Core* k, int ch) {
+    uint32_t base = 0xB0 + 12 * ch, ctl;
+    memcpy(&ctl, &k->io[base + 8], 4);
+    Dma* d = &k->dma[ch];
+    int was = d->ctl & 0x80000000u;
+    d->ctl = ctl;
+    if (!(ctl & 0x80000000u)) { d->pending = DMA_NONE; return; }
+    if (!was) { memcpy(&d->src, &k->io[base], 4); memcpy(&d->dst, &k->io[base + 4], 4); }
+    d->pending = dma_timing(k, ctl);
+    if (d->pending == DMA_IMMEDIATE || d->pending == DMA_GXFIFO) dma_run(k, ch);
+}
+
+void dma_on_event(Core* k, int timing) {
+    for (int ch = 0; ch < 4; ch++)
+        if (k->dma[ch].pending == timing && (k->dma[ch].ctl & 0x80000000u)) dma_run(k, ch);
+}
+
+/* ---------------------------------------------------------------- display timing */
+static void line_events(Core* k) {
+    uint16_t stat; memcpy(&stat, &k->io[0x004], 2);
+    uint32_t lyc = (stat >> 8) | ((stat & 0x80) << 1);
+    if (g_vcount == 192) {
+        if (stat & 0x08) irq_raise(k, IRQ_VBLANK);
+        dma_on_event(k, DMA_VBLANK);
+    }
+    if (k->id == 0 && g_vcount < 192) dma_on_event(k, DMA_HBLANK);
+    if ((stat & 0x20) && g_vcount == lyc) irq_raise(k, IRQ_VCOUNT);
+}
+
+void time_advance_lines(uint32_t lines) {
     while (lines--) {
         g_subline = 0;
         if (++g_vcount >= LINES_PER_FRAME) {
             g_vcount = 0; g_frame++;
             if (g_frame_limit && g_frame >= g_frame_limit) exit(0);
         }
-        line_events();
-    }
-    timers_update();
-    arm7_hle_step();
-    if (c) irq_service(c);
-}
-
-void time_run_to_vblank(Cpu* c) {
-    uint32_t lines = (192 + LINES_PER_FRAME - g_vcount) % LINES_PER_FRAME;
-    time_advance_lines(c, lines ? lines : LINES_PER_FRAME);
-}
-
-/* ---------------------------------------------------------------- IRQs */
-void irq_raise(int bit) { g_if |= 1u << bit; }
-
-/* ---------------------------------------------------------------- DMA */
-typedef struct { uint32_t src, dst, cnt; int pending_timing; } Dma;
-static Dma g_dma[4];
-
-static void dma_run(int ch) {
-    uint32_t base = 0xB0 + 12 * ch;
-    uint32_t ctl = IO32(base + 8);
-    Dma* d = &g_dma[ch];
-    uint32_t count = ctl & 0x1FFFFF;
-    if (!count) count = 0x200000;
-    int word = (ctl >> 26) & 1;
-    int step = word ? 4 : 2;
-    int sctl = (ctl >> 23) & 3, dctl = (ctl >> 21) & 3;
-    int timing = (ctl >> 27) & 7;
-    uint32_t s = d->src, t = d->dst;
-    for (uint32_t i = 0; i < count; i++) {
-        if (word) mem_write32(t, mem_read32(s)); else mem_write16(t, mem_read16(s));
-        if (sctl == 0) s += step; else if (sctl == 1) s -= step;
-        if (dctl == 0 || dctl == 3) t += step; else if (dctl == 1) t -= step;
-    }
-    d->src = s;
-    d->dst = (dctl == 3) ? IO32(base + 4) : t;
-    if (ctl & 0x40000000) irq_raise(IRQ_DMA0 + ch);
-    if (!(ctl & 0x02000000) || timing == 0) {   /* not repeating: finished */
-        ctl &= ~0x80000000u;
-        memcpy(&g_io[base + 8], &ctl, 4);
-        d->pending_timing = -1;
+        line_events(&g_c9);
+        line_events(&g_c7);
+        timers_update(&g_c9);
+        timers_update(&g_c7);
+        arm7_run();
     }
 }
 
-void dma_write_ctl(int ch) {
-    uint32_t base = 0xB0 + 12 * ch;
-    uint32_t ctl = IO32(base + 8);
-    Dma* d = &g_dma[ch];
-    if (!(ctl & 0x80000000u)) { d->pending_timing = -1; return; }
-    d->src = IO32(base);
-    d->dst = IO32(base + 4);
-    int timing = (ctl >> 27) & 7;
-    d->pending_timing = timing;
-    if (timing == 0 || timing == 7) dma_run(ch);   /* immediate; GX FIFO DMA also drains at once */
-}
-
-void dma_on_event(int timing) {
-    for (int ch = 0; ch < 4; ch++)
-        if (g_dma[ch].pending_timing == timing && (IO32(0xB8 + 12 * ch) & 0x80000000u)) dma_run(ch);
-}
-
-/* ---------------------------------------------------------------- cartridge */
-static uint8_t g_card_buf[0x4000];
-static uint32_t g_card_len, g_card_pos;
-
-void card_write_ctl(uint32_t v) {
-    memcpy(&g_io[0x1A4], &v, 4);
-    if (!(v & 0x80000000u)) return;
-    const uint8_t* cmd = &g_io[0x1A8];
-    uint32_t bs = (v >> 24) & 7;
-    uint32_t len = bs == 0 ? 0 : bs == 7 ? 4 : 0x100u << bs;
-    g_card_len = len; g_card_pos = 0;
-    if (cmd[0] == 0xB7) {
-        uint32_t addr = ((uint32_t)cmd[1] << 24) | (cmd[2] << 16) | (cmd[3] << 8) | cmd[4];
-        for (uint32_t i = 0; i < len; i++) {
-            uint32_t a = addr + i;
-            if (a < 0x8000) a = 0x8000 + (a & 0x1FF);
-            g_card_buf[i] = g_rom[a % g_rom_size];
-        }
-    } else if (cmd[0] == 0xB8) {
-        for (uint32_t i = 0; i < len; i += 4) { uint32_t id = 0x00003FC2; memcpy(&g_card_buf[i], &id, 4); }
-    } else {
-        memset(g_card_buf, 0xFF, len);
-        LOG_WARN("card: command %02x not emulated\n", cmd[0]);
+/* The ARM9 burned `cycles` (e.g. a BIOS delay loop). */
+void time_spend(uint32_t cycles) {
+    g_subline += cycles;
+    if (g_subline >= CYCLES_PER_LINE) {
+        uint32_t lines = g_subline / CYCLES_PER_LINE, rem = g_subline % CYCLES_PER_LINE;
+        time_advance_lines(lines);
+        g_subline = rem;
     }
-    if (len == 0) { v &= ~0x80000000u; memcpy(&g_io[0x1A4], &v, 4); return; }
-    v |= 0x00800000u;  /* data ready */
-    memcpy(&g_io[0x1A4], &v, 4);
-    dma_on_event(5);   /* a card DMA pulls the whole block */
 }
 
-uint32_t card_read_data(void) {
-    uint32_t v = 0xFFFFFFFF;
-    if (g_card_pos < g_card_len) {
-        memcpy(&v, &g_card_buf[g_card_pos], 4);
-        g_card_pos += 4;
-        if (g_card_pos >= g_card_len) {
-            uint32_t ctl = IO32(0x1A4) & ~0x80800000u;
-            memcpy(&g_io[0x1A4], &ctl, 4);
-            if (IO16(0x1A0) & 0x4000) irq_raise(IRQ_CARD_DONE);
-        }
+void time_poll(Core* k) {
+    static uint32_t polls9, polls7;
+    if (k->id == 1) {            /* the ARM7 waiting on something: let the ARM9 run */
+        if (++polls7 % 4 == 0) arm7_yield();
+        return;
     }
-    return v;
+    if (++polls9 % 8 == 0) { time_advance_lines(1); irq_service(&g_arm9); }
+    else g_subline += 16;
 }
 
 /* ---------------------------------------------------------------- divider / sqrt */
@@ -229,95 +202,77 @@ void math_sqrt(void) {
     memcpy(&g_io[0x2B4], &r32, 4);
 }
 
-/* ---------------------------------------------------------------- register access */
-static uint32_t g_poll_reads;
-
-static void poll_tick(void) {
-    /* A read of a status register is often a busy-wait: let time move. */
-    if (++g_poll_reads % 8 == 0) time_advance_lines(&g_arm9, 1);
-    else g_subline += 16;
+/* ---------------------------------------------------------------- ARM9 registers */
+uint32_t dispstat_read(Core* k) {
+    time_poll(k);
+    uint16_t stat; memcpy(&stat, &k->io[0x004], 2);
+    stat &= 0xFFB8;
+    uint16_t lyc = (stat >> 8) | ((stat & 0x80) << 1);
+    if (g_vcount >= 192 && g_vcount < 262) stat |= 1;
+    if (g_subline > 1600) stat |= 2;
+    if (g_vcount == lyc) stat |= 4;
+    return stat | (g_vcount << 16);
 }
 
-static uint32_t reg_read32(uint32_t off) {
-    switch (off & ~3u) {
-    case 0x004: { /* DISPSTAT + VCOUNT */
-        poll_tick();
-        uint16_t stat = IO16(0x004) & 0xFFB8;
-        uint16_t lyc = (stat >> 8) | ((stat & 0x80) << 1);
-        if (g_vcount >= 192 && g_vcount < 262) stat |= 1;
-        if (g_subline > 1600) stat |= 2;
-        if (g_vcount == lyc) stat |= 4;
-        return stat | (g_vcount << 16);
-    }
+static uint32_t reg9_read32(uint32_t off) {
+    Core* k = &g_c9;
+    switch (off) {
+    case 0x004: return dispstat_read(k);
     case 0x100: case 0x104: case 0x108: case 0x10C: {
         int n = (off - 0x100) / 4;
         g_subline += 4;
-        return timer_read(n) | ((uint32_t)g_timer[n].ctl << 16);
+        return timer_read(k, n) | ((uint32_t)k->timer[n].ctl << 16);
     }
     case 0x130: return 0x03FF | ((uint32_t)IO16(0x132) << 16);   /* no keys pressed */
-    case 0x180: return ipc_sync_read();
-    case 0x184: return ipc_fifocnt_read();
-    case 0x1A4: return IO32(0x1A4);
-    case 0x208: return g_ime;
-    case 0x210: return g_ie;
-    case 0x214: return g_if;
-    case 0x280: case 0x2B0: return IO32(off & ~3u);
-    case 0x600: return 0x04000002;  /* GXSTAT: FIFO empty, idle */
-    default: return IO32(off & ~3u);
+    case 0x180: time_poll(k); return ipc_sync_read(k);
+    case 0x184: time_poll(k); return ipc_fifocnt_read(k);
+    case 0x1A0: case 0x1A4: case 0x1A8: case 0x1AC: return card_read(k, off, 4);
+    case 0x208: return k->ime;
+    case 0x210: return k->ie;
+    case 0x214: return k->iflags;
+    case 0x600: return 0x04000002;  /* GXSTAT: FIFO empty, geometry engine idle */
+    default: return IO32(off);
     }
 }
 
 uint32_t io9_read(uint32_t a, int size) {
     if (a >= 0x04100000) {
-        if ((a & ~3u) == 0x04100000) return ipc_fifo_recv();
-        if ((a & ~3u) == 0x04100010) return card_read_data();
-        LOG_WARN("io read %08x\n", a);
+        if ((a & ~3u) == 0x04100000) return ipc_fifo_recv(&g_c9);
+        if ((a & ~3u) == 0x04100010) return card_read_data(&g_c9);
+        LOG_WARN("io9 read %08x\n", a);
         return 0;
     }
     uint32_t off = a - 0x04000000u;
-    if (off >= sizeof g_io) { LOG_WARN("io read %08x\n", a); return 0; }
-    uint32_t v = reg_read32(off);
-    v >>= (off & 3) * 8;
+    if (off >= sizeof g_io) { LOG_WARN("io9 read %08x\n", a); return 0; }
+    uint32_t v = reg9_read32(off & ~3u) >> ((off & 3) * 8);
     return size == 1 ? (v & 0xFF) : size == 2 ? (v & 0xFFFF) : v;
 }
 
-static void reg_written(uint32_t off, int size, Cpu* c) {
-    (void)size;
+void io9_write(uint32_t a, uint32_t v, int size) {
+    Core* k = &g_c9;
+    if (a >= 0x04100000) { LOG_WARN("io9 write %08x\n", a); return; }
+    uint32_t off = a - 0x04000000u;
+    if (off >= sizeof g_io) { LOG_WARN("io9 write %08x = %x\n", a, v); return; }
     uint32_t base = off & ~3u;
+    uint32_t sh = (off & 3) * 8;
+    uint32_t mask = size == 4 ? 0xFFFFFFFFu : size == 2 ? 0xFFFFu << sh : 0xFFu << sh;
+    uint32_t val32 = size == 4 ? v : (v << sh) & mask;
     switch (base) {
-    case 0x0B8: case 0x0C4: case 0x0D0: case 0x0DC: dma_write_ctl((base - 0xB8) / 12); break;
-    case 0x100: case 0x104: case 0x108: case 0x10C: {
-        int n = (base - 0x100) / 4;
-        if (off - base < 2) timer_write_reload(n, IO16(base));
-        if (off - base >= 2 || size == 4) timer_write_ctl(n, IO16(base + 2));
-        break;
+    case 0x214: k->iflags &= ~val32; return;                         /* write 1 to acknowledge */
+    case 0x208: k->ime = ((k->ime & ~mask) | (val32 & mask)) & 1; irq_service(&g_arm9); return;
+    case 0x210: k->ie = (k->ie & ~mask) | (val32 & mask); irq_service(&g_arm9); return;
+    case 0x1A0: case 0x1A4: case 0x1A8: case 0x1AC: card_write(k, off, v, size); return;
     }
-    case 0x180: ipc_sync_write(IO16(0x180)); break;
-    case 0x184: ipc_fifocnt_write(IO16(0x184)); break;
-    case 0x188: ipc_fifo_send(IO32(0x188)); break;
-    case 0x1A4: card_write_ctl(IO32(0x1A4)); break;
-    case 0x208: g_ime = IO32(0x208) & 1; irq_service(c); break;
-    case 0x210: g_ie = IO32(0x210); irq_service(c); break;
-    case 0x214: break;
+    memcpy(&g_io[off], &v, size);
+    switch (base) {
+    case 0x0B8: case 0x0C4: case 0x0D0: case 0x0DC: if ((off & 3) + size > 2) dma_write_ctl(k, (base - 0xB8) / 12); break;
+    case 0x100: case 0x104: case 0x108: case 0x10C: timer_write(k, (base - 0x100) / 4, off - base, v, size); break;
+    case 0x180: ipc_sync_write(k, IO16(0x180)); break;
+    case 0x184: ipc_fifocnt_write(k, IO16(0x184)); break;
+    case 0x188: ipc_fifo_send(k, IO32(0x188)); break;
     case 0x240: case 0x244: case 0x248: vram_remap(); break;
     case 0x280: case 0x290: case 0x294: case 0x298: case 0x29C: math_div(); break;
     case 0x2B0: case 0x2B8: case 0x2BC: math_sqrt(); break;
     default: break;
     }
-}
-
-void io9_write(uint32_t a, uint32_t v, int size) {
-    if (a >= 0x04100000) { LOG_WARN("io write %08x\n", a); return; }
-    uint32_t off = a - 0x04000000u;
-    if (off >= sizeof g_io) {
-        if (a >= 0x04000400 && a < 0x04000700) return;  /* geometry engine: later */
-        LOG_WARN("io write %08x = %x\n", a, v); return;
-    }
-    if ((off & ~3u) == 0x214) {   /* IF: write 1 to acknowledge */
-        uint32_t m = size == 4 ? v : size == 2 ? (v & 0xFFFF) << ((off & 2) * 8) : (v & 0xFF) << ((off & 3) * 8);
-        g_if &= ~m;
-        return;
-    }
-    memcpy(&g_io[off], &v, size);
-    reg_written(off, size, &g_arm9);
 }

@@ -28,6 +28,9 @@ void cpu_unhandled(Cpu* c, uint32_t a, uint32_t w) { c->fault_addr = a; fprintf(
 void cpu_exception_return(Cpu* c, uint32_t a) { (void)c; (void)a; }
 
 static int g_loaded[64];
+uint32_t g_call_budget = 1u << 30, g_loop_budget = 1u << 30;
+void recomp_budget_expired(Cpu* c) { (void)c; g_call_budget = 1u << 30; }
+void recomp_loop_expired(Cpu* c) { (void)c; g_loop_budget = 1u << 30; }
 int overlay_is_loaded(int id) { return id >= 0 && id < 64 && g_loaded[id]; }
 
 void dispatch_call(Cpu* c, uint32_t target, uint32_t from) {

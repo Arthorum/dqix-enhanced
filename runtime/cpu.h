@@ -131,13 +131,27 @@ static inline uint32_t add_q(Cpu* c, uint32_t a, uint32_t b) {
 static inline uint32_t clz32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v) : 32; }
 static inline int32_t half(uint32_t v, int top) { return top ? (int32_t)v >> 16 : (int32_t)(int16_t)v; }
 
-/* Optional function-entry tracing (build with -DRECOMP_TRACE). */
+/* Every function entry spends one unit of a call budget; when it runs out the
+ * runtime lets time pass (ARM9) or hands over to the other CPU (ARM7), so a
+ * CPU spinning on memory the other one writes still makes progress.
+ * ARM7 code renames g_call_budget to g_call_budget7. Build with
+ * -DRECOMP_TRACE to also record the last functions entered. */
+extern uint32_t g_call_budget;
+void recomp_budget_expired(Cpu* c);
 #ifdef RECOMP_TRACE
 void recomp_trace_enter(uint32_t addr);
-#define RECOMP_ENTER(a) recomp_trace_enter(a)
+#define RECOMP_TRACE_HOOK(a) recomp_trace_enter(a)
 #else
-#define RECOMP_ENTER(a) ((void)0)
+#define RECOMP_TRACE_HOOK(a) ((void)0)
 #endif
+#define RECOMP_ENTER(a) do { if (__builtin_expect(--g_call_budget == 0, 0)) recomp_budget_expired(c); RECOMP_TRACE_HOOK(a); } while (0)
+
+/* Every backward branch (loop iteration) spends from a loop budget: a CPU
+ * busy-waiting on a flag that an interrupt or the other CPU sets still sees
+ * time pass, interrupts arrive and the other CPU run. */
+extern uint32_t g_loop_budget;
+void recomp_loop_expired(Cpu* c);
+#define RECOMP_LOOP() do { if (__builtin_expect(--g_loop_budget == 0, 0)) recomp_loop_expired(c); } while (0)
 
 #define COND_EQ (c->z)
 #define COND_NE (!c->z)

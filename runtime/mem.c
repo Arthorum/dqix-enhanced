@@ -65,6 +65,16 @@ void vram_remap(void) {
     }
 }
 
+/* ARM7 view: banks C and D when assigned to the ARM7 (MST=2) at 0x06000000 + 0x20000*OFS. */
+uint8_t* vram7_ptr(uint32_t a) {
+    uint32_t o = (a - 0x06000000u) & 0x3FFFF;
+    for (int b = 2; b <= 3; b++) {
+        uint8_t cnt = g_io[0x240 + b];
+        if ((cnt & 0x87) == 0x82 && ((cnt >> 3) & 1) == (o >> 17)) return &g_vram[bank_off[b] + (o & 0x1FFFF)];
+    }
+    return NULL;
+}
+
 uint8_t* vram_ptr(uint32_t a) {
     uint32_t idx = ((a & 0x00FFFFFFu) % 0x00A00000u) / 0x4000u;
     uint8_t* p = vram_page[idx];
@@ -81,7 +91,13 @@ static inline uint8_t* resolve(uint32_t a, int write) {
     case 0x02:
         if (write && a >= g_overlay_area_start && a < g_overlay_area_end) g_overlay_gen++;
         return &g_main_ram[a & (MAIN_RAM_SIZE - 1)];
-    case 0x03: return &g_swram[a & (SWRAM_SIZE - 1)];
+    case 0x03:                       /* shared WRAM, ARM9's share per WRAMCNT */
+        switch (g_io[0x247] & 3) {
+        case 0: return &g_swram[a & (SWRAM_SIZE - 1)];
+        case 1: return &g_swram[0x4000 + (a & 0x3FFF)];
+        case 2: return &g_swram[a & 0x3FFF];
+        default: return NULL;
+        }
     case 0x05: return &g_palette[a & 0x7FF];
     case 0x06: return vram_ptr(a);
     case 0x07: return &g_oam[a & 0x7FF];

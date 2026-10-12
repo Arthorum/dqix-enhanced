@@ -1,4 +1,4 @@
-/* DQIX PC runtime: shared state for the emulated DS hardware (ARM9 side). */
+/* DQIX PC runtime: shared state for the emulated DS hardware (both CPUs). */
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -23,75 +23,155 @@ extern size_t g_rom_size;
 #define ITCM_SIZE     0x8000u
 #define DTCM_SIZE     0x4000u
 #define SWRAM_SIZE    0x8000u
+#define WRAM7_SIZE    0x10000u
 extern uint8_t g_main_ram[MAIN_RAM_SIZE];
 extern uint8_t g_itcm[ITCM_SIZE];
 extern uint8_t g_dtcm[DTCM_SIZE];
-extern uint8_t g_swram[SWRAM_SIZE];
+extern uint8_t g_swram[SWRAM_SIZE];      /* shared WRAM, split by WRAMCNT */
+extern uint8_t g_wram7[WRAM7_SIZE];      /* ARM7-only WRAM */
 extern uint8_t g_palette[0x800];
 extern uint8_t g_oam[0x800];
 extern uint8_t g_vram[0xA4000];          /* banks A..I back to back */
 extern uint32_t g_dtcm_base;
 extern int g_itcm_enabled, g_dtcm_enabled;
 void vram_remap(void);
-uint8_t* vram_ptr(uint32_t addr);        /* NULL when unmapped */
+uint8_t* vram_ptr(uint32_t addr);        /* ARM9 view; NULL when unmapped */
+uint8_t* vram7_ptr(uint32_t addr);       /* ARM7 view (banks C/D) */
 /* Writes into the overlay area bump this so overlay detection re-checks. */
 extern uint32_t g_overlay_area_start, g_overlay_area_end, g_overlay_gen;
+
+/* ARM7 memory (mem7.c); the ARM9's mem_* functions are declared in cpu.h */
+uint8_t  mem7_read8(uint32_t a);
+uint16_t mem7_read16(uint32_t a);
+uint32_t mem7_read32(uint32_t a);
+void     mem7_write8(uint32_t a, uint8_t v);
+void     mem7_write16(uint32_t a, uint16_t v);
+void     mem7_write32(uint32_t a, uint32_t v);
+
+/* A CPU's view of memory plus its function dispatcher. */
+typedef struct Bus {
+    uint8_t  (*r8)(uint32_t);
+    uint16_t (*r16)(uint32_t);
+    uint32_t (*r32)(uint32_t);
+    void (*w8)(uint32_t, uint8_t);
+    void (*w16)(uint32_t, uint16_t);
+    void (*w32)(uint32_t, uint32_t);
+    void (*call)(Cpu*, uint32_t, uint32_t);
+} Bus;
 
 /* ---- I/O ---- */
 uint32_t io9_read(uint32_t addr, int size);
 void     io9_write(uint32_t addr, uint32_t val, int size);
-extern uint8_t g_io[0x2000];             /* backing store for 0x04000000-0x04001FFF */
+uint32_t io7_read(uint32_t addr, int size);
+void     io7_write(uint32_t addr, uint32_t val, int size);
+extern uint8_t g_io[0x2000];             /* ARM9 registers 0x04000000-0x04001FFF (also card regs) */
+extern uint8_t g_io7[0x1000];            /* ARM7 registers 0x04000000-0x04000FFF */
 static inline uint32_t IO32(uint32_t off) { uint32_t v; memcpy(&v, &g_io[off], 4); return v; }
 static inline uint16_t IO16(uint32_t off) { uint16_t v; memcpy(&v, &g_io[off], 2); return v; }
+static inline uint32_t IO7_32(uint32_t off) { uint32_t v; memcpy(&v, &g_io7[off], 4); return v; }
+static inline uint16_t IO7_16(uint32_t off) { uint16_t v; memcpy(&v, &g_io7[off], 2); return v; }
+
+/* ---- per-CPU state ---- */
+enum {
+    IRQ_VBLANK = 0, IRQ_HBLANK = 1, IRQ_VCOUNT = 2, IRQ_TIMER0 = 3, IRQ_RTC = 7, IRQ_DMA0 = 8, IRQ_KEYPAD = 12,
+    IRQ_IPCSYNC = 16, IRQ_IPC_SEND_EMPTY = 17, IRQ_IPC_RECV_NOT_EMPTY = 18,
+    IRQ_CARD_DONE = 19, IRQ_GXFIFO = 21, IRQ_SPI = 23, IRQ_WIFI = 24,
+};
+enum { DMA_IMMEDIATE = 0, DMA_VBLANK = 1, DMA_HBLANK = 2, DMA_CARD = 5, DMA_GXFIFO = 7, DMA_NONE = -1 };
+
+typedef struct Timer { uint16_t reload, ctl; uint64_t start; uint64_t overflows_seen; uint16_t latched; } Timer;
+typedef struct Dma { uint32_t src, dst, ctl; int pending; } Dma;
+struct ThreadSys;
+
+typedef struct Core {
+    int id;                      /* 0 = ARM9, 1 = ARM7 */
+    const char* name;
+    Cpu* cpu;
+    const Bus* bus;
+    uint32_t ime, ie, iflags;
+    int irq_depth;
+    Timer timer[4];
+    Dma dma[4];
+    uint8_t* io;                 /* register backing store */
+    struct ThreadSys* threads;
+    uint32_t tick;               /* function-call budget for forward progress */
+} Core;
+extern Core g_c9, g_c7;
+extern Cpu g_arm9, g_arm7;
+static inline Core* core_of(Cpu* c) { return c == &g_arm7 ? &g_c7 : &g_c9; }
+
+/* interrupt vector / IntrWait flag locations, as the BIOS uses them */
+uint32_t core_irq_handler_slot(Core* k);
+uint32_t core_irq_check_slot(Core* k);
 
 /* ---- interrupts / timing ---- */
-enum {
-    IRQ_VBLANK = 0, IRQ_HBLANK = 1, IRQ_VCOUNT = 2, IRQ_TIMER0 = 3, IRQ_DMA0 = 8, IRQ_KEYPAD = 12,
-    IRQ_IPCSYNC = 16, IRQ_IPC_SEND_EMPTY = 17, IRQ_IPC_RECV_NOT_EMPTY = 18,
-    IRQ_CARD_DONE = 19, IRQ_GXFIFO = 21,
-};
-extern uint32_t g_ime, g_ie, g_if;
 extern uint64_t g_frame;                 /* frames since boot */
 extern uint32_t g_vcount;                /* current scanline 0..262 */
 extern uint64_t g_frame_limit;           /* stop after this many frames (0 = never) */
-void irq_raise(int bit);
+void irq_raise(Core* k, int bit);
 void irq_service(Cpu* c);                /* deliver pending IRQs if enabled */
-void time_advance_lines(Cpu* c, uint32_t lines);
-void time_run_to_vblank(Cpu* c);
-uint64_t time_cycles(void);              /* ARM9 bus cycles (33.5 MHz) since boot */
-uint16_t timer_read(int n);
-void timer_write_ctl(int n, uint16_t v);
-void timer_write_reload(int n, uint16_t v);
+void time_advance_lines(uint32_t lines);
+void time_poll(Core* k);                 /* a status-register read: let time pass a little */
+void time_spend(uint32_t cycles);        /* the ARM9 burned this many cycles */
+uint64_t time_cycles(void);              /* 33.5 MHz bus cycles since boot */
+uint16_t timer_read(Core* k, int n);
+void timer_write(Core* k, int n, uint32_t off_in_reg, uint32_t val, int size);
 
 /* ---- DMA, card, math ---- */
-void dma_write_ctl(int ch);
-void dma_on_event(int timing);           /* 1=vblank 2=hblank 5=card */
-void card_write_ctl(uint32_t v);
-uint32_t card_read_data(void);
+void dma_write_ctl(Core* k, int ch);
+void dma_on_event(Core* k, int timing);
+uint32_t card_read(Core* k, uint32_t off, int size);       /* 0x1A0-0x1AF */
+void card_write(Core* k, uint32_t off, uint32_t v, int size);
+uint32_t card_read_data(Core* k);
+void backup_init(const char* save_path);
+void backup_flush(void);
 void math_div(void);
 void math_sqrt(void);
 
-/* ---- IPC with the ARM7 ---- */
-void     ipc_sync_write(uint16_t v);
-uint16_t ipc_sync_read(void);
-void     ipc_fifocnt_write(uint16_t v);
-uint16_t ipc_fifocnt_read(void);
-void     ipc_fifo_send(uint32_t v);
-uint32_t ipc_fifo_recv(void);
-void     arm7_hle_init(void);
-void     arm7_hle_step(void);            /* let the ARM7 side react */
+/* ---- IPC ---- */
+uint16_t ipc_sync_read(Core* k);
+void     ipc_sync_write(Core* k, uint16_t v);
+uint16_t ipc_fifocnt_read(Core* k);
+void     ipc_fifocnt_write(Core* k, uint16_t v);
+void     ipc_fifo_send(Core* k, uint32_t v);
+uint32_t ipc_fifo_recv(Core* k);
+
+/* ---- the ARM7 as a second CPU ---- */
+void arm7_boot(void);
+void arm7_run(void);                     /* ARM9 side: let the ARM7 run until it waits */
+void arm7_yield(void);                   /* ARM7 side: give control back to the ARM9 */
+int  arm7_is_running(void);
 
 /* ---- CPU helpers ---- */
-extern Cpu g_arm9;
 int  cpu_mode_index(uint32_t mode);
 void cpu_set_mode(Cpu* c, uint32_t mode);
 
 /* ---- dispatch / overlays / tracing ---- */
 void dispatch_init(void);
+void dispatch7_call(Cpu* c, uint32_t target, uint32_t from);
 const char* recomp_func_name(uint32_t addr);
+const char* recomp7_func_name(uint32_t addr);
 void overlays_init(const char* extract_dir);
 void trace_dump(FILE* f, int n);
 
-/* ---- game threads ---- */
+/* ---- game threads (both CPUs) ---- */
+void threads_init(void);
 void threads_after_irq(Cpu* c);
+void* threads_current_coro(Core* k);
+void threads_start_arm7(uint32_t entry);
 extern unsigned g_thread_switches;
+
+/* ---- BIOS ---- */
+void bios7_swi(Cpu* c, uint32_t n);
+void cpu7_unhandled(Cpu* c, uint32_t addr, uint32_t insn);
+void bios_intr_wait(Core* k, int discard, uint32_t mask);
+void bios_halt(Core* k);
+
+/* ---- devices on the ARM7 side ---- */
+void spi_write_cnt(uint16_t v);
+uint16_t spi_read_data(void);
+void spi_write_data(uint16_t v);
+void firmware_init(void);
+uint8_t rtc_io(uint8_t v, int write);
+void rtc_write_reg(uint16_t v);
+uint16_t rtc_read_reg(void);

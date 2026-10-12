@@ -26,7 +26,7 @@ SECTIONS {
 }
 """
 
-HARNESS = r"""
+HARNESS_HEAD = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include "cpu.h"
@@ -56,19 +56,24 @@ void cpu_breakpoint(Cpu* c, uint32_t a, uint32_t i) { (void)c; fprintf(stderr, "
 void cpu_unhandled(Cpu* c, uint32_t a, uint32_t w) { (void)c; fprintf(stderr, "unhandled %08x %08x\n", a, w); exit(4); }
 void cpu_exception_return(Cpu* c, uint32_t a) { (void)c; (void)a; exit(4); }
 int overlay_is_loaded(int id) { (void)id; return 0; }
+uint32_t g_call_budget = 1u << 30, g_loop_budget = 1u << 30;
+void recomp_budget_expired(Cpu* c) { (void)c; g_call_budget = 1u << 30; }
+void recomp_loop_expired(Cpu* c) { (void)c; g_loop_budget = 1u << 30; }
 void dispatch_call(Cpu* c, uint32_t t, uint32_t from) {
     for (unsigned i = 0; i < g_recomp_func_count; i++)
         if ((g_recomp_funcs[i].addr & ~1u) == (t & ~1u)) { g_recomp_funcs[i].fn(c); return; }
     fprintf(stderr, "dispatch miss %08x from %08x\n", t, from); exit(5);
 }
 
-typedef uint32_t (*native_fn)(uint32_t, uint32_t, uint32_t, uint32_t);
+"""
+HARNESS_TESTS = r"""typedef uint32_t (*native_fn)(uint32_t, uint32_t, uint32_t, uint32_t);
 @DECLS@
 static const struct { const char* name; native_fn native; void (*recomp)(Cpu*); } tests[] = {
 @TESTS@
 };
 
-static uint64_t rng = 0x9E3779B97F4A7C15ull;
+"""
+HARNESS_RNG = r"""static uint64_t rng = 0x9E3779B97F4A7C15ull;
 static uint32_t rnd(void) {
     rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
     static const uint32_t edge[] = { 0, 1, 2, 31, 32, 33, 0x7fffffff, 0x80000000u, 0xffffffffu, 0xfffffffeu, 0x8000, 0xffff, 0x10000 };
@@ -78,7 +83,8 @@ static uint32_t rnd(void) {
     return (uint32_t)(rng >> 16);
 }
 
-int main(int argc, char** argv) {
+"""
+HARNESS_MAIN = r"""int main(int argc, char** argv) {
     FILE* f = fopen(argv[1], "rb");
     fread(ram, 1, RAM_SIZE, f); fclose(f);
     int iters = argc > 2 ? atoi(argv[2]) : 20000;
@@ -97,6 +103,51 @@ int main(int argc, char** argv) {
                 failed++;
                 if (bad++ < 3) printf("FAIL %s(%08x,%08x,%08x,%08x): recomp %08x native %08x sp %08x\n",
                                       tests[t].name, a, b, cc, d, c.r[0], want, c.r[13]);
+            }
+        }
+        printf("%-20s %s\n", tests[t].name, bad ? "FAIL" : "ok");
+    }
+    printf("%ld checks, %ld failures\n", checked, failed);
+    return failed != 0;
+}
+"""
+HARNESS = HARNESS_HEAD + HARNESS_TESTS + HARNESS_RNG + HARNESS_MAIN
+
+
+
+INTERP_SHIM = r"""
+const RecompFunc g_recomp_funcs[1];
+const unsigned g_recomp_func_count = 0;
+Cpu g_arm9, g_arm7;
+static const Bus g_bus = { mem_read8, mem_read16, mem_read32, mem_write8, mem_write16, mem_write32, 0 };
+Core g_c9 = { 0, "ARM9", &g_arm9, &g_bus };
+Core g_c7 = { 1, "ARM7", &g_arm7, &g_bus };
+int g_log_level = 0;
+void rt_log(int l, const char* f, ...) { (void)l; (void)f; }
+_Noreturn void rt_fatal(const char* f, ...) { fprintf(stderr, "fatal: %s\n", f); exit(6); }
+const RecompFunc* dispatch_find(Core* k, uint32_t a) { (void)k; (void)a; return NULL; }
+void bios7_swi(Cpu* c, uint32_t n) { bios_swi(c, n); }
+"""
+INTERP_MAIN = r"""
+void interp_call(Core* k, uint32_t target);
+int main(int argc, char** argv) {
+    FILE* f = fopen(argv[1], "rb");
+    fread(ram, 1, RAM_SIZE, f); fclose(f);
+    int iters = argc > 2 ? atoi(argv[2]) : 5000;
+    long checked = 0, failed = 0;
+    for (unsigned t = 0; t < sizeof tests / sizeof tests[0]; t++) {
+        int bad = 0;
+        for (int n = 0; n < iters; n++) {
+            uint32_t a = rnd(), b = rnd(), cc = rnd(), d = rnd();
+            memset(&g_arm9, 0, sizeof g_arm9);
+            g_arm9.r[0] = a; g_arm9.r[1] = b; g_arm9.r[2] = cc; g_arm9.r[3] = d;
+            g_arm9.r[13] = 0x02780000u; g_arm9.r[14] = 0xFFFFFFF0u;
+            interp_call(&g_c9, tests[t].addr);
+            uint32_t want = tests[t].native(a, b, cc, d);
+            checked++;
+            if (g_arm9.r[0] != want || g_arm9.r[13] != 0x02780000u) {
+                failed++;
+                if (bad++ < 3) printf("FAIL %s(%08x,%08x,%08x,%08x): interp %08x native %08x\n", tests[t].name, a, b, cc, d, g_arm9.r[0], want);
             }
         }
         printf("%-20s %s\n", tests[t].name, bad ? "FAIL" : "ok");
@@ -165,6 +216,21 @@ def run_mode(mode, iters):
     sh("gcc", "-O1", "-w", "-o", f"{d}/test", f"-I{rt}", f"-I{gen}", f"{gen}/harness.c", f"{gen}/code.c",
        f"{gen}/table.c", cases)
     r = subprocess.run([f"{d}/test", f"{d}/image.bin", str(iters)], capture_output=True, text=True)
+    # Same tests through the interpreter (runtime/interp.c), all code interpreted
+    rows_i = "\n".join(f'  {{ "{t}", {t}, {names[t] | (1 if mode == "thumb" else 0)}u }},' for t in tests)
+    head = (HARNESS_HEAD.replace('#include "funcs.h"', '#include "nds.h"')
+            .replace("void dispatch_call(Cpu* c, uint32_t t, uint32_t from) {", "void dispatch_call_unused(Cpu* c, uint32_t t, uint32_t from) {"))
+    hi = (head + INTERP_SHIM + "typedef uint32_t (*native_fn)(uint32_t, uint32_t, uint32_t, uint32_t);\n" + decls
+          + "\nstatic const struct { const char* name; native_fn native; uint32_t addr; } tests[] = {\n" + rows_i + "\n};\n"
+          + HARNESS_RNG + INTERP_MAIN)
+    open(f"{gen}/harness_interp.c", "w").write(hi)
+    sh("gcc", "-O1", "-w", "-o", f"{d}/test_interp", f"-I{rt}", f"-I{gen}", f"{gen}/harness_interp.c",
+       os.path.join(rt, "interp.c"), cases, "-lm")
+    r2 = subprocess.run([f"{d}/test_interp", f"{d}/image.bin", str(iters // 4)], capture_output=True, text=True)
+    print(f"--- {mode} through the interpreter")
+    print(r2.stdout + r2.stderr)
+    if r2.returncode:
+        return False
     print(f"=== {mode}: {len(funcs)} functions recompiled ({rc.stats['insns']} instructions)")
     print(r.stdout + r.stderr)
     return r.returncode == 0

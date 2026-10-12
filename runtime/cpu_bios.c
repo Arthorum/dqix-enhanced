@@ -1,11 +1,19 @@
-/* CPU modes, interrupts, CP15 and the DS BIOS (high-level implementation). */
+/* CPU modes, interrupts, CP15 and the DS BIOS (high-level, both CPUs). */
+#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
 #include "dispatch.h"
 
-Cpu g_arm9;
+Cpu g_arm9, g_arm7;
+static const Bus g_bus9 = { mem_read8, mem_read16, mem_read32, mem_write8, mem_write16, mem_write32, dispatch_call };
+static const Bus g_bus7 = { mem7_read8, mem7_read16, mem7_read32, mem7_write8, mem7_write16, mem7_write32, dispatch7_call };
+Core g_c9 = { 0, "ARM9", &g_arm9, &g_bus9, 0, 0, 0, 0, {{0}}, {{0}}, g_io, NULL, 0 };
+Core g_c7 = { 1, "ARM7", &g_arm7, &g_bus7, 0, 0, 0, 0, {{0}}, {{0}}, g_io7, NULL, 0 };
+
+uint32_t core_irq_handler_slot(Core* k) { return k->id == 0 ? g_dtcm_base + 0x3FFC : 0x0380FFFC; }
+uint32_t core_irq_check_slot(Core* k)   { return k->id == 0 ? g_dtcm_base + 0x3FF8 : 0x0380FFF8; }
 
 /* ---------------------------------------------------------------- modes */
 int cpu_mode_index(uint32_t mode) {
@@ -48,40 +56,40 @@ void cpu_exception_return(Cpu* c, uint32_t addr) {
     cpu_write_cpsr_ctl(c, s, 0x07FFFFFF);
 }
 
-/* Call a game function with up to 4 arguments; returns r0. Other registers preserved. */
-static uint32_t call_game(Cpu* c, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+/* Call a game function with up to 4 arguments; returns r0, other registers preserved. */
+static uint32_t call_game(Core* k, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    Cpu* c = k->cpu;
     uint32_t save[16]; memcpy(save, c->r, sizeof save);
     c->r[0] = a0; c->r[1] = a1; c->r[2] = a2; c->r[3] = a3;
     c->r[14] = 0xFFFF0000u;
-    dispatch_call(c, fn, 0xFFFF0000u);
+    k->bus->call(c, fn, 0xFFFF0000u);
     uint32_t r = c->r[0];
     memcpy(c->r, save, sizeof save);
     return r;
 }
 
 /* ---------------------------------------------------------------- IRQs */
-static int g_irq_depth;
-
 void irq_service(Cpu* c) {
-    if (!c || c != &g_arm9) return;
-    if (!g_ime || (c->cpsr_ctl & 0x80) || !(g_ie & g_if)) return;
-    if (g_irq_depth > 8) return;
-    g_irq_depth++;
+    if (!c) return;
+    Core* k = core_of(c);
+    if (!k->ime || (c->cpsr_ctl & 0x80) || !(k->ie & k->iflags)) return;
+    if ((k->id == 1) != (arm7_is_running() != 0)) return;   /* only on the CPU that is running */
+    if (k->irq_depth > 8) return;
+    k->irq_depth++;
+    const Bus* b = k->bus;
     Cpu save = *c;
     uint32_t old_cpsr = CPSR_GET(c);
-    /* enter IRQ mode with IRQs masked, as the CPU does */
-    cpu_set_mode(c, 0x12);
+    cpu_set_mode(c, 0x12);                            /* IRQ mode, IRQs masked */
     c->cpsr_ctl |= 0x80;
     c->spsr[2] = old_cpsr;
-    /* BIOS IRQ vector: push r0-r3, r12, lr; r0 = DTCM end; call [DTCM+0x3FFC] */
+    /* BIOS IRQ vector: push r0-r3, r12, lr; call the handler stored by the game */
     uint32_t sp = c->r[13] - 24;
-    mem_write32(sp, save.r[0]); mem_write32(sp + 4, save.r[1]); mem_write32(sp + 8, save.r[2]);
-    mem_write32(sp + 12, save.r[3]); mem_write32(sp + 16, save.r[12]); mem_write32(sp + 20, save.r[14]);
+    b->w32(sp, save.r[0]); b->w32(sp + 4, save.r[1]); b->w32(sp + 8, save.r[2]);
+    b->w32(sp + 12, save.r[3]); b->w32(sp + 16, save.r[12]); b->w32(sp + 20, save.r[14]);
     c->r[13] = sp;
-    c->r[0] = g_dtcm_base + DTCM_SIZE;
+    c->r[0] = k->id == 0 ? g_dtcm_base + DTCM_SIZE : 0x04000000;
     c->r[14] = 0xFFFF0290u;
-    uint32_t handler = mem_read32(g_dtcm_base + 0x3FFC);
-    dispatch_call(c, handler, 0xFFFF0018u);
+    b->call(c, b->r32(core_irq_handler_slot(k)), 0xFFFF0018u);
     /* return: restore the interrupted state (IRQ stack is balanced again) */
     c->r[13] += 24;
     cpu_set_mode(c, save.cpsr_ctl & 0x1F);
@@ -89,22 +97,47 @@ void irq_service(Cpu* c) {
     memcpy(b13, c->bank_r13, sizeof b13); memcpy(b14, c->bank_r14, sizeof b14); memcpy(sp6, c->spsr, sizeof sp6);
     *c = save;
     memcpy(c->bank_r13, b13, sizeof b13); memcpy(c->bank_r14, b14, sizeof b14); memcpy(c->spsr, sp6, sizeof sp6);
-    g_irq_depth--;
+    k->irq_depth--;
     threads_after_irq(c);
 }
 
-/* ---------------------------------------------------------------- CP15 */
-static uint32_t g_cp15_ctl = 0x00052078, g_cp15_dtcm = 0x0080000A, g_cp15_itcm = 0x0000000C;
-
-static void wait_for_interrupt(Cpu* c) {
-    uint32_t saved_ime = g_ime;
-    for (int i = 0; i < 263 * 60 && !(g_ie & g_if); i++) time_advance_lines(NULL, 1);
-    g_ime = saved_ime;
-    irq_service(c);
+/* ---------------------------------------------------------------- waiting */
+/* Advance until something happens. The ARM9 drives time; the ARM7 hands
+ * control back to the ARM9 and is resumed once time has moved on. */
+static void wait_step(Core* k) {
+    if (k->id == 0) time_advance_lines(1);
+    else arm7_yield();
 }
 
+void bios_halt(Core* k) {
+    for (int i = 0; i < 263 * 60 && !(k->ie & k->iflags); i++) wait_step(k);
+    uint32_t ime = k->ime;
+    k->ime = 1;
+    irq_service(k->cpu);
+    k->ime = ime;
+}
+
+void bios_intr_wait(Core* k, int discard, uint32_t mask) {
+    const Bus* b = k->bus;
+    uint32_t flags_addr = core_irq_check_slot(k);
+    if (discard) b->w32(flags_addr, b->r32(flags_addr) & ~mask);
+    uint32_t saved_ime = k->ime;
+    k->ime = 1;   /* the BIOS enables IME while waiting */
+    for (int i = 0; ; i++) {
+        irq_service(k->cpu);
+        uint32_t f = b->r32(flags_addr);
+        if (f & mask) { b->w32(flags_addr, f & ~mask); break; }
+        if (i == 263 * 120) LOG_WARN("%s IntrWait(mask %08x): nothing for 2 seconds (IE %08x IF %08x)\n", k->name, mask, k->ie, k->iflags);
+        wait_step(k);
+    }
+    k->ime = saved_ime;
+}
+
+/* ---------------------------------------------------------------- CP15 (ARM9 only) */
+static uint32_t g_cp15_ctl = 0x00052078, g_cp15_dtcm = 0x0080000A, g_cp15_itcm = 0x0000000C;
+
 void cp15_write(Cpu* c, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op2, uint32_t v) {
-    (void)op1;
+    (void)op1; (void)c;
     if (crn == 1 && crm == 0 && op2 == 0) {
         g_cp15_ctl = v;
         g_dtcm_enabled = (v >> 16) & 1;
@@ -115,9 +148,8 @@ void cp15_write(Cpu* c, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op2, 
     } else if (crn == 9 && crm == 1 && op2 == 1) {
         g_cp15_itcm = v;
     } else if (crn == 7 && ((crm == 0 && op2 == 4) || (crm == 8 && op2 == 2))) {
-        wait_for_interrupt(c);
+        bios_halt(&g_c9);
     }
-    /* caches, write buffer, protection regions: nothing to do */
 }
 
 uint32_t cp15_read(Cpu* c, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op2) {
@@ -130,54 +162,38 @@ uint32_t cp15_read(Cpu* c, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op
     return 0;
 }
 
-/* ---------------------------------------------------------------- BIOS */
-static void intr_wait(Cpu* c, int discard, uint32_t mask) {
-    uint32_t flags_addr = g_dtcm_base + 0x3FF8;
-    if (discard) mem_write32(flags_addr, mem_read32(flags_addr) & ~mask);
-    uint32_t saved_ime = g_ime;
-    g_ime = 1;   /* the BIOS enables IME while waiting */
-    for (int i = 0; i < 263 * 120; i++) {
-        irq_service(c);
-        uint32_t f = mem_read32(flags_addr);
-        if (f & mask) { mem_write32(flags_addr, f & ~mask); g_ime = saved_ime; return; }
-        time_advance_lines(c, 1);
-    }
-    g_ime = saved_ime;
-    LOG_WARN("IntrWait(mask %08x): nothing after 2 seconds (IE %08x IF %08x IME %u)\n", mask, g_ie, g_if, g_ime);
-}
-
-static uint16_t crc16(uint16_t crc, uint32_t p, uint32_t len) {
+/* ---------------------------------------------------------------- BIOS functions */
+static uint16_t crc16(const Bus* b, uint16_t crc, uint32_t p, uint32_t len) {
     static const uint16_t val[8] = { 0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001 };
     for (uint32_t i = 0; i < len; i++) {
-        crc ^= mem_read8(p + i);
+        crc ^= b->r8(p + i);
         for (int j = 0; j < 8; j++) { int carry = crc & 1; crc >>= 1; if (carry) crc ^= (uint16_t)(val[j] << (7 - j)); }
     }
     return crc;
 }
 
-typedef struct { Cpu* c; uint32_t src; uint32_t cb; int has_cb; } Reader;
+typedef struct { Core* k; uint32_t src, cb; int has_cb; } Reader;
 static uint8_t rd8(Reader* r) {
-    if (r->has_cb) return (uint8_t)call_game(r->c, mem_read32(r->cb + 8), r->src++, 0, 0, 0);
-    return mem_read8(r->src++);
+    if (r->has_cb) return (uint8_t)call_game(r->k, r->k->bus->r32(r->cb + 8), r->src++, 0, 0, 0);
+    return r->k->bus->r8(r->src++);
 }
 static uint32_t rd_header(Reader* r, uint32_t dst, uint32_t param) {
-    if (r->has_cb) {
-        uint32_t h = call_game(r->c, mem_read32(r->cb), r->src, dst, param, 0);
-        r->src += 4;
-        return h;
-    }
-    uint32_t h = mem_read32(r->src); r->src += 4; return h;
+    if (r->has_cb) { uint32_t h = call_game(r->k, r->k->bus->r32(r->cb), r->src, dst, param, 0); r->src += 4; return h; }
+    uint32_t h = r->k->bus->r32(r->src); r->src += 4; return h;
 }
 
-static void lz77(Cpu* c, int cb, int write16) {
-    Reader r = { c, c->r[0], c->r[3], cb };
+static void put_byte(const Bus* b, uint32_t dst, uint32_t* out, uint8_t v, uint8_t* pending, int write16) {
+    if (write16) { if (*out & 1) b->w16(dst + *out - 1, (uint16_t)(*pending | (v << 8))); else *pending = v; }
+    else b->w8(dst + *out, v);
+    (*out)++;
+}
+
+static void lz77(Core* k, int cb, int write16) {
+    Cpu* c = k->cpu; const Bus* b = k->bus;
+    Reader r = { k, c->r[0], c->r[3], cb };
     uint32_t dst = c->r[1];
-    uint32_t hdr = rd_header(&r, dst, c->r[2]);
-    uint32_t len = hdr >> 8, out = 0;
-    uint16_t pending = 0;
-    #define PUT(b) do { uint8_t _b = (b); \
-        if (write16) { if (out & 1) mem_write16(dst + out - 1, pending | (_b << 8)); else pending = _b; } \
-        else mem_write8(dst + out, _b); out++; } while (0)
+    uint32_t len = rd_header(&r, dst, c->r[2]) >> 8, out = 0;
+    uint8_t pending = 0;
     static uint8_t window[0x10000];
     while (out < len) {
         uint8_t flags = rd8(&r);
@@ -185,22 +201,24 @@ static void lz77(Cpu* c, int cb, int write16) {
             if (flags & 0x80) {
                 uint8_t b1 = rd8(&r), b2 = rd8(&r);
                 uint32_t n = (b1 >> 4) + 3, disp = (((b1 & 15) << 8) | b2) + 1;
-                for (uint32_t k = 0; k < n && out < len; k++) {
+                for (uint32_t j = 0; j < n && out < len; j++) {
                     uint8_t v = window[(out - disp) & 0xFFFF];
-                    window[out & 0xFFFF] = v; PUT(v);
+                    window[out & 0xFFFF] = v;
+                    put_byte(b, dst, &out, v, &pending, write16);
                 }
             } else {
-                uint8_t v = rd8(&r); window[out & 0xFFFF] = v; PUT(v);
+                uint8_t v = rd8(&r); window[out & 0xFFFF] = v;
+                put_byte(b, dst, &out, v, &pending, write16);
             }
         }
     }
-    if (write16 && (out & 1)) mem_write16(dst + out - 1, pending);
-    if (cb && mem_read32(c->r[3] + 4)) call_game(c, mem_read32(c->r[3] + 4), 0, 0, 0, 0);
-    #undef PUT
+    if (write16 && (out & 1)) b->w16(dst + out - 1, pending);
+    if (cb && b->r32(c->r[3] + 4)) call_game(k, b->r32(c->r[3] + 4), 0, 0, 0, 0);
 }
 
-static void rle(Cpu* c, int cb, int write16) {
-    Reader r = { c, c->r[0], c->r[3], cb };
+static void rle(Core* k, int cb, int write16) {
+    Cpu* c = k->cpu; const Bus* b = k->bus;
+    Reader r = { k, c->r[0], c->r[3], cb };
     uint32_t dst = c->r[1];
     uint32_t len = rd_header(&r, dst, c->r[2]) >> 8, out = 0;
     uint8_t pending = 0;
@@ -208,85 +226,125 @@ static void rle(Cpu* c, int cb, int write16) {
         uint8_t f = rd8(&r);
         uint32_t n = (f & 0x80) ? (f & 0x7F) + 3 : (f & 0x7F) + 1;
         uint8_t v = (f & 0x80) ? rd8(&r) : 0;
-        for (uint32_t k = 0; k < n && out < len; k++) {
-            uint8_t b = (f & 0x80) ? v : rd8(&r);
-            if (write16) { if (out & 1) mem_write16(dst + out - 1, pending | (b << 8)); else pending = b; }
-            else mem_write8(dst + out, b);
-            out++;
-        }
+        for (uint32_t j = 0; j < n && out < len; j++)
+            put_byte(b, dst, &out, (f & 0x80) ? v : rd8(&r), &pending, write16);
     }
-    if (write16 && (out & 1)) mem_write16(dst + out - 1, pending);
+    if (write16 && (out & 1)) b->w16(dst + out - 1, pending);
+    if (cb && b->r32(c->r[3] + 4)) call_game(k, b->r32(c->r[3] + 4), 0, 0, 0, 0);
 }
 
-static void bit_unpack(Cpu* c) {
+static void bit_unpack(Core* k) {
+    Cpu* c = k->cpu; const Bus* b = k->bus;
     uint32_t src = c->r[0], dst = c->r[1], info = c->r[2];
-    uint32_t srclen = mem_read16(info), sw = mem_read8(info + 2), dw = mem_read8(info + 3), off = mem_read32(info + 4);
+    uint32_t srclen = b->r16(info), sw = b->r8(info + 2), dw = b->r8(info + 3), off = b->r32(info + 4);
     int zero_flag = off >> 31; off &= 0x7FFFFFFF;
     uint32_t acc = 0, accbits = 0;
     for (uint32_t i = 0; i < srclen; i++) {
-        uint8_t b = mem_read8(src + i);
+        uint8_t byte = b->r8(src + i);
         for (uint32_t bit = 0; bit < 8; bit += sw) {
-            uint32_t v = (b >> bit) & ((1u << sw) - 1);
+            uint32_t v = (byte >> bit) & ((1u << sw) - 1);
             if (v || zero_flag) v += off;
             acc |= v << accbits; accbits += dw;
-            if (accbits >= 32) { mem_write32(dst, acc); dst += 4; acc = 0; accbits = 0; }
+            if (accbits >= 32) { b->w32(dst, acc); dst += 4; acc = 0; accbits = 0; }
         }
     }
 }
 
-void bios_swi(Cpu* c, uint32_t n) {
+/* Calls common to both BIOSes. Returns 0 if `n` isn't one of them. */
+static int bios_common(Core* k, uint32_t n) {
+    Cpu* c = k->cpu; const Bus* b = k->bus;
     switch (n) {
-    case 0x03: break;                                               /* WaitByLoop */
-    case 0x04: intr_wait(c, c->r[0] != 0, c->r[1]); break;          /* IntrWait */
-    case 0x05: intr_wait(c, 1, 1); break;                           /* VBlankIntrWait */
-    case 0x06: wait_for_interrupt(c); break;                        /* Halt */
+    case 0x03:                                                      /* WaitByLoop: time passes, the other CPU runs */
+        if (k->id == 1) arm7_yield();
+        else { time_spend(c->r[0] * 4); arm7_run(); }
+        irq_service(c);
+        return 1;
+    case 0x04: bios_intr_wait(k, c->r[0] != 0, c->r[1]); return 1;  /* IntrWait */
+    case 0x05: bios_intr_wait(k, 1, 1); return 1;                   /* VBlankIntrWait */
+    case 0x06: bios_halt(k); return 1;                              /* Halt */
     case 0x09: {                                                    /* Div */
-        int32_t a = (int32_t)c->r[0], b = (int32_t)c->r[1];
-        if (b == 0) { LOG_WARN("BIOS Div by zero\n"); break; }
-        int32_t q = (a == INT32_MIN && b == -1) ? a : a / b;
-        int32_t r = (a == INT32_MIN && b == -1) ? 0 : a % b;
+        int32_t a = (int32_t)c->r[0], d = (int32_t)c->r[1];
+        if (d == 0) { LOG_WARN("%s BIOS Div by zero\n", k->name); return 1; }
+        int32_t q = (a == INT32_MIN && d == -1) ? a : a / d;
+        int32_t r = (a == INT32_MIN && d == -1) ? 0 : a % d;
         c->r[0] = (uint32_t)q; c->r[1] = (uint32_t)r; c->r[3] = (uint32_t)(q < 0 ? -q : q);
-        break;
+        return 1;
     }
     case 0x0B: {                                                    /* CpuSet */
         uint32_t s = c->r[0], d = c->r[1], ctl = c->r[2], cnt = ctl & 0x1FFFFF;
         int fill = (ctl >> 24) & 1, w32 = (ctl >> 26) & 1;
         for (uint32_t i = 0; i < cnt; i++) {
-            if (w32) { mem_write32(d, mem_read32(s)); d += 4; if (!fill) s += 4; }
-            else { mem_write16(d, mem_read16(s)); d += 2; if (!fill) s += 2; }
+            if (w32) { b->w32(d, b->r32(s)); d += 4; if (!fill) s += 4; }
+            else { b->w16(d, b->r16(s)); d += 2; if (!fill) s += 2; }
         }
-        break;
+        return 1;
     }
     case 0x0C: {                                                    /* CpuFastSet */
         uint32_t s = c->r[0], d = c->r[1], ctl = c->r[2];
         uint32_t cnt = ((ctl & 0x1FFFFF) + 7) & ~7u;
         int fill = (ctl >> 24) & 1;
-        for (uint32_t i = 0; i < cnt; i++) { mem_write32(d, mem_read32(s)); d += 4; if (!fill) s += 4; }
-        break;
+        for (uint32_t i = 0; i < cnt; i++) { b->w32(d, b->r32(s)); d += 4; if (!fill) s += 4; }
+        return 1;
     }
     case 0x0D: {                                                    /* Sqrt */
         uint32_t v = c->r[0], r = 0;
         for (uint32_t bit = 1u << 30; bit; bit >>= 2) { if (v >= r + bit) { v -= r + bit; r = (r >> 1) + bit; } else r >>= 1; }
         c->r[0] = r;
-        break;
+        return 1;
     }
-    case 0x0E: c->r[0] = crc16((uint16_t)c->r[0], c->r[1], c->r[2]); break;   /* GetCRC16 */
-    case 0x0F: c->r[0] = 0; break;                                  /* IsDebugger */
-    case 0x10: bit_unpack(c); break;
-    case 0x11: lz77(c, 0, 0); break;                                /* LZ77 -> 8-bit writes */
-    case 0x12: lz77(c, 1, 1); break;                                /* LZ77 via callbacks -> 16-bit writes */
-    case 0x14: rle(c, 0, 0); break;
-    case 0x15: rle(c, 1, 1); break;
+    case 0x0E: c->r[0] = crc16(b, (uint16_t)c->r[0], c->r[1], c->r[2]); return 1;
+    case 0x0F: c->r[0] = 0; return 1;                               /* IsDebugger */
+    case 0x10: bit_unpack(k); return 1;
+    case 0x11: lz77(k, 0, 0); return 1;
+    case 0x12: lz77(k, 1, 1); return 1;
+    case 0x14: rle(k, 0, 0); return 1;
+    case 0x15: rle(k, 1, 1); return 1;
+    default: return 0;
+    }
+}
+
+void bios_swi(Cpu* c, uint32_t n) {
+    if (!bios_common(&g_c9, n))
+        rt_fatal("ARM9 BIOS call %02x not implemented (r0=%08x r1=%08x r2=%08x)\n", n, c->r[0], c->r[1], c->r[2]);
+}
+
+/* ARM7-only calls: sound helper tables, sleep. */
+void bios7_swi(Cpu* c, uint32_t n) {
+    Core* k = &g_c7;
+    if (bios_common(k, n)) return;
+    switch (n) {
+    case 0x07: bios_halt(k); return;                                /* Sleep */
+    case 0x08: return;                                              /* SoundBias */
+    case 0x1A: {                                                    /* GetSineTable */
+        uint32_t i = c->r[0] & 0x3F;
+        c->r[0] = (uint32_t)(int16_t)lround(sin(i * 3.14159265358979 / 128.0) * 32768.0);
+        return;
+    }
+    case 0x1B: {                                                    /* GetPitchTable */
+        uint32_t i = c->r[0] % 768;
+        c->r[0] = (uint16_t)lround((pow(2.0, i / 768.0) - 1.0) * 65536.0);
+        return;
+    }
+    case 0x1C: {                                                    /* GetVolumeTable */
+        uint32_t i = c->r[0] % 724;
+        double v = 127.0 * pow(10.0, ((double)i - 723.0) / 240.0);
+        c->r[0] = (uint32_t)(v > 127 ? 127 : lround(v));
+        return;
+    }
+    case 0x1F: bios_halt(k); return;                                /* CustomHalt */
     default:
-        rt_fatal("BIOS call %02x not implemented (r0=%08x r1=%08x r2=%08x r3=%08x)\n", n, c->r[0], c->r[1], c->r[2], c->r[3]);
+        rt_fatal("ARM7 BIOS call %02x not implemented (r0=%08x r1=%08x r2=%08x)\n", n, c->r[0], c->r[1], c->r[2]);
     }
 }
 
 void cpu_breakpoint(Cpu* c, uint32_t a, uint32_t imm) { (void)c; LOG_WARN("bkpt #%u at %08x\n", imm, a); }
 void cpu_unhandled(Cpu* c, uint32_t a, uint32_t w) {
     c->fault_addr = a;
-    trace_dump(stderr, 24);
-    rt_fatal("untranslatable instruction %08x at %08x\n", w, a);
+    rt_fatal("ARM9: untranslatable instruction %08x at %08x\n", w, a);
+}
+void cpu7_unhandled(Cpu* c, uint32_t a, uint32_t w) {
+    c->fault_addr = a;
+    rt_fatal("ARM7: untranslatable instruction %08x at %08x\n", w, a);
 }
 
 /* ---------------------------------------------------------------- logging */
@@ -294,15 +352,16 @@ int g_log_level = 2;
 void rt_log(int level, const char* fmt, ...) {
     if (level > g_log_level) return;
     va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[f%llu l%u] ", (unsigned long long)g_frame, g_vcount);
+    fprintf(stderr, "[f%llu l%u %s] ", (unsigned long long)g_frame, g_vcount, arm7_is_running() ? "7" : "9");
     vfprintf(stderr, fmt, ap);
     va_end(ap);
 }
 _Noreturn void rt_fatal(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "FATAL [frame %llu]: ", (unsigned long long)g_frame);
+    fprintf(stderr, "FATAL [frame %llu, %s]: ", (unsigned long long)g_frame, arm7_is_running() ? "ARM7" : "ARM9");
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     trace_dump(stderr, 32);
+    backup_flush();
     exit(1);
 }

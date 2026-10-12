@@ -76,6 +76,16 @@ def load_symbols(mod, path):
             else:
                 mod.labels.add(addr)
     mod.sym_addrs = sorted(addrs)
+    # Code the symbol map labels as data: static initialisers (called through
+    # an overlay's constructor table) and a few mislabeled func_ entries.
+    with open(path) as f:
+        for line in f:
+            m = re.match(r"^((?:func|__sinit)_\S+) kind:data\S* addr:0x([0-9a-f]+)", line.strip())
+            if m:
+                addr = int(m.group(2), 16)
+                if addr not in mod.funcs:
+                    nxt = min([a for a in mod.sym_addrs if a > addr] + [mod.base + len(mod.data)])
+                    mod.funcs[addr] = Func(mod, m.group(1), addr, nxt - addr, False)
 
 
 def load_relocs(mod, path):
@@ -190,15 +200,19 @@ class Recompiler:
         thumb = func.thumb
         insns = {}
         data = set()
+        computed = []
         labels = {start}
         extra_labels = {a for a in func.module.labels if start <= a < end}
         labels |= extra_labels
         work = [start] + sorted(extra_labels)
         while work:
             a = work.pop()
+            prev = None
             while start <= a < end and a not in insns and a not in data:
                 i = dec.thumb(a) if thumb else dec.arm(a)
                 insns[a] = i
+                after_lr_pc = prev is not None and prev.sets_lr_pc
+                prev = i
                 for ea, sz in i.pool_refs:
                     for k in range(sz):
                         data.add(ea + k)
@@ -222,7 +236,15 @@ class Recompiler:
                         work.append(ea)
                         k += 1
                     i.table = [a + 8 + 4 * j for j in range(k)]
-                    if uncond:
+                    if k == 0:
+                        # computed jump into straight-line code (e.g. an unrolled
+                        # division loop): every following instruction is a target
+                        i.computed = True
+                        computed.append(a)
+                        work.append(a + 8)
+                        if uncond:
+                            break
+                    elif uncond:
                         break
                 elif i.table_words or i.adr >= 0:
                     # A table of code addresses: `ldr pc, [pc, rX, lsl #2]`, or
@@ -266,12 +288,22 @@ class Recompiler:
                                 labels.add(t)
                                 work.append(t)
                     break
+                elif i.flow == JUMP_REG and after_lr_pc:
+                    pass  # `mov lr, pc; bx rX` is a call: execution continues after it
                 elif i.flow in (RET, JUMP_REG, EXC_RET, STOP) and uncond:
                     break
                 a += i.size
         # drop anything decoded from literal pools
         for a in [a for a in insns if a in data]:
             del insns[a]
+        for a in computed:
+            t = a + 8
+            targets = []
+            while t in insns:
+                targets.append(t)
+                t += insns[t].size
+            labels.update(targets)
+            insns[a].table = targets
         return insns, labels
 
     @staticmethod
@@ -319,6 +351,8 @@ class Recompiler:
 
         def branch(target, from_addr):
             if start <= target < end and target in insns:
+                if target <= from_addr:
+                    return f"RECOMP_LOOP(); goto L_{target:08x};"
                 return f"goto L_{target:08x};"
             if start <= target < end:
                 self.stats["branch_into_data"] += 1
@@ -368,7 +402,7 @@ class Recompiler:
             elif i.flow == JUMPTABLE:
                 self.stats["jump_tables"] += 1
                 table = getattr(i, "table", [])
-                cases = " ".join(f"case {k}: goto L_{t:08x};" for k, t in enumerate(table))
+                cases = " ".join(f"case {(t - a - 8) // 4}: goto L_{t:08x};" for t in table)
                 s = (f"switch ({i.index}) {{ {cases} default: cpu_unhandled(c, {h(a)}, {h(i.word)}); return; }}")
             else:
                 raise AssertionError(i.flow)
@@ -410,10 +444,17 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--per-file", type=int, default=400)
     ap.add_argument("--hle", help="file listing '<module> <addr>' functions the runtime provides instead")
+    ap.add_argument("--interpret", help="file listing '<module> <addr>' functions to run in the interpreter (code that changes at run time)")
     args = ap.parse_args()
 
     mods = load_modules(args.extract, args.config)
     rc = Recompiler(mods)
+    interp = set()
+    if args.interpret:
+        for line in open(args.interpret):
+            line = line.split("#")[0].split()
+            if len(line) == 2:
+                interp.add((line[0], int(line[1], 16)))
     hle = set()
     if args.hle:
         for line in open(args.hle):
@@ -428,6 +469,13 @@ def main():
     queue = list(rc.all_funcs())
     while queue:
         for fn in queue:
+            if (fn.module.name, fn.addr) in interp:
+                code[(fn.module.name, fn.addr)] = (f"/* {fn.name}: encrypted in the ROM, decrypted at run time: interpreted */\n"
+                                                   f"void interp_stub(Cpu* c, uint32_t addr);\n"
+                                                   f"void {fn.cname}(Cpu* c) {{ interp_stub(c, {h(fn.addr | fn.thumb)}); }}")
+                rc.stats["interpreted_functions"] += 1
+                fn.interpreted = True
+                continue
             if (fn.module.name, fn.addr) in hle:
                 code[(fn.module.name, fn.addr)] = f"/* {fn.cname}: provided by the runtime (HLE) */"
                 rc.stats["hle_functions"] += 1
@@ -456,7 +504,8 @@ def main():
     with open(os.path.join(args.out, "dispatch_table.c"), "w") as f:
         f.write('#include "funcs.h"\n#include "dispatch.h"\n\nconst RecompFunc g_recomp_funcs[] = {\n')
         for fn in funcs:
-            f.write(f"    {{ {fn.module.ovl_id}, {h(fn.addr | fn.thumb)}, {fn.size}, {fn.cname}, \"{fn.name}\" }},\n")
+            size = 0 if getattr(fn, "interpreted", False) else fn.size
+            f.write(f"    {{ {fn.module.ovl_id}, {h(fn.addr | fn.thumb)}, {size}, {fn.cname}, \"{fn.name}\" }},\n")
         f.write("};\nconst unsigned g_recomp_func_count = sizeof(g_recomp_funcs) / sizeof(g_recomp_funcs[0]);\n")
 
     with open(os.path.join(args.out, "report.txt"), "w") as f:
