@@ -78,11 +78,11 @@ static uint8_t spi_xfer(int dev, uint8_t in, int first) {
         if (g_spi_cmd == 0x9F) return n == 0 ? 0x20 : n == 1 ? 0x40 : 0x12;
         return 0xFF;
     }
-    case 2: {   /* touch screen controller: no touch */
+    case 2: {   /* touch screen controller (input.c supplies the readings) */
         if (in & 0x80) {
             g_tsc_cmd = in;
             int ch = (in >> 4) & 7;
-            g_tsc_val = (ch == 1 || ch == 5) ? 0 : 0x800;         /* Y / X read as 0 when untouched */
+            g_tsc_val = input_touch_adc(ch);
             g_spi_pos = 0;
             return 0;
         }
@@ -195,8 +195,8 @@ static uint32_t reg7_read32(uint32_t off) {
         int n = (off - 0x100) / 4;
         return timer_read(k, n) | ((uint32_t)k->timer[n].ctl << 16);
     }
-    case 0x130: return 0x03FF | (0x007Fu << 16);                  /* keys up; EXTKEYIN: X/Y up, no pen, hinge open */
-    case 0x134: return 0x8000 | ((uint32_t)0x007F << 16);
+    case 0x130: return input_keyinput() | ((uint32_t)IO7_16(0x132) << 16);
+    case 0x134: return IO7_16(0x134) | ((uint32_t)input_extkeyin() << 16);   /* EXTKEYIN: X, Y, pen, hinge open */
     case 0x138: return rtc_read_reg();
     case 0x180: time_poll(k); return ipc_sync_read(k);
     case 0x184: time_poll(k); return ipc_fifocnt_read(k);

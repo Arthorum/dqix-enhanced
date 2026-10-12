@@ -86,7 +86,13 @@ static inline uint8_t* resolve(uint32_t a, int write) {
     if (g_dtcm_enabled && (a & ~(DTCM_SIZE - 1)) == g_dtcm_base) return &g_dtcm[a & (DTCM_SIZE - 1)];
     switch (a >> 24) {
     case 0x00: case 0x01:
-        if (g_itcm_enabled) return &g_itcm[a & (ITCM_SIZE - 1)];
+        if (g_itcm_enabled) {
+            if (write && a < 0x01000000) {        /* ITCM through its low mirror: usually a null pointer */
+                static int reported;
+                if (g_frame >= 10 && reported++ < 8) { LOG_WARN("frame %llu: write to %08x (ITCM via the null-pointer mirror) lr=%08x pc-ish r0=%08x\n", (unsigned long long)g_frame, a, g_c9.cpu->r[14], g_c9.cpu->r[0]); if (reported == 1) trace_dump(stderr, 48); }
+            }
+            return &g_itcm[a & (ITCM_SIZE - 1)];
+        }
         return NULL;
     case 0x02:
         if (write && a >= g_overlay_area_start && a < g_overlay_area_end) g_overlay_gen++;
@@ -150,3 +156,8 @@ void mem_write32(uint32_t a, uint32_t v) {
     uint8_t* p = resolve(a, 1);
     if (p) memcpy(p, &v, 4); else LOG_WARN("write32 to unmapped %08x = %08x\n", a, v);
 }
+
+/* Bank access for the graphics engines (extended palettes, texture slots). */
+uint8_t* vram_bank(int b) { return &g_vram[bank_off[b]]; }
+uint32_t vram_bank_size(int b) { return bank_size[b]; }
+uint8_t vram_bank_cnt(int b) { return g_io[0x240 + b + (b >= 7 ? 1 : 0)]; }

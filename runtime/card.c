@@ -50,11 +50,12 @@ uint32_t card_read_data(Core* k) {
 }
 
 /* ---------------------------------------------------------------- save chip
- * SPI flash/EEPROM. The command set covers FLASH chips (ST M25PE40 style)
- * and the common EEPROM reads/writes; the size follows the save file. */
+ * SPI EEPROM / FLASH. Up to 64 KB it behaves as an EEPROM with 2-byte
+ * addresses (what DQIX uses); larger sizes act as FLASH with 3-byte
+ * addresses. The size follows an existing save file, else 64 KB. */
 #define BACKUP_MAX (1u << 20)
 static uint8_t g_backup[BACKUP_MAX];
-static uint32_t g_backup_size = 512 * 1024;
+static uint32_t g_backup_size = 64 * 1024;   /* DQIX: 64 KB EEPROM (2-byte addresses) */
 static char g_backup_path[1024];
 static int g_backup_dirty;
 static uint8_t g_bk_cmd, g_bk_status;
@@ -102,7 +103,8 @@ static uint8_t backup_xfer(uint8_t in, int hold) {
             if (g_bk_cmd == 0x03 || g_bk_cmd == 0x0B) { out = g_backup[g_bk_addr++ % g_backup_size]; break; }
             if (g_bk_cmd == 0x02 || g_bk_cmd == 0x0A) {          /* program / write */
                 uint32_t a = g_bk_addr++ % g_backup_size;
-                g_backup[a] = g_bk_cmd == 0x02 ? (g_backup[a] & in) : in;
+                /* flash "page program" can only clear bits; EEPROM writes replace */
+                g_backup[a] = (g_bk_cmd == 0x02 && g_backup_size > 0x10000) ? (g_backup[a] & in) : in;
                 g_backup_dirty = 1;
             }
             break;
@@ -112,6 +114,7 @@ static uint8_t backup_xfer(uint8_t in, int hold) {
         }
     }
     if (!hold) {
+        if (g_bk_cmd) LOG_DEBUG("save: cmd %02x addr %06x, %u bytes\n", g_bk_cmd, g_bk_addr, g_bk_count);
         if (g_bk_cmd == 0xDB || g_bk_cmd == 0xD8) {               /* page / sector erase */
             uint32_t sz = g_bk_cmd == 0xDB ? 0x100 : 0x10000;
             uint32_t a = (g_bk_addr % g_backup_size) & ~(sz - 1);

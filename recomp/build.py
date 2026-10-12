@@ -188,8 +188,8 @@ class Recompiler:
         if len(fs) > 1:
             self.stats["multi_overlay_calls"] += 1
             parts = [f"if (overlay_is_loaded({f.module.ovl_id})) {f.cname}(c);" for f in fs]
-            parts.append(f"else dispatch_call(c, {h(target | thumb)}, {h(from_addr)});")
-            return " ".join(parts)
+            parts.append(f"dispatch_call(c, {h(target | thumb)}, {h(from_addr)});")
+            return "{ " + " else ".join(parts) + " }"
         self.stats["unresolved_calls"] += 1
         self.problems.append(f"{mod.name} {from_addr:08x}: call to {target:08x} has no known function")
         return f"dispatch_call(c, {h(target | thumb)}, {h(from_addr)});"
@@ -221,6 +221,17 @@ class Recompiler:
                     if start <= i.target < end:
                         labels.add(i.target)
                         work.append(i.target)
+                    if uncond:
+                        break
+                elif i.flow == JUMPTABLE and not thumb and self.table_size(insns, a, i) is not None:
+                    # size from the bounds check `cmp rI, #N` before `addls pc, pc, rI, lsl #2`;
+                    # entries are single instructions (usually b, sometimes a return)
+                    n = self.table_size(insns, a, i)
+                    i.table = [a + 8 + 4 * j for j in range(n)]
+                    for t in i.table:
+                        if start <= t < end:
+                            labels.add(t)
+                            work.append(t)
                     if uncond:
                         break
                 elif i.flow == JUMPTABLE:
@@ -307,6 +318,30 @@ class Recompiler:
         return insns, labels
 
     @staticmethod
+    def table_size(insns, a, i):
+        """Entries of an ARM `add<cc> pc, pc, rI, lsl #2` table: the largest bound
+        compared against rI just before it (`cmp rI, #N` + bhi/bgt, or addls)."""
+        if not i.cond:
+            return None
+        idx = i.word & 15
+        best = None
+        for k in range(1, 7):
+            p = insns.get(a - 4 * k)
+            if p is None:
+                break
+            w = p.word
+            if (w & 0x0FF00000) == 0x03500000 and ((w >> 16) & 15) == idx:   # cmp rI, #imm
+                rot = ((w >> 8) & 15) * 2
+                imm = w & 0xFF
+                imm = ((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm
+                if imm < 4096 and (best is None or imm > best):
+                    best = imm
+                continue
+            if p.flow == "seq" and ((w >> 12) & 15) == idx and p.mn not in ("cmp", "cmn", "tst", "teq", "str", "strb", "strh"):
+                break   # index register written: earlier compares don't apply
+        return best + 1 if best is not None else None
+
+    @staticmethod
     def thumb_offset_table(insns, a, dec):
         """Recognise the instructions before a Thumb `add pc, rX` switch.
         Returns (entries, entry_size, scale, signed) or None."""
@@ -342,6 +377,12 @@ class Recompiler:
         insns, labels = self.discover(func, dec)
         order = sorted(insns)
         has_jump_reg = any(insns[a].flow == JUMP_REG for a in order)
+        # Only a function that explicitly loads lr with an address (not a call,
+        # not a register pop) can make a tail-callee "return" somewhere else.
+        lr_loaded = any(insns[a].flow == SEQ and "c->r[14] = " in (insns[a].body or "")
+                        and not insns[a].mn.startswith(("ldm", "pop", "stm", "push"))
+                        and "c->r[13]" not in (insns[a].body or "")
+                        for a in order)
         out = [f"/* {func.name} ({'thumb' if func.thumb else 'arm'}, {func.size:#x} bytes) */",
                f"void {func.cname}(Cpu* c) {{",
                f"    RECOMP_ENTER({h(func.addr | func.thumb)});",
@@ -359,11 +400,15 @@ class Recompiler:
             # Tail call. If this function changed lr before jumping (e.g. the
             # SDK IRQ dispatcher sets lr = OS_IrqHandler_ThreadSwitch), the
             # callee "returns" to that address: continue there.
+            if not lr_loaded:
+                return "{ " + self.call_stmt(mod, from_addr, target, func.thumb) + " return; }"
             return ("{ uint32_t tl = c->r[14]; " + self.call_stmt(mod, from_addr, target, func.thumb)
                     + f" if (tl != entry_lr) dispatch_call(c, tl, {h(from_addr)}); return; }}")
 
         def local_switch(expr, from_addr):
             cases = " ".join(f"case {h(t)}: goto L_{t:08x};" for t in sorted(labels) if t in insns)
+            if not lr_loaded:
+                return f"switch (({expr}) & ~1u) {{ {cases} default: {{ dispatch_call(c, {expr}, {h(from_addr)}); return; }} }}"
             return (f"switch (({expr}) & ~1u) {{ {cases} default: {{ uint32_t tl = c->r[14]; dispatch_call(c, {expr}, {h(from_addr)}); "
                     f"if (tl != entry_lr) dispatch_call(c, tl, {h(from_addr)}); return; }} }}")
 
@@ -402,7 +447,7 @@ class Recompiler:
             elif i.flow == JUMPTABLE:
                 self.stats["jump_tables"] += 1
                 table = getattr(i, "table", [])
-                cases = " ".join(f"case {(t - a - 8) // 4}: goto L_{t:08x};" for t in table)
+                cases = " ".join(f"case {(t - a - 8) // 4}: {branch(t, a)}" for t in table)
                 s = (f"switch ({i.index}) {{ {cases} default: cpu_unhandled(c, {h(a)}, {h(i.word)}); return; }}")
             else:
                 raise AssertionError(i.flow)

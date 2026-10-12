@@ -134,6 +134,8 @@ void time_advance_lines(uint32_t lines) {
             g_vcount = 0; g_frame++;
             if (g_frame_limit && g_frame >= g_frame_limit) exit(0);
         }
+        if (g_vcount < 192) gpu_render_line((int)g_vcount);
+        else if (g_vcount == 192) { gpu_frame_done(); input_update(); }
         line_events(&g_c9);
         line_events(&g_c7);
         timers_update(&g_c9);
@@ -223,7 +225,7 @@ static uint32_t reg9_read32(uint32_t off) {
         g_subline += 4;
         return timer_read(k, n) | ((uint32_t)k->timer[n].ctl << 16);
     }
-    case 0x130: return 0x03FF | ((uint32_t)IO16(0x132) << 16);   /* no keys pressed */
+    case 0x130: return input_keyinput() | ((uint32_t)IO16(0x132) << 16);
     case 0x180: time_poll(k); return ipc_sync_read(k);
     case 0x184: time_poll(k); return ipc_fifocnt_read(k);
     case 0x1A0: case 0x1A4: case 0x1A8: case 0x1AC: return card_read(k, off, 4);
@@ -271,6 +273,10 @@ void io9_write(uint32_t a, uint32_t v, int size) {
     case 0x184: ipc_fifocnt_write(k, IO16(0x184)); break;
     case 0x188: ipc_fifo_send(k, IO32(0x188)); break;
     case 0x240: case 0x244: case 0x248: vram_remap(); break;
+    case 0x028: case 0x02C: gpu_affine_written(0, 2); break;
+    case 0x038: case 0x03C: gpu_affine_written(0, 3); break;
+    case 0x1028: case 0x102C: gpu_affine_written(1, 2); break;
+    case 0x1038: case 0x103C: gpu_affine_written(1, 3); break;
     case 0x280: case 0x290: case 0x294: case 0x298: case 0x29C: math_div(); break;
     case 0x2B0: case 0x2B8: case 0x2BC: math_sqrt(); break;
     default: break;

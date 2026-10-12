@@ -37,6 +37,16 @@ extern int g_itcm_enabled, g_dtcm_enabled;
 void vram_remap(void);
 uint8_t* vram_ptr(uint32_t addr);        /* ARM9 view; NULL when unmapped */
 uint8_t* vram7_ptr(uint32_t addr);       /* ARM7 view (banks C/D) */
+uint8_t* vram_bank(int b);               /* bank A..I = 0..8 */
+uint32_t vram_bank_size(int b);
+uint8_t  vram_bank_cnt(int b);           /* its VRAMCNT value */
+
+/* ---- graphics ---- */
+void gpu_render_line(int line);          /* both 2D engines, one scanline */
+void gpu_frame_start(void);              /* line 0: latch per-frame state */
+void gpu_frame_done(void);               /* VBlank: frame complete */
+void gpu_affine_written(int engine, int bg);
+extern uint32_t g_screen[2][256 * 192];  /* top, bottom: 0x00RRGGBB */
 /* Writes into the overlay area bump this so overlay detection re-checks. */
 extern uint32_t g_overlay_area_start, g_overlay_area_end, g_overlay_gen;
 
@@ -166,6 +176,12 @@ void bios7_swi(Cpu* c, uint32_t n);
 void cpu7_unhandled(Cpu* c, uint32_t addr, uint32_t insn);
 void bios_intr_wait(Core* k, int discard, uint32_t mask);
 void bios_halt(Core* k);
+
+/* ---- input (input.c) ---- */
+void input_update(void);
+uint16_t input_keyinput(void);
+uint16_t input_extkeyin(void);
+uint16_t input_touch_adc(int channel);
 
 /* ---- devices on the ARM7 side ---- */
 void spi_write_cnt(uint16_t v);
