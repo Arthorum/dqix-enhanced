@@ -13,6 +13,9 @@ static int g_nscript, g_loaded;
 
 uint16_t g_keys_down;          /* bit set = pressed, KEYINPUT order (bits 0-9) + X=10, Y=11 */
 int g_touch_down, g_touch_x, g_touch_y;
+/* set by the frontend (keyboard / mouse / gamepad) */
+uint16_t g_fe_keys;
+int g_fe_touch, g_fe_tx, g_fe_ty;
 
 static uint32_t key_bit(const char* s, size_t n) {
     static const char* names[] = { "A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L", "X", "Y" };
@@ -56,6 +59,8 @@ void input_update(void) {
             if (p->touch) { g_touch_down = 1; g_touch_x = p->tx; g_touch_y = p->ty; }
         }
     }
+    g_keys_down |= g_fe_keys;
+    if (g_fe_touch) { g_touch_down = 1; g_touch_x = g_fe_tx; g_touch_y = g_fe_ty; }
 }
 
 /* Register views (active-low). */

@@ -15,7 +15,7 @@ static uint32_t g_engine_out[2][256 * 192];
 uint16_t g_3d_line[256];
 uint8_t  g_3d_alpha[256];      /* 0 = transparent, 31 = opaque */
 int      g_3d_present;
-void gpu3d_render_line(int line) __attribute__((weak));
+void gpu3d_render_line(int line);
 
 typedef struct {
     int base;                  /* register offset in g_io: 0x000 or 0x1000 */
@@ -390,7 +390,7 @@ void gpu_frame_start(void) {
 
 void gpu_render_line(int line) {
     if (line == 0) gpu_frame_start();
-    if (gpu3d_render_line) gpu3d_render_line(line);
+    gpu3d_render_line(line);
     for (int eng = 0; eng < 2; eng++) {
         render_engine_line(eng, line);
         Engine* e = &g_eng[eng];

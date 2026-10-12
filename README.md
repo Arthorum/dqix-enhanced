@@ -4,11 +4,30 @@ Turns Dragon Quest IX's DS machine code (both CPUs) into C that compiles
 natively, plus the runtime that stands in for the DS hardware.
 
 * Milestone 1 (done): the whole game recompiles, compiles and links.
-* Milestone 2 (done): the game boots on PC with both CPUs. It runs its startup,
-  OS, threads, the ARM7's services and anti-piracy, and loads files and
-  overlays from the cartridge. Its main loop runs every frame (no picture yet).
-* Milestone 3 (next): graphics, so we can see it. 2D engines first (logos,
-  title, menus), then 3D.
+* Milestone 2 (done): the game boots on PC with both CPUs.
+* Milestone 3 (done): graphics. 2D engines and a software 3D renderer. Logos,
+  opening movie, title, adventure-log menu, character creation, the story
+  opening in Angel Falls and the first battle all render.
+* Milestone 4 (now): a playable PC build. Window, keyboard / mouse / gamepad,
+  sound, frame pacing (SDL2). Built on Windows with `build-pc.bat`.
+
+## Building the PC version (Windows)
+
+Double-click `build-pc.bat`. The first time, it installs MSYS2 (a free C
+compiler, SDL2 and Python, via winget, into C:\msys64). Then it recompiles
+the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
+`..\build\pc\play.bat`. The save file is `..\build\pc\dqix.sav`.
+
+| DS | Keyboard | Controller |
+|---|---|---|
+| D-pad | arrow keys | D-pad / left stick |
+| A / B / X / Y | X / Z / S / A | right / bottom / top / left face button |
+| L / R | Q / W | shoulders |
+| START / SELECT | Enter / Right Shift | Start / Back |
+| touch screen | left mouse button on the bottom screen | |
+
+Tab (hold) = fast forward, F2 = screens side by side, F3 = window size,
+F11 = fullscreen, F12 = screenshot, Esc = quit.
 
 ## Status
 
@@ -34,23 +53,40 @@ interpreter 48,000 checks, 0 failures.
 | Interrupts, timers (incl. cascade) and DMA per CPU; display timing | done |
 | IPC: sync register + both FIFOs with interrupts | done |
 | Cartridge: ROM reads (B7/B8) for either CPU, card DMA | done |
-| Save chip on backup SPI (flash command set), saved to a .sav file | done, not exercised yet |
-| ARM7 devices: firmware flash (user settings), touch screen (no touch), power management, RTC with the PC clock | done |
+| Save chip (64 KB EEPROM on backup SPI), saved to a .sav file | done |
+| ARM7 devices: firmware flash (user settings), touch screen, power management, RTC (PC clock + emulated time) | done |
 | Game threads on native coroutines, both CPUs (SaveContext / LoadContext / IRQ switch replaced) | done |
 | Two CPUs: the ARM7 runs as a coroutine whenever the ARM9 waits or time advances | done |
 | Interpreter for code that changes at run time (encrypted anti-piracy, mislabeled code) | done |
 | Forward progress: call + loop budgets so busy-waits see time pass and interrupts arrive | done |
-| Sound channels | registers only; one-shot sounds end at once (no mixer yet) |
-| Graphics, sound output, input | next |
+| Sound: 16 channels (PCM8/16, IMA-ADPCM, PSG, noise), mixer, busy timing | done (no capture) |
+| 2D graphics: both engines, all BG modes, sprites, windows, blending, brightness | done |
+| 3D: geometry engine (FIFO, matrices, lighting, clipping), rasterizer, textures (all formats), toon/highlight, alpha blending, fog, edge marking | done (no shadow volumes, no anti-aliasing) |
+| Input (keyboard, mouse as touch, gamepad) and scripted input for testing | done |
 
-## Running it (Linux; Windows build comes with Claude Code on the PC)
+## Running it headless (Linux, for testing)
 
 ```
 python3 recomp/build.py --extract <extract/usa> --config <config/usa/arm9> --out gen --hle hle.txt --interpret interpret.txt
 python3 recomp/arm7.py  --extract <extract/usa> --out gen7 --hle hle7.txt
 make -f build.mk GEN=gen GEN7=gen7 DEFS=-DRECOMP_TRACE
 ./dqix <baserom_dqix_usa.nds> <extract/usa> [frames] [log level 1-3] [save file]
+make -f build.mk ... FRONTEND=sdl OUT=dqix-sdl     # with a window
 tools/where.sh      # if it hangs: backtrace + both CPUs' state
+```
+
+Testing aids (environment variables):
+
+```
+DQIX_INPUT="1780:touch=128,160:10;2400:A:20"   scripted input (frame:buttons|touch=x,y:frames)
+DQIX_DUMP=dir,30                               write every 30th frame as .ppm
+DQIX_RTC=1760000000                            fixed clock start (reproducible runs)
+DQIX_PROF=from,to                              function-entry profile for those frames
+DQIX_THREADS=1                                 at exit: every game thread's recent calls
+DQIX_TRACEFN=addr,count[,from]                 call trace when a function is entered
+DQIX_POLYDUMP=frame,x,y                        3D polygons covering a pixel
+DQIX_WAV=out.wav                               record the sound (headless build)
+DQIX_SNDLOG=1                                  log sound channel starts
 ```
 
 ## Layout
@@ -72,6 +108,14 @@ runtime/interp.c       ARM/Thumb interpreter for code that isn't recompiled
 runtime/coro.h         coroutines: ucontext (Linux) / Fibers (Windows)
 runtime/dispatch.c     indirect calls, overlay detection, budgets, call trace
 runtime/main.c         ROM loading, firmware boot state, entry
+runtime/gpu2d.c        both 2D engines, per scanline
+runtime/gpu3d.c        3D geometry engine + software rasterizer
+runtime/sound.c        sound channels and mixer
+runtime/input.c        DS buttons / touch from the frontend or a script
+runtime/frontend_sdl.c window, input, audio, pacing (SDL2)
+runtime/frontend_none.c headless frontend (tests)
+build-pc.bat           one-click Windows build (installs MSYS2 first time)
+build-windows.sh       the build itself (runs inside MSYS2)
 hle.txt / hle7.txt     functions the runtime provides instead (thread switch)
 interpret.txt          functions run in the interpreter (encrypted in the ROM)
 build.mk               makefile (make -f build.mk)

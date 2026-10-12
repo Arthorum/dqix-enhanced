@@ -28,8 +28,22 @@ static void map_pages(uint32_t addr, int bank, uint32_t len) {
     }
 }
 
+/* 3D texture slots (banks A-D with MST=3) and texture palette slots (E/F/G). */
+uint8_t* g_tex_slot[4];
+uint8_t* g_texpal_slot[6];
+
 void vram_remap(void) {
     memset(vram_page, 0, sizeof vram_page);
+    memset(g_tex_slot, 0, sizeof g_tex_slot);
+    memset(g_texpal_slot, 0, sizeof g_texpal_slot);
+    for (int b = 0; b < 7; b++) {
+        uint8_t cnt = g_io[0x240 + b];
+        if ((cnt & 0x87) != 0x83) continue;
+        int ofs = (cnt >> 3) & 3;
+        if (b < 4) g_tex_slot[ofs] = &g_vram[bank_off[b]];
+        else if (b == 4) for (int i = 0; i < 4; i++) g_texpal_slot[i] = &g_vram[bank_off[b] + 0x4000 * i];
+        else g_texpal_slot[(ofs & 1) + (ofs >> 1) * 4] = &g_vram[bank_off[b]];
+    }
     for (int b = 0; b < 9; b++) {
         uint8_t cnt = g_io[0x240 + b + (b >= 7 ? 1 : 0)];   /* 0x247 is WRAMCNT */
         if (!(cnt & 0x80)) continue;

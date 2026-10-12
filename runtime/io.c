@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include "frontend.h"
 
 uint8_t g_io[0x2000];
 uint64_t g_frame;
@@ -33,11 +34,46 @@ static uint64_t timer_overflows(Core* k, int n, uint64_t now, uint16_t* counter)
     return ticks / period;
 }
 
-uint16_t timer_read(Core* k, int n) { uint16_t v; timer_overflows(k, n, time_cycles(), &v); return v; }
+/* Raise a pending overflow IRQ now (before the timer is read or changed),
+ * instead of waiting for the next scanline check: the game may stop the
+ * timer within the same line, and the IRQ would be lost. */
+static void timer_check(Core* k, int n, uint64_t now) {
+    Timer* t = &k->timer[n];
+    if (!(t->ctl & 0x80)) return;
+    uint64_t o = timer_overflows(k, n, now, NULL);
+    if (o > t->overflows_seen) {
+        t->overflows_seen = o;
+        if (t->ctl & 0x40) irq_raise(k, IRQ_TIMER0 + n);
+    }
+}
+
+uint16_t timer_read(Core* k, int n) {
+    uint64_t now = time_cycles();
+    timer_check(k, n, now);
+    uint16_t v; timer_overflows(k, n, now, &v); return v;
+}
 
 void timer_write(Core* k, int n, uint32_t off, uint32_t val, int size) {
     Timer* t = &k->timer[n];
-    if (off == 0) t->reload = (uint16_t)val;
+    static int tlog = -1; if (tlog < 0) tlog = getenv("DQIX_TLOG") != NULL;
+    if (tlog && k->id == 0 && n == 1)
+        LOG_WARN("tm1 write off %u val %08x size %d (ctl %04x reload %04x, now %llu, if %08x ie %08x ime %u)\n", off, val, size, t->ctl, t->reload,
+                 (unsigned long long)time_cycles(), k->iflags, k->ie, k->ime);
+    timer_check(k, n, time_cycles());
+    for (int m = n + 1; m < 4 && (k->timer[m].ctl & 4); m++) timer_check(k, m, time_cycles());
+    if (off == 0) {
+        uint16_t nr = (uint16_t)val;
+        if ((t->ctl & 0x80) && !((t->ctl & 4) && n > 0) && nr != t->reload) {
+            /* running: keep the current count, continue with the new period
+             * (hardware applies the reload at the next overflow) */
+            uint64_t now = time_cycles();
+            uint16_t c; timer_overflows(k, n, now, &c);
+            uint64_t into = c >= nr ? (uint64_t)(c - nr) : 0;
+            t->reload = nr;
+            t->start = now - into * prescale[t->ctl & 3];
+            t->overflows_seen = 0;
+        } else t->reload = nr;
+    }
     uint16_t ctl;
     if (off == 2) ctl = (uint16_t)val;
     else if (size == 4) ctl = (uint16_t)(val >> 16);
@@ -135,11 +171,12 @@ void time_advance_lines(uint32_t lines) {
             if (g_frame_limit && g_frame >= g_frame_limit) exit(0);
         }
         if (g_vcount < 192) gpu_render_line((int)g_vcount);
-        else if (g_vcount == 192) { gpu_frame_done(); input_update(); }
+        else if (g_vcount == 192) { gpu_frame_done(); gpu3d_vblank(); frontend_frame(); input_update(); }
         line_events(&g_c9);
         line_events(&g_c7);
         timers_update(&g_c9);
         timers_update(&g_c7);
+        sound_advance(CYCLES_PER_LINE);
         arm7_run();
     }
 }
@@ -232,8 +269,9 @@ static uint32_t reg9_read32(uint32_t off) {
     case 0x208: return k->ime;
     case 0x210: return k->ie;
     case 0x214: return k->iflags;
-    case 0x600: return 0x04000002;  /* GXSTAT: FIFO empty, geometry engine idle */
-    default: return IO32(off);
+    default:
+        if (off >= 0x600 && off < 0x6A4) return gx_read(off);
+        return IO32(off);
     }
 }
 
@@ -260,11 +298,16 @@ void io9_write(uint32_t a, uint32_t v, int size) {
     uint32_t mask = size == 4 ? 0xFFFFFFFFu : size == 2 ? 0xFFFFu << sh : 0xFFu << sh;
     uint32_t val32 = size == 4 ? v : (v << sh) & mask;
     switch (base) {
-    case 0x214: k->iflags &= ~val32; return;                         /* write 1 to acknowledge */
+    case 0x214:                                                      /* write 1 to acknowledge */
+        k->iflags &= ~val32;
+        if (gx_irq_line()) k->iflags |= 1u << IRQ_GXFIFO;             /* level-triggered */
+        return;
     case 0x208: k->ime = ((k->ime & ~mask) | (val32 & mask)) & 1; irq_service(&g_arm9); return;
     case 0x210: k->ie = (k->ie & ~mask) | (val32 & mask); irq_service(&g_arm9); return;
     case 0x1A0: case 0x1A4: case 0x1A8: case 0x1AC: card_write(k, off, v, size); return;
     }
+    if (base >= 0x400 && base < 0x600) { gx_write(base, size == 4 ? v : val32); return; }
+    if (base == 0x600) { memcpy(&g_io[off], &v, size); gx_write(0x600, IO32(0x600)); return; }
     memcpy(&g_io[off], &v, size);
     switch (base) {
     case 0x0B8: case 0x0C4: case 0x0D0: case 0x0DC: if ((off & 3) + size > 2) dma_write_ctl(k, (base - 0xB8) / 12); break;

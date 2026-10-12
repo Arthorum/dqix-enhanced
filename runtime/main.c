@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include "frontend.h"
 #include "dispatch.h"
 
 uint8_t* g_rom;
@@ -46,6 +47,9 @@ static void boot_firmware(void) {
     for (int i = 0; nick[i]; i++) ram16(us + 0x06 + 2 * i, (uint16_t)nick[i]);
     ram16(us + 0x1A, (uint16_t)strlen(nick));
     ram16(us + 0x64, 0x0001 | 0x0400);       /* English, backlight */
+    /* touch calibration, as in io7.c: ADC (0x200,0x200) -> pixel (0x20,0x20), (0xE00,0xE00) -> (0xE0,0xA0) */
+    ram16(us + 0x58, 0x200); ram16(us + 0x5A, 0x200); ram8(us + 0x5C, 0x20); ram8(us + 0x5D, 0x20);
+    ram16(us + 0x5E, 0xE00); ram16(us + 0x60, 0xE00); ram8(us + 0x62, 0xE0); ram8(us + 0x63, 0xA0);
     g_io[0x247] = 3;                         /* WRAMCNT: all shared WRAM to the ARM7 */
     g_io[0x300] = 1; g_io7[0x300] = 1;       /* POSTFLG */
     /* ARM9: system mode, IRQs masked */
@@ -60,11 +64,15 @@ static void boot_firmware(void) {
              a9_size, a9_load, rom32(0x24), a7_size, a7_load, rom32(0x34));
 }
 
+void prof_report(FILE* f);
+void threads_dump(FILE* f);
 static void report(void) {
     backup_flush();
     fprintf(stderr, "\n--- stopped after %llu frames, %u thread switches, %llu function calls traced ---\n",
             (unsigned long long)g_frame, g_thread_switches, g_calls_traced);
     trace_dump(stderr, 40);
+    prof_report(stderr);
+    if (getenv("DQIX_THREADS")) threads_dump(stderr);
 }
 
 int main(int argc, char** argv) {
@@ -77,6 +85,7 @@ int main(int argc, char** argv) {
     if (argc > 4) g_log_level = atoi(argv[4]);
     backup_init(argc > 5 ? argv[5] : "dqix.sav");
     atexit(report);
+    frontend_init(argc, argv);
     dispatch_init();
     overlays_init(argv[2]);
     firmware_init();

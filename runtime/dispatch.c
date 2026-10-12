@@ -148,12 +148,62 @@ static const char* name_in(Table* t, uint32_t addr) {
 const char* recomp_func_name(uint32_t addr) { return name_in(&g_t9, addr); }
 const char* recomp7_func_name(uint32_t addr) { return name_in(&g_t7, addr); }
 
+/* Optional profile of function entries: DQIX_PROF="first_frame,last_frame". */
+#define PROF_N 65536
+static uint32_t g_prof_addr[PROF_N], g_prof_cnt[PROF_N];
+static int g_prof_state = -1;                     /* -1 unknown, 0 off, 1 on */
+static uint64_t g_prof_from, g_prof_to;
+static void prof_add(uint32_t addr, int cpu) {
+    if (g_prof_state < 0) {
+        const char* e = getenv("DQIX_PROF");
+        unsigned long long a, b;
+        g_prof_state = e && sscanf(e, "%llu,%llu", &a, &b) == 2;
+        if (g_prof_state) { g_prof_from = a; g_prof_to = b; }
+    }
+    if (!g_prof_state || g_frame < g_prof_from || g_frame > g_prof_to) return;
+    uint32_t key = addr | (cpu == 7 ? 0x80000000u : 0);   /* addresses are < 0x80000000 */
+    uint32_t h = (key * 2654435761u) >> 16;
+    for (;; h = (h + 1) & (PROF_N - 1)) {
+        if (g_prof_addr[h] == key) { g_prof_cnt[h]++; return; }
+        if (!g_prof_addr[h]) { g_prof_addr[h] = key; g_prof_cnt[h] = 1; return; }
+    }
+}
+void prof_report(FILE* f) {
+    if (g_prof_state != 1) return;
+    fprintf(f, "profile, frames %llu-%llu (function entries):\n", (unsigned long long)g_prof_from, (unsigned long long)g_prof_to);
+    for (int k = 0; k < 50; k++) {
+        int best = -1;
+        for (int i = 0; i < PROF_N; i++) if (g_prof_cnt[i] && (best < 0 || g_prof_cnt[i] > g_prof_cnt[best])) best = i;
+        if (best < 0) break;
+        uint32_t key = g_prof_addr[best], a = key & 0x7FFFFFFF;
+        int cpu = key >> 31 ? 7 : 9;
+        fprintf(f, "  %10u  ARM%d %08x %s\n", g_prof_cnt[best], cpu, a, cpu == 7 ? recomp7_func_name(a) : recomp_func_name(a));
+        g_prof_cnt[best] = 0;
+    }
+}
+
+void threads_note_call(int arm7, uint32_t addr);
 void recomp_trace_enter(uint32_t addr) {
+    prof_add(addr, 9);
+    threads_note_call(0, addr);
     g_trace_cpu[g_trace_pos % TRACE_N] = 9;
     g_trace[g_trace_pos++ % TRACE_N] = addr;
     g_calls_traced++;
+    /* DQIX_TRACEFN="addr,count[,from_frame]": dump the trace when addr is entered */
+    static int st = -1; static uint32_t fn_addr; static int fn_left; static unsigned long long fn_from;
+    if (st < 0) {
+        const char* e = getenv("DQIX_TRACEFN");
+        st = e && sscanf(e, "%x,%d,%llu", &fn_addr, &fn_left, &fn_from) >= 2;
+    }
+    if (st && addr == fn_addr && fn_left > 0 && g_frame >= fn_from) {
+        fn_left--;
+        fprintf(stderr, "[f%llu] entered %08x, lr %08x, sp %08x\n", (unsigned long long)g_frame, addr, g_arm9.r[14], g_arm9.r[13]);
+        trace_dump(stderr, 16);
+    }
 }
 void recomp7_trace_enter(uint32_t addr) {
+    prof_add(addr, 7);
+    threads_note_call(1, addr);
     g_trace_cpu[g_trace_pos % TRACE_N] = 7;
     g_trace[g_trace_pos++ % TRACE_N] = addr;
     g_calls_traced++;

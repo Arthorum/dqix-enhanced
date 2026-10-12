@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include "nds.h"
+#include "frontend.h"
 
 uint8_t g_io7[0x1000];
 static uint8_t g_wifi[0x10000];   /* 0x04800000: wireless registers, not emulated */
@@ -79,16 +80,21 @@ static uint8_t spi_xfer(int dev, uint8_t in, int first) {
         return 0xFF;
     }
     case 2: {   /* touch screen controller (input.c supplies the readings) */
+        /* TSC2046: after a command byte, the next two bytes clock out the 12-bit
+         * result (MSB first, one bit late). The SDK sends the next command as the
+         * second of those bytes, so output first, then latch a new command. */
+        uint16_t v = (uint16_t)(g_tsc_val << 3);
+        uint8_t out = g_spi_pos == 0 ? (uint8_t)(v >> 8) : g_spi_pos == 1 ? (uint8_t)v : 0;
+        g_spi_pos++;
         if (in & 0x80) {
             g_tsc_cmd = in;
             int ch = (in >> 4) & 7;
             g_tsc_val = input_touch_adc(ch);
             g_spi_pos = 0;
-            return 0;
+            static int tlog = -1; if (tlog < 0) tlog = getenv("DQIX_TSCLOG") != NULL;
+            if (tlog && g_touch_down) fprintf(stderr, "[f%llu l%u] tsc cmd %02x ch %d -> %u (touch %d,%d)\n", (unsigned long long)g_frame, g_vcount, in, ch, g_tsc_val, g_touch_x, g_touch_y);
         }
-        int n = g_spi_pos++;
-        uint16_t v = (uint16_t)(g_tsc_val << 3);
-        return n == 0 ? (uint8_t)(v >> 8) : (uint8_t)v;
+        return out;
     }
     default: return 0xFF;
     }
@@ -131,7 +137,11 @@ static void rtc_begin_command(uint8_t raw) {
     g_rtc_len = lens[reg];
     g_rtc_idx = 0;
     if (rd) {
-        time_t now = time(NULL);
+        /* Clock = start time + emulated time, so runs are reproducible.
+         * DQIX_RTC=<unix time> fixes the start (debugging). */
+        static time_t base;
+        if (!base) { const char* e = getenv("DQIX_RTC"); base = e ? (time_t)strtoll(e, NULL, 10) : time(NULL); }
+        time_t now = base + (time_t)(g_frame / 60);
         struct tm* t = localtime(&now);
         memset(g_rtc_buf, 0, sizeof g_rtc_buf);
         switch (reg) {
@@ -211,9 +221,9 @@ static uint32_t reg7_read32(uint32_t off) {
         return st | ((uint32_t)(g_io[0x247] & 3) << 8);
     }
     default:
-        if (off >= 0x400 && off < 0x520) {                        /* sound: channels stop at once (no mixer yet) */
-            uint32_t v = IO7_32(off);
-            if ((off & 0xF) == 0 && off < 0x500) v &= ~0x80000000u;
+        if (off >= 0x400 && off < 0x500 && (off & 0xF) == 0) {     /* SOUNDxCNT: busy while the channel plays */
+            uint32_t v = IO7_32(off) & ~0x80000000u;
+            if (sound_chan_busy((off - 0x400) / 16)) v |= 0x80000000u;
             return v;
         }
         return IO7_32(off);
@@ -267,7 +277,9 @@ void io7_write(uint32_t a, uint32_t v, int size) {
         }
         break;
     }
+    uint32_t old_cnt = IO7_32(base);
     memcpy(&g_io7[off], &v, size);
+    if (base >= 0x400 && base < 0x500 && (base & 0xF) == 0) sound_cnt_written((base - 0x400) / 16, old_cnt);
     switch (base) {
     case 0x0B8: case 0x0C4: case 0x0D0: case 0x0DC: if ((off & 3) + size > 2) dma_write_ctl(k, (base - 0xB8) / 12); break;
     case 0x100: case 0x104: case 0x108: case 0x10C: timer_write(k, (base - 0x100) / 4, off - base, v, size); break;

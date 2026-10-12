@@ -21,7 +21,12 @@ static void rom_start(Core* k, uint32_t ctl) {
             if (a < 0x8000) a = 0x8000 + (a & 0x1FF);
             g_card_buf[i] = g_rom[a % g_rom_size];
         }
-        LOG_DEBUG("card: %s reads %x bytes at %08x\n", k->name, len, addr);
+        int dmas = 0;
+        for (int ch = 0; ch < 4; ch++) if (k->dma[ch].pending == DMA_CARD && (k->dma[ch].ctl & 0x80000000u)) {
+            dmas |= 1 << ch;
+            LOG_DEBUG("card: dma%d ctl %08x src %08x dst %08x\n", ch, k->dma[ch].ctl, k->dma[ch].src, k->dma[ch].dst);
+        }
+        LOG_DEBUG("card: %s reads %x bytes at %08x (ctl %08x, spicnt %04x, card dma %x, lr %08x)\n", k->name, len, addr, ctl, IO16(0x1A0), dmas, k->cpu->r[14]);
     } else if (cmd[0] == 0xB8) {
         for (uint32_t i = 0; i < len; i += 4) { uint32_t id = 0x00003FC2; memcpy(&g_card_buf[i], &id, 4); }
     } else {
@@ -31,7 +36,16 @@ static void rom_start(Core* k, uint32_t ctl) {
     if (len == 0) { ctl &= ~0x80000000u; memcpy(&g_io[0x1A4], &ctl, 4); return; }
     ctl |= 0x00800000u;  /* data word ready */
     memcpy(&g_io[0x1A4], &ctl, 4);
-    dma_on_event(k, DMA_CARD);
+    /* A card DMA moves its word count per "word ready" event (usually 1, repeating):
+     * keep signalling until the transfer is drained or no card DMA is armed. */
+    for (;;) {
+        int armed = 0;
+        for (int ch = 0; ch < 4; ch++) if (k->dma[ch].pending == DMA_CARD && (k->dma[ch].ctl & 0x80000000u)) armed = 1;
+        if (!armed || g_card_pos >= g_card_len) break;
+        uint32_t before = g_card_pos;
+        dma_on_event(k, DMA_CARD);
+        if (g_card_pos == before) break;
+    }
 }
 
 uint32_t card_read_data(Core* k) {
@@ -43,6 +57,7 @@ uint32_t card_read_data(Core* k) {
         if (g_card_pos >= g_card_len) {
             uint32_t ctl = IO32(0x1A4) & ~0x80800000u;
             memcpy(&g_io[0x1A4], &ctl, 4);
+            LOG_DEBUG("card: transfer done (irq %d)\n", !!(IO16(0x1A0) & 0x4000));
             if (IO16(0x1A0) & 0x4000) irq_raise(g_card_owner ? g_card_owner : k, IRQ_CARD_DONE);
         }
     }

@@ -30,6 +30,8 @@ typedef struct Thread {
     Cpu cpu;               /* register state while switched out */
     uint32_t start_pc;
     int alive;
+    uint32_t hist[32];     /* recent function entries on this thread (debugging) */
+    unsigned nhist;
 } Thread;
 
 typedef struct ThreadSys {
@@ -72,6 +74,32 @@ void threads_init(void) {
     g_ts9.cur = alloc_thread(&g_ts9, 0);           /* the host's main stack runs the ARM9 */
     coro_init_main(&g_ts9.cur->co);
 }
+
+/* Record a function entry for the thread running on this CPU. */
+void threads_note_call(int arm7, uint32_t addr) {
+    Thread* t = arm7 ? g_ts7.cur : g_ts9.cur;
+    if (t) t->hist[t->nhist++ % 32] = addr;
+}
+
+const char* recomp_func_name(uint32_t addr);
+const char* recomp7_func_name(uint32_t addr);
+static void dump_sys(FILE* f, ThreadSys* ts) {
+    const Bus* b = ts->core->bus;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        Thread* t = &ts->threads[i];
+        if (!t->alive) continue;
+        uint32_t state = t->ctx ? b->r32(t->ctx + ts->off_state) : 0;
+        uint32_t prio = t->ctx ? b->r32(t->ctx + ts->off_state + 0xC) : 0;
+        fprintf(f, "%s thread %08x (start %08x) state %u prio %u%s, last calls (newest last):\n", ts->core->name, t->ctx, t->start_pc,
+                state, prio, t == ts->cur ? " [running]" : "");
+        unsigned n = t->nhist < 12 ? t->nhist : 12;
+        for (unsigned k = n; k > 0; k--) {
+            uint32_t a = t->hist[(t->nhist - k) % 32];
+            fprintf(f, "    %08x %s\n", a, ts == &g_ts7 ? recomp7_func_name(a) : recomp_func_name(a));
+        }
+    }
+}
+void threads_dump(FILE* f) { dump_sys(f, &g_ts9); if (getenv("DQIX_THREADS7")) dump_sys(f, &g_ts7); }
 
 void* threads_current_coro(Core* k) { return &k->threads->cur->co; }
 int arm7_is_running(void) { return g_in_arm7; }

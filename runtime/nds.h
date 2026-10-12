@@ -38,6 +38,19 @@ void vram_remap(void);
 uint8_t* vram_ptr(uint32_t addr);        /* ARM9 view; NULL when unmapped */
 uint8_t* vram7_ptr(uint32_t addr);       /* ARM7 view (banks C/D) */
 uint8_t* vram_bank(int b);               /* bank A..I = 0..8 */
+extern uint8_t* g_tex_slot[4];           /* 3D texture image slots (128 KB each), NULL if unmapped */
+extern uint8_t* g_texpal_slot[6];        /* 3D texture palette slots (16 KB each) */
+void gpu3d_vblank(void);                 /* swap + render the 3D frame */
+uint32_t gx_read(uint32_t off);
+int gx_irq_line(void);
+/* sound (sound.c) */
+void sound_advance(uint32_t cycles);
+void sound_cnt_written(int n, uint32_t old);
+int sound_chan_busy(int n);
+uint32_t sound_read(int16_t* dst, uint32_t frames);
+uint32_t sound_buffered(void);
+void sound_discard(void);                   /* GXFIFO interrupt condition (level) */          /* 3D registers 0x600-0x6A3 */
+void gx_write(uint32_t off, uint32_t v); /* geometry FIFO / command ports 0x400-0x5FF, GXSTAT */
 uint32_t vram_bank_size(int b);
 uint8_t  vram_bank_cnt(int b);           /* its VRAMCNT value */
 
