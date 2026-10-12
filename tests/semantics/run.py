@@ -155,7 +155,7 @@ def run_mode(mode, iters):
         f.write('#include "cpu.h"\n#include "funcs.h"\n\n' + "\n\n".join(code))
     with open(f"{gen}/table.c", "w") as f:
         f.write('#include "funcs.h"\n#include "dispatch.h"\nconst RecompFunc g_recomp_funcs[] = {\n')
-        f.write("".join(f"  {{-1, {x.addr | x.thumb}u, {x.size}, {x.cname}}},\n" for x in funcs))
+        f.write("".join(f"  {{-1, {x.addr | x.thumb}u, {x.size}, {x.cname}, \"{x.name}\"}},\n" for x in funcs))
         f.write("};\nconst unsigned g_recomp_func_count = sizeof g_recomp_funcs / sizeof g_recomp_funcs[0];\n")
     tests = sorted(n for n in names if n.startswith("t_") and n != "t_many_args_callee")
     decls = "\n".join(f"uint32_t {t}(uint32_t, uint32_t, uint32_t, uint32_t);" for t in tests)

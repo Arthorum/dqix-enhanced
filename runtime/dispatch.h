@@ -8,6 +8,7 @@ typedef struct RecompFunc {
     uint32_t addr;
     uint32_t size;
     void (*fn)(Cpu* c);
+    const char* name;
 } RecompFunc;
 
 extern const RecompFunc g_recomp_funcs[];

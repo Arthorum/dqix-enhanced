@@ -311,7 +311,9 @@ class Recompiler:
         order = sorted(insns)
         has_jump_reg = any(insns[a].flow == JUMP_REG for a in order)
         out = [f"/* {func.name} ({'thumb' if func.thumb else 'arm'}, {func.size:#x} bytes) */",
-               f"void {func.cname}(Cpu* c) {{"]
+               f"void {func.cname}(Cpu* c) {{",
+               f"    RECOMP_ENTER({h(func.addr | func.thumb)});",
+               "    const uint32_t entry_lr = c->r[14]; (void)entry_lr;"]
         start, end = func.addr, func.addr + func.size
         tbit = 1 if func.thumb else 0
 
@@ -320,11 +322,16 @@ class Recompiler:
                 return f"goto L_{target:08x};"
             if start <= target < end:
                 self.stats["branch_into_data"] += 1
-            return self.call_stmt(mod, from_addr, target, func.thumb) + " return;"
+            # Tail call. If this function changed lr before jumping (e.g. the
+            # SDK IRQ dispatcher sets lr = OS_IrqHandler_ThreadSwitch), the
+            # callee "returns" to that address: continue there.
+            return ("{ uint32_t tl = c->r[14]; " + self.call_stmt(mod, from_addr, target, func.thumb)
+                    + f" if (tl != entry_lr) dispatch_call(c, tl, {h(from_addr)}); return; }}")
 
         def local_switch(expr, from_addr):
             cases = " ".join(f"case {h(t)}: goto L_{t:08x};" for t in sorted(labels) if t in insns)
-            return (f"switch (({expr}) & ~1u) {{ {cases} default: dispatch_call(c, {expr}, {h(from_addr)}); return; }}")
+            return (f"switch (({expr}) & ~1u) {{ {cases} default: {{ uint32_t tl = c->r[14]; dispatch_call(c, {expr}, {h(from_addr)}); "
+                    f"if (tl != entry_lr) dispatch_call(c, tl, {h(from_addr)}); return; }} }}")
 
         prev_sets_lr = False
         for idx, a in enumerate(order):
@@ -402,10 +409,17 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--per-file", type=int, default=400)
+    ap.add_argument("--hle", help="file listing '<module> <addr>' functions the runtime provides instead")
     args = ap.parse_args()
 
     mods = load_modules(args.extract, args.config)
     rc = Recompiler(mods)
+    hle = set()
+    if args.hle:
+        for line in open(args.hle):
+            line = line.split("#")[0].split()
+            if len(line) == 2:
+                hle.add((line[0], int(line[1], 16)))
     os.makedirs(args.out, exist_ok=True)
 
     # Translate everything in memory first: translating can discover secondary
@@ -414,6 +428,10 @@ def main():
     queue = list(rc.all_funcs())
     while queue:
         for fn in queue:
+            if (fn.module.name, fn.addr) in hle:
+                code[(fn.module.name, fn.addr)] = f"/* {fn.cname}: provided by the runtime (HLE) */"
+                rc.stats["hle_functions"] += 1
+                continue
             code[(fn.module.name, fn.addr)] = rc.emit_func(fn)
         queue, rc.pending = rc.pending, []
 
@@ -438,7 +456,7 @@ def main():
     with open(os.path.join(args.out, "dispatch_table.c"), "w") as f:
         f.write('#include "funcs.h"\n#include "dispatch.h"\n\nconst RecompFunc g_recomp_funcs[] = {\n')
         for fn in funcs:
-            f.write(f"    {{ {fn.module.ovl_id}, {h(fn.addr | fn.thumb)}, {fn.size}, {fn.cname} }},\n")
+            f.write(f"    {{ {fn.module.ovl_id}, {h(fn.addr | fn.thumb)}, {fn.size}, {fn.cname}, \"{fn.name}\" }},\n")
         f.write("};\nconst unsigned g_recomp_func_count = sizeof(g_recomp_funcs) / sizeof(g_recomp_funcs[0]);\n")
 
     with open(os.path.join(args.out, "report.txt"), "w") as f:

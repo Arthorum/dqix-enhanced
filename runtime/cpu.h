@@ -18,6 +18,9 @@ typedef struct Cpu {
     uint32_t cpsr_ctl;
     /* Set when a recompiled function hits something it cannot handle. */
     uint32_t fault_addr;
+    /* Banked r13/r14/SPSR per CPU mode (index from cpu_mode_index()).
+     * Only the runtime touches these; generated code never does. */
+    uint32_t bank_r13[6], bank_r14[6], spsr[6];
 } Cpu;
 
 /* ---- services the runtime provides ---------------------------------- */
@@ -127,6 +130,14 @@ static inline uint32_t add_q(Cpu* c, uint32_t a, uint32_t b) {
 }
 static inline uint32_t clz32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v) : 32; }
 static inline int32_t half(uint32_t v, int top) { return top ? (int32_t)v >> 16 : (int32_t)(int16_t)v; }
+
+/* Optional function-entry tracing (build with -DRECOMP_TRACE). */
+#ifdef RECOMP_TRACE
+void recomp_trace_enter(uint32_t addr);
+#define RECOMP_ENTER(a) recomp_trace_enter(a)
+#else
+#define RECOMP_ENTER(a) ((void)0)
+#endif
 
 #define COND_EQ (c->z)
 #define COND_NE (!c->z)
