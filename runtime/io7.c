@@ -137,12 +137,8 @@ static void rtc_begin_command(uint8_t raw) {
     g_rtc_len = lens[reg];
     g_rtc_idx = 0;
     if (rd) {
-        /* Clock = start time + emulated time, so runs are reproducible.
-         * DQIX_RTC=<unix time> fixes the start (debugging). */
-        static time_t base;
-        if (!base) { const char* e = getenv("DQIX_RTC"); base = e ? (time_t)strtoll(e, NULL, 10) : time(NULL); }
-        time_t now = base + (time_t)(g_frame / 60);
-        struct tm* t = localtime(&now);
+        time_t now = (time_t)(rtc_base() + (int64_t)(g_frame / 60));
+        struct tm* t = gmtime(&now);                               /* base is already local time */
         memset(g_rtc_buf, 0, sizeof g_rtc_buf);
         switch (reg) {
         case 0: g_rtc_buf[0] = g_rtc_status1; break;
@@ -194,6 +190,26 @@ uint16_t rtc_read_reg(void) {
         v = (uint16_t)((v & ~1u) | ((byte >> g_rtc_nbits) & 1));
     }
     return v;
+}
+
+/* The DS clock = the PC's local time at launch + emulated time, so a run can
+ * be replayed exactly. The base is "local time as if it were UTC" (seconds),
+ * which keeps replays independent of the replaying machine's time zone.
+ * DQIX_RTC=<that value> fixes it (replays, tests). */
+static int64_t g_rtc_base = -1;
+int64_t rtc_base(void) {
+    if (g_rtc_base < 0) {
+        const char* e = getenv("DQIX_RTC");
+        if (e) g_rtc_base = strtoll(e, NULL, 10);
+        else {
+            time_t now = time(NULL);
+            struct tm lt = *localtime(&now);
+            struct tm gt = *gmtime(&now);
+            lt.tm_isdst = 0; gt.tm_isdst = 0;
+            g_rtc_base = (int64_t)now + (int64_t)difftime(mktime(&lt), mktime(&gt));
+        }
+    }
+    return g_rtc_base;
 }
 
 /* ================================================================ registers */

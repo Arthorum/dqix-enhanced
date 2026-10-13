@@ -43,6 +43,10 @@ extern uint8_t* g_texpal_slot[6];        /* 3D texture palette slots (16 KB each
 void gpu3d_vblank(void);                 /* swap + render the 3D frame */
 uint32_t gx_read(uint32_t off);
 int gx_irq_line(void);
+int64_t rtc_base(void);                  /* clock start (local time, seconds) */
+/* reports (report.c) */
+void report_write(const char* reason);
+void report_log_line(const char* line);
 /* sound (sound.c) */
 void sound_advance(uint32_t cycles);
 void sound_cnt_written(int n, uint32_t old);

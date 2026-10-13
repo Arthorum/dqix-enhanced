@@ -76,6 +76,9 @@ static int g_backup_dirty;
 static uint8_t g_bk_cmd, g_bk_status;
 static uint32_t g_bk_addr, g_bk_count;
 
+static uint8_t* g_backup_at_boot;     /* the save as it was at launch (for replays) */
+static int g_backup_existed;
+
 void backup_init(const char* path) {
     memset(g_backup, 0xFF, sizeof g_backup);
     snprintf(g_backup_path, sizeof g_backup_path, "%s", path);
@@ -83,10 +86,16 @@ void backup_init(const char* path) {
     if (f) {
         size_t n = fread(g_backup, 1, BACKUP_MAX, f);
         fclose(f);
-        if (n) g_backup_size = (uint32_t)n;
+        if (n) { g_backup_size = (uint32_t)n; g_backup_existed = 1; }
         LOG_INFO("save: loaded %zu bytes from %s\n", n, path);
     }
+    g_backup_at_boot = malloc(g_backup_size);
+    memcpy(g_backup_at_boot, g_backup, g_backup_size);
 }
+
+/* For reports: the save at launch (if there was one) and as it is now. */
+int backup_write_boot(FILE* f) { if (!g_backup_existed) return 0; fwrite(g_backup_at_boot, 1, g_backup_size, f); return 1; }
+void backup_write_now(FILE* f) { fwrite(g_backup, 1, g_backup_size, f); }
 
 void backup_flush(void) {
     if (!g_backup_dirty || !g_backup_path[0]) return;

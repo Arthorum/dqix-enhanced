@@ -351,17 +351,24 @@ void cpu7_unhandled(Cpu* c, uint32_t a, uint32_t w) {
 int g_log_level = 2;
 void rt_log(int level, const char* fmt, ...) {
     if (level > g_log_level) return;
+    char line[512];
+    int n = snprintf(line, sizeof line, "[f%llu l%u %s] ", (unsigned long long)g_frame, g_vcount, arm7_is_running() ? "7" : "9");
     va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[f%llu l%u %s] ", (unsigned long long)g_frame, g_vcount, arm7_is_running() ? "7" : "9");
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
+    fputs(line, stderr);
+    report_log_line(line);
 }
 _Noreturn void rt_fatal(const char* fmt, ...) {
+    char msg[512];
     va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "FATAL [frame %llu, %s]: ", (unsigned long long)g_frame, arm7_is_running() ? "ARM7" : "ARM9");
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
+    fprintf(stderr, "FATAL [frame %llu, %s]: %s", (unsigned long long)g_frame, arm7_is_running() ? "ARM7" : "ARM9", msg);
     trace_dump(stderr, 32);
     backup_flush();
+    char reason[600];
+    snprintf(reason, sizeof reason, "crash: %s", msg);
+    report_write(reason);
     exit(1);
 }

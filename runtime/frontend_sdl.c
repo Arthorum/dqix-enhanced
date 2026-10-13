@@ -7,6 +7,7 @@
  *   touch screen <- left mouse button on the bottom screen
  *   Tab (hold) = fast forward     F11 = fullscreen     F2 = screens side by side / stacked
  *   F3 = window size 1x..4x       F12 = screenshot (dqix-shot-N.bmp)
+ *   F10 = bug report (reports/<date-time>/: screenshot, inputs, saves, log)
  *   Esc = quit (the save file is always up to date)
  * A game controller works too (Nintendo layout by position: right face button = A). */
 #define SDL_MAIN_HANDLED
@@ -163,6 +164,9 @@ static void present(void) {
         SDL_RenderCopy(g_ren, g_tex, &top, &dt);
         SDL_RenderCopy(g_ren, g_tex, &bot, &db);
     } else SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
+    static long long report_at = -2;
+    if (report_at == -2) { const char* e = getenv("DQIX_REPORT_AT"); report_at = e ? atoll(e) : -1; }
+    if (report_at >= 0 && g_frame == (uint64_t)report_at) report_write("DQIX_REPORT_AT (test)");
     static long long shot_at = -2;
     if (shot_at == -2) { const char* e = getenv("DQIX_SHOT_AT"); shot_at = e ? atoll(e) : -1; }
     if (g_shot_req || (shot_at >= 0 && g_frame == (uint64_t)shot_at)) { save_screenshot(); g_shot_req = 0; }
@@ -184,6 +188,11 @@ void frontend_frame(void) {
             if (e.key.keysym.scancode == SDL_SCANCODE_F2 && g_win) { g_side_by_side = !g_side_by_side; layout_window(); }
             if (e.key.keysym.scancode == SDL_SCANCODE_F3 && g_win) { g_scale = g_scale % 4 + 1; layout_window(); }
             if (e.key.keysym.scancode == SDL_SCANCODE_F12) g_shot_req = 1;
+            if (e.key.keysym.scancode == SDL_SCANCODE_F10) {
+                report_write("F10 pressed");
+                if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
+                g_fps_t0 = SDL_GetPerformanceCounter();           /* keep that title up for a second */
+            }
             break;
         case SDL_CONTROLLERDEVICEADDED:
             if (!g_pad) g_pad = SDL_GameControllerOpen(e.cdevice.which);

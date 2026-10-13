@@ -27,7 +27,20 @@ the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
 | touch screen | left mouse button on the bottom screen | |
 
 Tab (hold) = fast forward, F2 = screens side by side, F3 = window size,
-F11 = fullscreen, F12 = screenshot, Esc = quit.
+F11 = fullscreen, F12 = screenshot, F10 = bug report, Esc = quit.
+
+**Bug reports.** F10 (or a crash) writes `reports/<date-time>/` next to the
+game: a screenshot, every input since launch, the save as it was at launch and
+now, the clock start and the log. The emulation is deterministic, so replaying
+a report reproduces the session exactly:
+
+```
+DQIX_RTC=<rtc_base from info.txt> DQIX_INPUT_FILE=input.txt ./dqix <rom> <extract> <frame+1> 1 <copy of boot.sav>
+```
+
+**Patches.** `patches.txt` overrides individual instructions when the game is
+recompiled (the ROM is never changed). It currently removes the anti-piracy
+memory leak in the file loader that froze the game after the first battle.
 
 ## Status
 
@@ -78,7 +91,9 @@ tools/where.sh      # if it hangs: backtrace + both CPUs' state
 Testing aids (environment variables):
 
 ```
-DQIX_INPUT="1780:touch=128,160:10;2400:A:20"   scripted input (frame:buttons|touch=x,y:frames)
+DQIX_INPUT="1780:touch=128,160:10;2400:A:20"   scripted input (frame:buttons+touch=x,y:frames)
+DQIX_INPUT_FILE=input.txt                      the same from a file (reports use this)
+DQIX_WATCH=addr                                log every ARM9 write to that word, with a call trace
 DQIX_DUMP=dir,30                               write every 30th frame as .ppm
 DQIX_RTC=1760000000                            fixed clock start (reproducible runs)
 DQIX_PROF=from,to                              function-entry profile for those frames
@@ -114,6 +129,8 @@ runtime/sound.c        sound channels and mixer
 runtime/input.c        DS buttons / touch from the frontend or a script
 runtime/frontend_sdl.c window, input, audio, pacing (SDL2)
 runtime/frontend_none.c headless frontend (tests)
+runtime/report.c       F10 / crash reports (inputs, saves, screenshot, log)
+patches.txt            instruction overrides applied when recompiling
 build-pc.bat           one-click Windows build (installs MSYS2 first time)
 build-windows.sh       the build itself (runs inside MSYS2)
 hle.txt / hle7.txt     functions the runtime provides instead (thread switch)

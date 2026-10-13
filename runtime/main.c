@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
     backup_init(argc > 5 ? argv[5] : "dqix.sav");
     atexit(report);
     frontend_init(argc, argv);
+    rtc_base();                              /* fix the clock start now (reports replay from it) */
     dispatch_init();
     overlays_init(argv[2]);
     firmware_init();
