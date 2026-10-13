@@ -7,7 +7,7 @@ D=..
 OUT=$D/build/pc
 mkdir -p "$OUT"
 echo "== Recompiling the game's code to C (about a minute)"
-python recomp/build.py --extract $D/extract/usa --config $D/config/usa/arm9 --out $D/build/recomp --hle hle.txt --interpret interpret.txt
+python recomp/build.py --extract $D/extract/usa --config $D/config/usa/arm9 --out $D/build/recomp --hle hle.txt --interpret interpret.txt --patch patches.txt
 python recomp/arm7.py --extract $D/extract/usa --out $D/build/recomp7 --hle hle7.txt
 echo "== Compiling (the first time takes a while; later builds only redo what changed)"
 make -j"$(nproc)" -f build.mk GEN=$D/build/recomp GEN7=$D/build/recomp7 OBJ=$D/build/obj FRONTEND=sdl OUT="$OUT/dqix.exe" \

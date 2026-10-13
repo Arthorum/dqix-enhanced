@@ -507,6 +507,24 @@ class Recompiler:
 PRELUDE = '#include "cpu.h"\n#include "funcs.h"\n\n'
 
 
+def apply_patches(mods, path):
+    """Override instruction words in the code we translate. The ROM itself is
+    untouched (the runtime still compares overlays against the original)."""
+    by_name = {m.name: m for m in mods}
+    for line in open(path):
+        line = line.split("#")[0].split()
+        if len(line) != 3:
+            continue
+        m = by_name[line[0]]
+        addr, word = int(line[1], 16), int(line[2], 16)
+        off = addr - m.base
+        old = int.from_bytes(m.data[off:off + 4], "little")
+        data = bytearray(m.data)
+        data[off:off + 4] = word.to_bytes(4, "little")
+        m.data = bytes(data)
+        print(f"patch {m.name} {addr:08x}: {old:08x} -> {word:08x}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--extract", required=True)
@@ -515,9 +533,12 @@ def main():
     ap.add_argument("--per-file", type=int, default=400)
     ap.add_argument("--hle", help="file listing '<module> <addr>' functions the runtime provides instead")
     ap.add_argument("--interpret", help="file listing '<module> <addr>' functions to run in the interpreter (code that changes at run time)")
+    ap.add_argument("--patch", help="file listing '<module> <addr> <new 32-bit ARM word>' instruction overrides (e.g. removing anti-piracy traps)")
     args = ap.parse_args()
 
     mods = load_modules(args.extract, args.config)
+    if args.patch:
+        apply_patches(mods, args.patch)
     rc = Recompiler(mods)
     interp = set()
     if args.interpret:

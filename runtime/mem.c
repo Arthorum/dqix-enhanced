@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 /* ARM9 memory map. */
 #include <string.h>
 #include "nds.h"
@@ -151,7 +153,19 @@ uint32_t mem_read32(uint32_t a) {
     if (!p) return unmapped_read(a, 4);
     uint32_t v; memcpy(&v, p, 4); return v;
 }
+/* DQIX_WATCH=addr: log ARM9 writes to that word (debugging). */
+static uint32_t g_watch = 1;
+static void watch_hit(uint32_t a, uint32_t v, int size) {
+    fprintf(stderr, "[f%llu l%u] watch: write%d %08x = %x (lr %08x)\n", (unsigned long long)g_frame, g_vcount, size * 8, a, v, g_arm9.r[14]);
+    trace_dump(stderr, getenv("DQIX_TRACEN") ? atoi(getenv("DQIX_TRACEN")) : 24);
+}
+static inline int watching(uint32_t a) {
+    if (__builtin_expect(g_watch == 1, 0)) { const char* e = getenv("DQIX_WATCH"); g_watch = e ? (uint32_t)strtoul(e, NULL, 16) & ~3u : 0; }
+    return g_watch && (a & ~3u) == g_watch;
+}
+
 void mem_write8(uint32_t a, uint8_t v) {
+    if (watching(a)) watch_hit(a, v, 1);
     if ((a >> 24) == 4) { io9_write(a, v, 1); return; }
     /* 8-bit writes to VRAM/palette/OAM are ignored on the DS */
     if ((a >> 24) >= 5 && (a >> 24) <= 7) return;
@@ -160,12 +174,14 @@ void mem_write8(uint32_t a, uint8_t v) {
 }
 void mem_write16(uint32_t a, uint16_t v) {
     a &= ~1u;
+    if (watching(a)) watch_hit(a, v, 2);
     if ((a >> 24) == 4) { io9_write(a, v, 2); return; }
     uint8_t* p = resolve(a, 1);
     if (p) memcpy(p, &v, 2); else LOG_WARN("write16 to unmapped %08x = %04x\n", a, v);
 }
 void mem_write32(uint32_t a, uint32_t v) {
     a &= ~3u;
+    if (watching(a)) watch_hit(a, v, 4);
     if ((a >> 24) == 4) { io9_write(a, v, 4); return; }
     uint8_t* p = resolve(a, 1);
     if (p) memcpy(p, &v, 4); else LOG_WARN("write32 to unmapped %08x = %08x\n", a, v);

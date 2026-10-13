@@ -195,7 +195,10 @@ void sound_cnt_written(int n, uint32_t old) {
     else if (!(now & 0x80000000u) && g_ch[n].active) { g_ch[n].active = 0; g_ch[n].cur = 0; }
 }
 
-int sound_chan_busy(int n) { return g_ch[n].active; }
+int sound_chan_busy(int n) {
+    static int instant = -1; if (instant < 0) instant = getenv("DQIX_SND_INSTANT") != NULL;   /* debugging: old behaviour */
+    return instant ? 0 : g_ch[n].active;
+}
 
 /* Frontend side: take up to n stereo frames; returns how many were available. */
 uint32_t sound_read(int16_t* dst, uint32_t n) {

@@ -197,8 +197,8 @@ void recomp_trace_enter(uint32_t addr) {
     }
     if (st && addr == fn_addr && fn_left > 0 && g_frame >= fn_from) {
         fn_left--;
-        fprintf(stderr, "[f%llu] entered %08x, lr %08x, sp %08x\n", (unsigned long long)g_frame, addr, g_arm9.r[14], g_arm9.r[13]);
-        trace_dump(stderr, 16);
+        fprintf(stderr, "[f%llu] entered %08x, lr %08x, sp %08x, r0-r3 %08x %08x %08x %08x\n", (unsigned long long)g_frame, addr, g_arm9.r[14], g_arm9.r[13], g_arm9.r[0], g_arm9.r[1], g_arm9.r[2], g_arm9.r[3]);
+        trace_dump(stderr, getenv("DQIX_TRACEN") ? atoi(getenv("DQIX_TRACEN")) : 16);
     }
 }
 void recomp7_trace_enter(uint32_t addr) {
