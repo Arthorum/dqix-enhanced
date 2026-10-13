@@ -75,6 +75,13 @@ void threads_init(void) {
     coro_init_main(&g_ts9.cur->co);
 }
 
+/* Priority of the ARM9 thread running now (OSThread +0x70; 0 = highest, 32 = idle). */
+int threads_current_priority9(void) {
+    Thread* t = g_ts9.cur;
+    if (!t || !t->ctx) return 16;
+    return (int)g_c9.bus->r32(t->ctx + g_ts9.off_state + 0xC);
+}
+
 /* Record a function entry for the thread running on this CPU. */
 void threads_note_call(int arm7, uint32_t addr) {
     Thread* t = arm7 ? g_ts7.cur : g_ts9.cur;

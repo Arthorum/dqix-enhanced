@@ -85,27 +85,31 @@ static void render_text_bg(Engine* e, int eng, int bg, int y, BgLine* out) {
         ext = ext_bg_pal(eng, slot);
     }
     uint32_t yy = (y + vofs) & (h - 1);
-    for (int x = 0; x < 256; x++) {
+    uint32_t ty = yy >> 3;
+    for (int x = 0; x < 256;) {
         uint32_t xx = (x + hofs) & (w - 1);
-        uint32_t tx = xx >> 3, ty = yy >> 3;
+        uint32_t tx = xx >> 3;
         uint32_t sb = (tx >> 5) + (ty >> 5) * (w >> 8);
         uint16_t ent = vr16(mapbase + sb * 0x800 + (((ty & 31) * 32 + (tx & 31)) * 2));
-        uint32_t px = xx & 7, py = yy & 7;
-        if (ent & 0x400) px = 7 - px;
+        uint32_t py = yy & 7;
         if (ent & 0x800) py = 7 - py;
         uint32_t tile = ent & 0x3FF;
-        uint16_t col;
-        if (c256) {
-            uint8_t idx = vr8(charbase + tile * 64 + py * 8 + px);
+        int flip = (ent & 0x400) != 0;
+        /* one tile row: 8 (or 4) bytes, contiguous within a 16 KB VRAM page */
+        const uint8_t* row = c256 ? vram_ptr(charbase + tile * 64 + py * 8) : vram_ptr(charbase + tile * 32 + py * 4);
+        uint32_t palbase = c256 ? 0 : (ent >> 12) * 16;
+        for (uint32_t px0 = xx & 7; px0 < 8 && x < 256; px0++, x++) {
+            uint32_t px = flip ? 7 - px0 : px0;
+            uint32_t idx;
+            if (!row) idx = 0;
+            else if (c256) idx = row[px];
+            else idx = (row[px >> 1] >> ((px & 1) * 4)) & 15;
             if (!idx) { out->col[x] = 0; continue; }
-            col = ext ? ext16(ext, (ent >> 12) * 256 + idx) : pal16(e->pal + idx * 2);
-        } else {
-            uint8_t b = vr8(charbase + tile * 32 + py * 4 + px / 2);
-            uint8_t idx = (px & 1) ? b >> 4 : b & 15;
-            if (!idx) { out->col[x] = 0; continue; }
-            col = pal16(e->pal + ((ent >> 12) * 16 + idx) * 2);
+            uint16_t col;
+            if (c256) col = ext ? ext16(ext, (ent >> 12) * 256 + idx) : pal16(e->pal + idx * 2);
+            else col = pal16(e->pal + (palbase + idx) * 2);
+            out->col[x] = (col & 0x7FFF) | PX_OPAQUE;
         }
-        out->col[x] = (col & 0x7FFF) | PX_OPAQUE;
     }
 }
 
@@ -339,23 +343,29 @@ static void render_engine_line(int eng, int y) {
     int mb_mode = mb >> 14, mb_f = mb & 31;
     if (mb_f > 16) mb_f = 16;
 
+    /* drawing order for this line: per priority, sprites first, then BGs by number */
+    int order[20], norder = 0;                                      /* 0-3 BG; 4+prio = sprites of that priority */
+    for (int prio = 0; prio < 4; prio++) {
+        if (obj_on) order[norder++] = 4 + prio;
+        for (int bg = 0; bg < 4; bg++) if (bg_on[bg] && (R16(e, 0x08 + bg * 2) & 3) == prio) order[norder++] = bg;
+    }
     for (int x = 0; x < 256; x++) {
         /* top two layers: layer ids 0-3 BG, 4 OBJ, 5 backdrop */
-        int l1 = 5, l2 = 5, p1 = 4, p2 = 4;
+        int l1 = 5, l2 = 5;
         uint16_t c1 = backdrop, c2 = backdrop;
         uint8_t wm = winmask[x];
-        for (int prio = 0; prio < 4 && l2 == 5; prio++) {
-            if (obj_on && (wm & 0x10) && (objl.col[x] & PX_OPAQUE) && objl.prio[x] == prio) {
-                if (l1 == 5) { l1 = 4; c1 = objl.col[x]; p1 = prio; } else if (l2 == 5) { l2 = 4; c2 = objl.col[x]; p2 = prio; }
+        for (int k = 0; k < norder; k++) {
+            int L = order[k], id;
+            uint16_t c;
+            if (L >= 4) {
+                if (!(wm & 0x10) || !(objl.col[x] & PX_OPAQUE) || objl.prio[x] != L - 4) continue;
+                id = 4; c = objl.col[x];
+            } else {
+                if (!(wm & (1 << L)) || !(bgl[L].col[x] & PX_OPAQUE)) continue;
+                id = L; c = bgl[L].col[x];
             }
-            for (int bg = 0; bg < 4; bg++) {
-                if (!bg_on[bg] || !(wm & (1 << bg)) || (R16(e, 0x08 + bg * 2) & 3) != prio) continue;
-                if (!(bgl[bg].col[x] & PX_OPAQUE)) continue;
-                if (l1 == 5) { l1 = bg; c1 = bgl[bg].col[x]; p1 = prio; }
-                else if (l2 == 5) { l2 = bg; c2 = bgl[bg].col[x]; p2 = prio; break; }
-            }
+            if (l1 == 5) { l1 = id; c1 = c; } else { l2 = id; c2 = c; break; }
         }
-        (void)p1; (void)p2;
         uint16_t out = c1 & 0x7FFF;
         int fx = (wm & 0x20) != 0;
         int top_t1 = (bldcnt >> l1) & 1, sec_t2 = (bldcnt >> (8 + l2)) & 1;
@@ -388,7 +398,16 @@ void gpu_frame_start(void) {
     for (int eng = 0; eng < 2; eng++) for (int bg = 2; bg < 4; bg++) latch_affine(eng, bg);
 }
 
-void gpu_render_line(int line) {
+double g_t2d_ms;
+#include <time.h>
+#ifdef DQIX_TIMING
+static double ms_now2(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+#else
+static double ms_now2(void) { return 0; }
+#endif
+void gpu_render_line_(int line);
+void gpu_render_line(int line) { double t0 = ms_now2(); gpu_render_line_(line); g_t2d_ms += ms_now2() - t0; }
+void gpu_render_line_(int line) {
     if (line == 0) gpu_frame_start();
     gpu3d_render_line(line);
     for (int eng = 0; eng < 2; eng++) {

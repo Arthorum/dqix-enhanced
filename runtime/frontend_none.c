@@ -2,6 +2,7 @@
  * DQIX_WAV=path (for testing); otherwise it is discarded. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "nds.h"
 #include "frontend.h"
 
@@ -29,7 +30,40 @@ void frontend_init(int argc, char** argv) {
     if (p && (g_wav = fopen(p, "wb"))) { wav_header(g_wav, 0); atexit(wav_close); }
 }
 
+/* DQIX_FRAMETIME=from_frame: histogram of host time per frame (performance checks) */
+static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static int g_ft = -1; static unsigned long long g_ft_from; static double g_ft_last; static unsigned g_hist[8]; static double g_ft_max; static unsigned long long g_ft_maxf;
+static unsigned g_slow_n; static double g_slow_3d, g_slow_2d, g_slow_tot;
+static void ft_report(void) {
+    if (g_slow_n) fprintf(stderr, "slow frames (>=25 ms): %u, average %.1f ms: 3D %.1f, 2D %.1f, rest (game code) %.1f\n", g_slow_n, g_slow_tot / g_slow_n,
+                          g_slow_3d / g_slow_n, g_slow_2d / g_slow_n, (g_slow_tot - g_slow_3d - g_slow_2d) / g_slow_n);
+    static const char* lab[8] = { "<4ms", "4-8", "8-12", "12-16.7", "16.7-25", "25-33", "33-50", ">50" };
+    fprintf(stderr, "frame times:"); for (int i = 0; i < 8; i++) fprintf(stderr, " %s:%u", lab[i], g_hist[i]);
+    extern double g_t3d_ms, g_t2d_ms;
+    fprintf(stderr, "  max %.1f ms at frame %llu\n", g_ft_max, g_ft_maxf);
+    extern double g_t3d_part[4];
+    fprintf(stderr, "total: 3D render %.0f ms (clear %.0f, polygons %.0f, edges %.0f, fog %.0f), 2D render %.0f ms\n", g_t3d_ms,
+            g_t3d_part[0], g_t3d_part[1], g_t3d_part[2], g_t3d_part[3], g_t2d_ms);
+}
+static void frame_time(void) {
+    if (g_ft < 0) { const char* e = getenv("DQIX_FRAMETIME"); g_ft = e != NULL; if (e) { g_ft_from = strtoull(e, NULL, 10); atexit(ft_report); } }
+    if (!g_ft) return;
+    double t = now_ms();
+    if (g_frame > g_ft_from && g_ft_last > 0) {
+        double d = t - g_ft_last;
+        extern double g_t3d_ms, g_t2d_ms;
+        static double p3, p2;
+        if (d >= 25) { g_slow_n++; g_slow_3d += g_t3d_ms - p3; g_slow_2d += g_t2d_ms - p2; g_slow_tot += d; }
+        p3 = g_t3d_ms; p2 = g_t2d_ms;
+        int b = d < 4 ? 0 : d < 8 ? 1 : d < 12 ? 2 : d < 16.7 ? 3 : d < 25 ? 4 : d < 33 ? 5 : d < 50 ? 6 : 7;
+        g_hist[b]++;
+        if (d > g_ft_max) { g_ft_max = d; g_ft_maxf = g_frame; }
+    }
+    g_ft_last = t;
+}
+
 void frontend_frame(void) {
+    frame_time();
     int16_t buf[2048 * 2];
     uint32_t n;
     while ((n = sound_read(buf, 2048)) > 0)

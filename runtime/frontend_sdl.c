@@ -31,14 +31,29 @@ static int g_fast;
 static uint32_t g_fps_frames; static uint64_t g_fps_t0;
 static int g_headless;          /* DQIX_NOWINDOW: run without a window (still uses SDL audio off) */
 
+/* Audio drives the pacing: the game runs ~100 ms ahead of what is being
+ * heard, so a slow frame only eats into that cushion instead of causing a
+ * dropout. If the buffer still runs dry, output pauses until it refills
+ * (a clean gap rather than stutter). */
+#define AUDIO_TARGET (32768u / 10)        /* stereo frames queued ahead (~100 ms) */
+static volatile int g_audio_priming = 1;
+
 static void audio_cb(void* u, Uint8* stream, int len) {
     (void)u;
     int16_t* out = (int16_t*)stream;
     uint32_t frames = (uint32_t)len / 4;
+    if (g_audio_priming) {
+        if (sound_buffered() < AUDIO_TARGET / 2) { memset(stream, 0, (size_t)len); return; }
+        g_audio_priming = 0;
+    }
     uint32_t got = sound_read(out, frames);
-    if (got < frames) {                                   /* underrun: hold the last sample to avoid clicks */
+    if (got < frames) {                                   /* ran dry: fade the tail, then wait to refill */
         int16_t l = got ? out[(got - 1) * 2] : 0, r = got ? out[(got - 1) * 2 + 1] : 0;
-        for (uint32_t i = got; i < frames; i++) { out[i * 2] = l; out[i * 2 + 1] = r; }
+        for (uint32_t i = got; i < frames; i++) {
+            int k = (int)(frames - i);
+            out[i * 2] = (int16_t)(l * k / (int)(frames - got + 1)); out[i * 2 + 1] = (int16_t)(r * k / (int)(frames - got + 1));
+        }
+        g_audio_priming = 1;
     }
 }
 
@@ -220,6 +235,11 @@ void frontend_frame(void) {
     if (g_fast) {
         sound_discard();
         g_next_frame = now;
+    } else if (g_audio) {
+        /* follow the sound card's clock: wait while enough audio is queued */
+        uint64_t give_up = now + g_perf_freq / 5;
+        while (sound_buffered() > AUDIO_TARGET && (now = SDL_GetPerformanceCounter()) < give_up) SDL_Delay(1);
+        g_next_frame = now;
     } else {
         g_next_frame += period;
         if (now > g_next_frame + period * 6) g_next_frame = now;          /* fell far behind: don't try to catch up */
@@ -227,9 +247,6 @@ void frontend_frame(void) {
             uint64_t left_ms = (g_next_frame - now) * 1000 / g_perf_freq;
             if (left_ms > 1) SDL_Delay((Uint32)(left_ms - 1));
         }
-        /* keep audio latency bounded (~100 ms) */
-        uint32_t buffered = sound_buffered();
-        if (buffered > 32768 / 4) { int16_t tmp[512]; while (sound_buffered() > 32768 / 10) sound_read(tmp, 256); }
     }
     if (!g_audio) sound_discard();
     g_fps_frames++;

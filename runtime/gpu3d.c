@@ -6,6 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include <time.h>
+#ifdef DQIX_TIMING   /* render timing for performance work (Linux test builds) */
+static double ms_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+#else
+static double ms_now(void) { return 0; }
+#endif
 
 #define IO16_(o) (*(uint16_t*)&g_io[o])
 #define IO32_(o) (*(uint32_t*)&g_io[o])
@@ -643,11 +649,26 @@ static void draw_triangle(const Poly* p, const SVtx* a, const SVtx* b, const SVt
     int alpha_test = (disp3d >> 2) & 1, aref = IO16_(0x340) & 31;
     int blend = (disp3d >> 3) & 1;
     int highlight = (disp3d >> 1) & 1;
+    int edge_mark = (disp3d >> 5) & 1;
     float elen[3];
     if (wire) for (int k = 0; k < 3; k++) elen[k] = sqrtf(A[k] * A[k] + B[k] * B[k]);
     for (int y = miny; y <= maxy; y++) {
         float py = y + 0.5f;
-        for (int x = minx; x <= maxx; x++) {
+        /* this row's span from the three edges (one pixel of margin; the exact
+         * test below still decides every pixel) */
+        float lo = (float)minx, hi = (float)maxx;
+        int empty = 0;
+        for (int k = 0; k < 3; k++) {
+            float r = B[k] * py + C[k];
+            if (A[k] > 0) { float b = -r / A[k] - 0.5f; if (b > lo) lo = b; }
+            else if (A[k] < 0) { float b = -r / A[k] - 0.5f; if (b < hi) hi = b; }
+            else if (r < 0) { empty = 1; break; }
+        }
+        if (empty || lo > hi + 2) continue;
+        int x0 = (int)floorf(lo) - 1, x1 = (int)ceilf(hi) + 1;
+        if (x0 < minx) x0 = minx;
+        if (x1 > maxx) x1 = maxx;
+        for (int x = x0; x <= x1; x++) {
             float px = x + 0.5f;
             float e[3]; int in = 1;
             for (int k = 0; k < 3; k++) {
@@ -702,7 +723,7 @@ static void draw_triangle(const Poly* p, const SVtx* a, const SVtx* b, const SVt
             if (al >= 31) {
                 fb_color[y][x] = col; fb_alpha[y][x] = 31; fb_depth[y][x] = depth;
                 fb_id[y][x] = (uint8_t)id; fb_tid[y][x] = 0; fb_fog[y][x] = (attr >> 15) & 1;
-                fb_edge[y][x] = (uint8_t)on_poly_edge(px, py);
+                fb_edge[y][x] = edge_mark ? (uint8_t)on_poly_edge(px, py) : 0;
             } else {
                 if (fb_tid[y][x] == id + 1) continue;                  /* same translucent polygon id */
                 int da = fb_alpha[y][x];
@@ -729,7 +750,9 @@ static int poly_cmp_y(const void* x, const void* y) {
     return a < b ? -1 : a > b ? 1 : 0;
 }
 
+double g_t3d_part[4];
 static void render_frame(int buf) {
+    double tA = ms_now();
     uint16_t disp3d = IO16_(0x060);
     uint32_t clear = IO32_(0x350);
     uint16_t cdepth = IO16_(0x354) & 0x7FFF;
@@ -745,6 +768,7 @@ static void render_frame(int buf) {
             fb_color[y][x] = ccol; fb_alpha[y][x] = calpha; fb_depth[y][x] = clear_d;
             fb_id[y][x] = cid; fb_tid[y][x] = 0; fb_fog[y][x] = cfog; fb_edge[y][x] = 0;
         }
+    double tB = ms_now(); g_t3d_part[0] += tB - tA;
     int n = g_npoly[buf];
     static const Poly* order[MAX_POLY];
     int no = 0;
@@ -758,6 +782,7 @@ static void render_frame(int buf) {
         poly_edges(p);
         for (int k = 1; k + 1 < p->n; k++) draw_triangle(p, &p->v[0], &p->v[k], &p->v[k + 1], wbuf, disp3d);
     }
+    double tC = ms_now(); g_t3d_part[1] += tC - tB;
     /* edge marking */
     if (disp3d & 0x20) {
         static uint16_t out[192][256];
@@ -775,6 +800,7 @@ static void render_frame(int buf) {
             }
         for (int y = 0; y < 192; y++) memcpy(fb_color[y], out[y], sizeof out[y]);
     }
+    double tD = ms_now(); g_t3d_part[2] += tD - tC;
     /* fog */
     if (disp3d & 0x80) {
         uint16_t fcol = IO16_(0x358) & 0x7FFF;
@@ -812,6 +838,7 @@ static void render_frame(int buf) {
                 fb_alpha[y][x] = (uint8_t)((falpha * density + fb_alpha[y][x] * (128 - density)) >> 7);
             }
     }
+    g_t3d_part[3] += ms_now() - tD;
     g_3d_have_frame = 1;
     /* DQIX_POLYDUMP="frame,x,y": list the polygons covering pixel (x,y) */
     const char* pd = getenv("DQIX_POLYDUMP");
@@ -850,6 +877,7 @@ static void render_frame(int buf) {
 }
 
 /* VBlank: SWAP_BUFFERS takes effect, the new list is rendered. */
+double g_t3d_ms;
 void gpu3d_vblank(void) {
     if (gxstat_irq_mode) irq_raise(&g_c9, IRQ_GXFIFO);
     if (!g_swap_pending) return;
@@ -858,7 +886,9 @@ void gpu3d_vblank(void) {
     int buf = g_geo;
     g_geo ^= 1;
     g_npoly[g_geo] = 0; g_nvert[g_geo] = 0;
+    double t0 = ms_now();
     render_frame(buf);
+    g_t3d_ms += ms_now() - t0;
 }
 
 extern uint16_t g_3d_line[256];

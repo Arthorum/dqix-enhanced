@@ -123,12 +123,20 @@ void recomp_budget_expired(Cpu* c) {
 #define LOOP_BUDGET 1024u
 uint32_t g_loop_budget = LOOP_BUDGET, g_loop_budget7 = LOOP_BUDGET;
 
+/* Background threads (priority 31-32: the file loader's polling loop, the
+ * idle thread) only run while the game waits for the next frame. Their loops
+ * would otherwise cost almost no emulated time per pass and spin thousands of
+ * times per frame on the host; charge them ~512 cycles per pass instead,
+ * roughly what a pass costs on the DS. Game logic timing is unaffected. */
+#define LOOP_BUDGET_BG 8u
+int threads_current_priority9(void);
+
 void recomp_loop_expired(Cpu* c) {
     if (c == &g_arm7) {
         g_loop_budget7 = LOOP_BUDGET;
         arm7_yield();
     } else {
-        g_loop_budget = LOOP_BUDGET;
+        g_loop_budget = threads_current_priority9() >= 31 ? LOOP_BUDGET_BG : LOOP_BUDGET;
         if (!arm7_is_running()) { time_spend(LOOP_BUDGET * 4); irq_service(&g_arm9); }
     }
 }
