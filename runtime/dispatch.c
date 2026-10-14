@@ -123,20 +123,43 @@ void recomp_budget_expired(Cpu* c) {
 #define LOOP_BUDGET 1024u
 uint32_t g_loop_budget = LOOP_BUDGET, g_loop_budget7 = LOOP_BUDGET;
 
-/* Background threads (priority 31-32: the file loader's polling loop, the
- * idle thread) only run while the game waits for the next frame. Their loops
- * would otherwise cost almost no emulated time per pass and spin thousands of
- * times per frame on the host; charge them ~512 cycles per pass instead,
- * roughly what a pass costs on the DS. Game logic timing is unaffected. */
-#define LOOP_BUDGET_BG 8u
+/* Background threads (priority 31-32: the file loader, the idle thread) mostly
+ * run while the game waits for the next frame. Charge their loops ~32 cycles
+ * per pass (LOOP_BUDGET * 4 cycles per LOOP_BUDGET_BG passes), about what a
+ * pass costs on the DS, so polling doesn't spin hundreds of thousands of times
+ * per frame on the host. (512 cycles per pass made the loader's real work, and
+ * so every area load, several times slower than on the DS.) */
+#define LOOP_BUDGET_BG 128u
 int threads_current_priority9(void);
+
+/* DQIX_BGLOG="from,to": which functions low-priority (background) threads loop in (tests). */
+static uint32_t g_bgl_addr[4096], g_bgl_cnt[4096];
+static unsigned long long g_bgl_from, g_bgl_to; static int g_bgl = -1;
+static uint32_t last_arm9_entry(void);
+static void bgl_report(void) {
+    fprintf(stderr, "background loop budget expiries by function:\n");
+    for (int k = 0; k < 15; k++) {
+        int b = -1; for (int i = 0; i < 4096; i++) if (g_bgl_cnt[i] && (b < 0 || g_bgl_cnt[i] > g_bgl_cnt[b])) b = i;
+        if (b < 0) break;
+        uint32_t a = g_bgl_addr[b] & 0x03FFFFFF;
+        fprintf(stderr, "  %8u  prio %u  %08x %s\n", g_bgl_cnt[b], g_bgl_addr[b] >> 26, a, recomp_func_name(a)); g_bgl_cnt[b] = 0;
+    }
+}
+static void bgl_note(void) {
+    if (g_bgl < 0) { const char* e = getenv("DQIX_BGLOG"); g_bgl = e && sscanf(e, "%llu,%llu", &g_bgl_from, &g_bgl_to) == 2; if (g_bgl) atexit(bgl_report); }
+    if (!g_bgl || g_frame < g_bgl_from || g_frame > g_bgl_to) return;
+    uint32_t a = last_arm9_entry() | ((uint32_t)threads_current_priority9() << 26), h = (a * 2654435761u) >> 20;
+    for (;; h = (h + 1) & 4095) { if (g_bgl_addr[h] == a) { g_bgl_cnt[h]++; return; } if (!g_bgl_addr[h]) { g_bgl_addr[h] = a; g_bgl_cnt[h] = 1; return; } }
+}
 
 void recomp_loop_expired(Cpu* c) {
     if (c == &g_arm7) {
         g_loop_budget7 = LOOP_BUDGET;
         arm7_yield();
     } else {
-        g_loop_budget = threads_current_priority9() >= 31 ? LOOP_BUDGET_BG : LOOP_BUDGET;
+        static int bg = -1; if (bg < 0) { const char* e = getenv("DQIX_BGBUDGET"); bg = e ? atoi(e) : (int)LOOP_BUDGET_BG; }   /* tests */
+        g_loop_budget = threads_current_priority9() >= 31 ? (unsigned)bg : LOOP_BUDGET;
+        if (g_loop_budget == (unsigned)bg) bgl_note();
         if (!arm7_is_running()) { time_spend(LOOP_BUDGET * 4); irq_service(&g_arm9); }
     }
 }
@@ -264,3 +287,8 @@ static void dispatch_any(Core* k, Cpu* c, uint32_t target, uint32_t from) {
 void dispatch_call(Cpu* c, uint32_t target, uint32_t from) { dispatch_any(&g_c9, c, target, from); }
 void dispatch7_call(Cpu* c, uint32_t target, uint32_t from) { dispatch_any(&g_c7, c, target, from); }
 void interp_stub(Cpu* c, uint32_t addr) { interp_call(core_of(c), addr); }
+
+static uint32_t last_arm9_entry(void) {
+    for (unsigned k = 1; k <= TRACE_N; k++) { unsigned i = (g_trace_pos - k) % TRACE_N; if (g_trace_cpu[i] == 9) return g_trace[i]; }
+    return 0;
+}

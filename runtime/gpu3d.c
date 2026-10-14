@@ -879,6 +879,7 @@ void gpu3d_vblank(void) {
     if (g_renderer3d) g_renderer3d->vblank();
     if (!g_swap_pending) return;
     g_swap_pending = 0;
+    { static int lg = -1; if (lg < 0) lg = getenv("DQIX_SWAPLOG") != NULL; if (lg) fprintf(stderr, "swap %llu\n", (unsigned long long)g_frame); }
     g_render_flags = g_swap_flags;
     int buf = g_geo;
     g_geo ^= 1;
