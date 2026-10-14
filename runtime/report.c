@@ -66,6 +66,8 @@ static FILE* open_in(const char* dir, const char* name, const char* mode) {
     return fopen(path, mode);
 }
 
+void (*g_report_perf)(FILE* f);                         /* frontend: recent frame timings */
+
 void report_write(const char* reason) {
     static int busy;
     if (busy) return;
@@ -102,6 +104,7 @@ void report_write(const char* reason) {
         trace_dump(f, 40);
         fclose(f);
     }
+    if (g_report_perf && (f = open_in(dir, "perf.txt", "w"))) { g_report_perf(f); fclose(f); }
     fprintf(stderr, "report written to %s\n", dir);
     busy = 0;
 }

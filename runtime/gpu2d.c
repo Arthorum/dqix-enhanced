@@ -449,11 +449,7 @@ void gpu_frame_start(void) {
 
 double g_t2d_ms;
 #include <time.h>
-#ifdef DQIX_TIMING
-static double ms_now2(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
-#else
-static double ms_now2(void) { return 0; }
-#endif
+static double ms_now2(void) { struct timespec t; timespec_get(&t, TIME_UTC); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }   /* always on: bug reports show 2D time */
 void gpu_render_line_(int line);
 void gpu_render_line(int line) { double t0 = ms_now2(); gpu_render_line_(line); g_t2d_ms += ms_now2() - t0; }
 void gpu_render_line_(int line) {

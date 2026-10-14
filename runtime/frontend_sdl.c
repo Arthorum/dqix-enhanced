@@ -37,6 +37,8 @@ static SDL_GLContext g_glctx;
 static int g_scale3d = 2;
 extern int g_comp_gl;
 extern void (*g_report_capture)(uint32_t out[2][256 * 192]);
+extern void (*g_report_perf)(FILE* f);
+static void perf_write(FILE* f);
 
 /* Audio drives the pacing: the game runs ~100 ms ahead of what is being
  * heard, so a slow frame only eats into that cushion instead of causing a
@@ -100,6 +102,7 @@ static int try_gl(void) {
 void frontend_init(int argc, char** argv) {
     (void)argc; (void)argv;
     SDL_SetMainReady();
+    g_report_perf = perf_write;
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
     if (SDL_Init((g_headless ? 0 : SDL_INIT_VIDEO) | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -257,6 +260,39 @@ static void gl_dump_hook(void) {
     fclose(f);
 }
 
+/* ---------------------------------------------------------------- frame timings (for bug reports) */
+#define PERF_N 1800                                          /* the last 30 seconds */
+typedef struct { uint64_t frame; float busy, gl, upload, present, wait, d2; int uploads, polys, audio_ms; uint8_t fast; } PerfRec;
+static PerfRec g_perf[PERF_N];
+static unsigned g_perf_pos;
+static uint64_t g_perf_end;                                  /* end of the previous frame (after pacing) */
+static double ticks_ms(uint64_t t) { return (double)t * 1000.0 / (double)g_perf_freq; }
+
+static void perf_write(FILE* f) {
+    fprintf(f, "renderer: %s\n", g_gl ? gl_renderer_name() : "software (no OpenGL 3.3)");
+    if (g_gl) fprintf(f, "3D resolution: %dx\n", gl_render_scale());
+    fprintf(f, "audio: %s\n\n", g_audio ? "on" : "off");
+    fprintf(f, "Per frame, in ms. A frame must take under 16.7 ms in total (busy + present) to keep full speed.\n");
+    fprintf(f, "busy = all work for the frame: game = game code, 2d = 2D layers, gl = 3D on the GPU, upload = new textures (inside gl),\n");
+    fprintf(f, "present = showing the frame, wait = idle time to keep the pace, audio = sound queued.\n\n");
+    unsigned n = g_perf_pos < PERF_N ? g_perf_pos : PERF_N - 1;     /* the slot at g_perf_pos is the frame in progress */
+    unsigned slow = 0; double worst = 0; uint64_t worst_f = 0;
+    for (unsigned k = n; k > 0; k--) {
+        const PerfRec* r = &g_perf[(g_perf_pos - k) % PERF_N];
+        double t = r->busy + r->present;
+        if (t > 16.7) slow++;
+        if (t > worst) { worst = t; worst_f = r->frame; }
+    }
+    fprintf(f, "frames: %u, over 16.7 ms: %u, worst %.1f ms at frame %llu\n\n", n, slow, worst, (unsigned long long)worst_f);
+    fprintf(f, "  frame    busy    game      2d      gl  upload (n)   polys  present    wait  audio\n");
+    for (unsigned k = n; k > 0; k--) {
+        const PerfRec* r = &g_perf[(g_perf_pos - k) % PERF_N];
+        fprintf(f, "%7llu %7.1f %7.1f %7.1f %7.1f %7.1f (%3d) %6d %8.1f %7.1f %6d%s%s\n", (unsigned long long)r->frame, r->busy,
+                r->busy - r->d2 - r->gl, r->d2, r->gl, r->upload, r->uploads,
+                r->polys, r->present, r->wait, r->audio_ms, r->fast ? " fast" : "", r->busy + r->present > 16.7 ? "  <-- slow" : "");
+    }
+}
+
 static void present_gl(void) {
     uint16_t pow; memcpy(&pow, &g_io[0x304], 2);
     gl_compose((pow >> 15) & 1, pow & 1);
@@ -289,6 +325,14 @@ static void present(void) {
 }
 
 void frontend_frame(void) {
+    uint64_t t_start = SDL_GetPerformanceCounter();
+    if (!g_perf_end) g_perf_end = t_start;
+    PerfRec* pr = &g_perf[g_perf_pos % PERF_N];
+    pr->frame = g_frame; pr->busy = (float)ticks_ms(t_start - g_perf_end);
+    pr->gl = (float)g_gl_stats.render_ms; pr->upload = (float)g_gl_stats.upload_ms; pr->uploads = g_gl_stats.uploads; pr->polys = g_gl_stats.polys;
+    memset(&g_gl_stats, 0, sizeof g_gl_stats);
+    { extern double g_t2d_ms; static double last; pr->d2 = (float)(g_t2d_ms - last); last = g_t2d_ms; }
+    pr->audio_ms = (int)(sound_buffered() * 1000 / 32768);
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
@@ -328,8 +372,11 @@ void frontend_frame(void) {
         int tx, ty;
         g_fe_touch = (mb & SDL_BUTTON(SDL_BUTTON_LEFT)) && to_touch(mx, my, &tx, &ty);
         if (g_fe_touch) { g_fe_tx = tx; g_fe_ty = ty; }
+        uint64_t tp = SDL_GetPerformanceCounter();
         present();
+        pr->present = (float)ticks_ms(SDL_GetPerformanceCounter() - tp);
     } else g_fe_keys = pad_bits();
+    uint64_t t_wait = SDL_GetPerformanceCounter();
 
     /* pacing */
     uint64_t now = SDL_GetPerformanceCounter();
@@ -351,6 +398,9 @@ void frontend_frame(void) {
         }
     }
     if (!g_audio) sound_discard();
+    g_perf_end = SDL_GetPerformanceCounter();
+    pr->wait = (float)ticks_ms(g_perf_end - t_wait); pr->fast = (uint8_t)g_fast;
+    g_perf_pos++;
     g_fps_frames++;
     if (g_win && now - g_fps_t0 > g_perf_freq) {
         char title[96];

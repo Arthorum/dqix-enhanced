@@ -12,3 +12,9 @@ void gl_present(int win_w, int win_h, int layout, int smooth);
 uint8_t* gl_read_full(int* w, int* h);
 void gl_read_screens(uint32_t out[2][256 * 192]);
 int gl_read_3d(uint8_t* out, int* w, int* h);
+
+/* Per-frame counters (the frontend reads and clears them). */
+typedef struct { double render_ms, upload_ms; int uploads, polys; long upload_texels; } GlStats;
+extern GlStats g_gl_stats;
+const char* gl_renderer_name(void);
+int gl_render_scale(void);

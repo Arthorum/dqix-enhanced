@@ -41,7 +41,8 @@ the starting 3D resolution.
 
 **Bug reports.** F10 (or a crash) writes `reports/<date-time>/` next to the
 game: a screenshot, every input since launch, the save as it was at launch and
-now, the clock start and the log. The emulation is deterministic, so replaying
+now, the clock start, the log, and `perf.txt` (how long each of the last 30
+seconds of frames took, split into game code, 2D, 3D and display). The emulation is deterministic, so replaying
 a report reproduces the session exactly:
 
 ```

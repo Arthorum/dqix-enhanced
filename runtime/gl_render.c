@@ -312,6 +312,13 @@ static TexEntry* tex_lookup(uint32_t ti, uint32_t pl) {
     return free_slot;
 }
 
+/* Performance counters, read and reset by the frontend each frame (bug reports). */
+GlStats g_gl_stats;
+static char g_gl_name[300];
+const char* gl_renderer_name(void) { return g_gl_name; }
+int gl_render_scale(void) { return g_scale; }
+static double perf_ms(void) { return (double)SDL_GetPerformanceCounter() * 1000.0 / (double)SDL_GetPerformanceFrequency(); }
+
 static GLuint texture_for(uint32_t ti, uint32_t pl, int* w, int* h) {
     TexEntry* e = tex_lookup(ti, pl);
     gpu3d_tex_size(ti, w, h);
@@ -320,10 +327,12 @@ static GLuint texture_for(uint32_t ti, uint32_t pl, int* w, int* h) {
         e->checked = g_frameno;
         uint64_t hs = gpu3d_texture_hash(ti, pl);
         if (hs != e->hash || e->w != *w || e->h != *h) {
+            double t0 = perf_ms();
             e->hash = hs; e->w = *w; e->h = *h;
             gpu3d_decode_texture(ti, pl, g_decode);
             p_glBindTexture(GL_TEXTURE_2D, e->tex);
             p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, *w, *h, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_decode);
+            g_gl_stats.uploads++; g_gl_stats.upload_texels += *w * *h; g_gl_stats.upload_ms += perf_ms() - t0;
         }
     }
     return e->tex;
@@ -418,7 +427,9 @@ int gl_render_init(int scale) {
     p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
     make_fbs();
     g_ready = 1;
-    fprintf(stderr, "GL renderer: %s, 3D at %dx\n", (const char*)p_glGetString(GL_RENDERER), g_scale);
+    snprintf(g_gl_name, sizeof g_gl_name, "%s / %s / OpenGL %s", (const char*)p_glGetString(GL_VENDOR),
+             (const char*)p_glGetString(GL_RENDERER), (const char*)p_glGetString(GL_VERSION));
+    fprintf(stderr, "GL renderer: %s, 3D at %dx\n", g_gl_name, g_scale);
     return 1;
 }
 
@@ -462,7 +473,14 @@ static void gl_vblank(void) {
     g_fb_shown = g_fb_latest;                                  /* what was rendered last is visible now */
 }
 
+static void gl_render_(const Frame3D* f);
 static void gl_render(const Frame3D* f) {
+    double t0 = perf_ms();
+    gl_render_(f);
+    g_gl_stats.render_ms += perf_ms() - t0;
+    g_gl_stats.polys += f->n;
+}
+static void gl_render_(const Frame3D* f) {
     g_frameno++;
     uint16_t disp3d = IO16_(0x060);
     int textures_on = disp3d & 1;
