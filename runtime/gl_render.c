@@ -74,6 +74,7 @@
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glUniform1fv, (GLint, GLsizei, const GLfloat*)) \
     X(void, glUniform3fv, (GLint, GLsizei, const GLfloat*)) \
+    X(void, glUniform2fv, (GLint, GLsizei, const GLfloat*)) \
     X(void, glGenVertexArrays, (GLsizei, GLuint*)) \
     X(void, glBindVertexArray, (GLuint)) \
     X(void, glGenBuffers, (GLsizei, GLuint*)) \
@@ -237,6 +238,192 @@ static const char* FS_COPY =
     "in vec2 v_uv; out vec4 o_color; uniform sampler2D u_src;\n"
     "void main() { o_color = vec4(texture(u_src, v_uv).rgb, 1.0); }\n";
 
+/* Showing the screens in the window: exact pixels, or the DS Lite screen
+ * (its LCD colours, pixel grid, backlight), optionally inside a drawn DS Lite.
+ * The colour profile is Pokefan531's DS Lite measurement (public domain,
+ * libretro "dslite-color"). Canvas units are DS pixels. */
+static const char* FS_SCREEN =
+    "#version 330 core\n"
+    "out vec4 o_color;\n"
+    "uniform sampler2D u_src;\n"
+    "uniform int u_src_linear;        // source holds linear light (motion-blur buffer)\n"
+    "uniform vec2 u_win;              // drawable size\n"
+    "uniform vec3 u_view;             // canvas -> window: window = xy + canvas * z\n"
+    "uniform vec2 u_canvas;\n"
+    "uniform vec4 u_top, u_bot;       // screen rects (canvas units = DS pixels)\n"
+    "uniform int u_lcd, u_lcdcolor, u_grid;\n"
+    "uniform float u_backlight;\n"
+    "uniform int u_shell;\n"
+    "uniform vec3 u_lid, u_base, u_btn, u_hinge;\n"
+    "\n"
+    "const mat3 DSL = mat3(0.93, 0.025, 0.008,  0.14, 0.90, -0.03,  -0.07, 0.075, 1.022);\n"
+    "const float DSL_LUM = 0.935;\n"
+    "\n"
+    "float px;                        // one window pixel in canvas units (for anti-aliasing)\n"
+    "\n"
+    "float cover(float d) { return clamp(0.5 - d / px, 0.0, 1.0); }      // signed distance -> coverage\n"
+    "float sd_box(vec2 p, vec2 c, vec2 h, vec4 r) {                     // r: radii (tl, tr, br, bl)\n"
+    "    p -= c;\n"
+    "    float rr = p.x < 0.0 ? (p.y < 0.0 ? r.x : r.w) : (p.y < 0.0 ? r.y : r.z);\n"
+    "    vec2 q = abs(p) - h + rr;\n"
+    "    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rr;\n"
+    "}\n"
+    "float sd_circle(vec2 p, vec2 c, float r) { return length(p - c) - r; }\n"
+    "\n"
+    "/* --- the screens ------------------------------------------------------- */\n"
+    "vec3 to_lin(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }\n"
+    "\n"
+    "vec3 fetch(vec2 uv) {            // uv in texture space\n"
+    "    vec3 c = texture(u_src, uv).rgb;\n"
+    "    return u_src_linear != 0 ? c : to_lin(c);\n"
+    "}\n"
+    "\n"
+    "vec3 screen(vec2 p, int bottom) {                    // p: DS pixels inside the screen\n"
+    "    vec2 tsz = vec2(textureSize(u_src, 0));\n"
+    "    vec2 uv = vec2(p.x / 256.0, (bottom != 0 ? 0.5 : 1.0) - p.y / 384.0);\n"
+    "    vec3 lin;\n"
+    "    {\n"
+    "        vec2 t = uv * tsz - 0.5;                     // sharp bilinear: crisp pixels, even at any size\n"
+    "        vec2 i = floor(t), f = t - i;\n"
+    "        vec2 s = 1.0 / max(fwidth(t), vec2(1e-4));\n"
+    "        f = clamp((f - 0.5) * s + 0.5, 0.0, 1.0);\n"
+    "        lin = fetch((i + 0.5 + f) / tsz);\n"
+    "    }\n"
+    "    if (u_lcdcolor != 0) lin = clamp(DSL * lin * DSL_LUM, 0.0, 1.0);\n"
+    "    if (u_grid != 0) {\n"
+    "        float strength = clamp((u_view.z - 1.5) / 2.0, 0.0, 1.0);   // fades in from 1.5x, full at 3.5x\n"
+    "        if (strength > 0.0) {\n"
+    "            vec2 fp = fract(p);\n"
+    "            float w = clamp(fwidth(p.x) * 0.75, 0.0, 0.3);\n"
+    "            vec3 sub;\n"
+    "            for (int k = 0; k < 3; k++) {            // red, green, blue stripes\n"
+    "                float d = abs(fp.x - (float(k) + 0.5) / 3.0);\n"
+    "                float m = 1.0 - smoothstep(1.0 / 6.0 - w, 1.0 / 6.0 + w, d);\n"
+    "                sub[k] = mix(0.62, 1.0, m);\n"
+    "            }\n"
+    "            float gx = min(fp.x, 1.0 - fp.x), gy = min(fp.y, 1.0 - fp.y);\n"
+    "            float line = mix(0.55, 1.0, smoothstep(0.035 - w, 0.035 + w, gx)) * mix(0.45, 1.0, smoothstep(0.06 - w, 0.06 + w, gy));\n"
+    "            vec3 mask = sub * line;\n"
+    "            mask /= 0.74;                            // keep the average brightness\n"
+    "            lin *= mix(vec3(1.0), mask, strength);\n"
+    "        }\n"
+    "    }\n"
+    "    lin = lin * u_backlight;\n"
+    "    lin = lin * (1.0 - 0.002) + 0.002 * u_backlight;              // LCD black is never fully black\n"
+    "    return lin;\n"
+    "}\n"
+    "\n"
+    "/* --- the DS Lite ---------------------------------------------------------- */\n"
+    "vec3 shade_plastic(vec3 col, float d, vec2 p, float glossy) {\n"
+    "    // d: distance inside the part (negative inside); soft bevel near the edge\n"
+    "    float in_ = -d;\n"
+    "    float bevel = smoothstep(0.0, 7.0, in_);\n"
+    "    vec3 c = col * mix(0.78, 1.0, bevel);\n"
+    "    c += (1.0 - smoothstep(4.0, 9.0, abs(in_ - 5.0))) * 0.04;      // highlight along the bevel\n"
+    "    float g = glossy * smoothstep(0.0, 1.0, 1.0 - abs((p.x - p.y * 0.6) / u_canvas.x - 0.2) * 2.5) * 0.06;\n"
+    "    return c + g;\n"
+    "}\n"
+    "\n"
+    "vec4 dslite(vec2 p) {\n"
+    "    vec3 bg = vec3(0.055, 0.058, 0.065) * (1.0 - 0.35 * length((p - u_canvas * 0.5) / u_canvas));\n"
+    "    vec3 col = bg;\n"
+    "    float W = u_canvas.x;\n"
+    "    float hingeY = u_top.y + u_top.w + 40.0;\n"
+    "    // soft shadow of the console\n"
+    "    float sh = sd_box(p, vec2(W * 0.5, u_canvas.y * 0.5 + 6.0), vec2(W * 0.5 - 4.0, u_canvas.y * 0.5 - 8.0), vec4(40.0));\n"
+    "    col *= mix(0.55, 1.0, smoothstep(-4.0, 22.0, sh));\n"
+    "    // base (bottom half)\n"
+    "    float dbase = sd_box(p, vec2(W * 0.5, (hingeY + u_canvas.y) * 0.5), vec2(W * 0.5 - 2.0, (u_canvas.y - hingeY) * 0.5 - 2.0), vec4(10.0, 10.0, 38.0, 38.0));\n"
+    "    col = mix(col, shade_plastic(u_base, dbase, p, 0.6), cover(dbase));\n"
+    "    // lid (top half)\n"
+    "    float dlid = sd_box(p, vec2(W * 0.5, hingeY * 0.5), vec2(W * 0.5 - 2.0, hingeY * 0.5 - 2.0), vec4(38.0, 38.0, 10.0, 10.0));\n"
+    "    col = mix(col, shade_plastic(u_lid, dlid, p, 1.0), cover(dlid));\n"
+    "    // hinge\n"
+    "    float dh = sd_box(p, vec2(W * 0.5, hingeY), vec2(W * 0.5 - 18.0, 9.0), vec4(9.0));\n"
+    "    float hy = clamp((p.y - hingeY) / 9.0, -1.0, 1.0);\n"
+    "    vec3 hc = u_hinge * (0.75 + 0.35 * sqrt(max(1.0 - hy * hy, 0.0)));\n"
+    "    col = mix(col, hc, cover(dh));\n"
+    "    col = mix(col, u_hinge * 0.35, cover(sd_box(p, vec2(W * 0.5, hingeY), vec2(1.2, 7.0), vec4(1.0))) * 0.6);   // seam\n"
+    "    col = mix(col, vec3(0.08), cover(sd_circle(p, vec2(W * 0.5 + 24.0, hingeY), 2.4)));                        // microphone\n"
+    "    float led = sd_circle(p, vec2(W - 46.0, hingeY), 3.0);\n"
+    "    col = mix(col, vec3(0.25, 0.95, 0.35), cover(led));\n"
+    "    col += vec3(0.1, 0.5, 0.15) * exp(-max(led, 0.0) / 4.0) * 0.35;                                       // LED glow\n"
+    "    // speakers beside the top screen\n"
+    "    for (int s = 0; s < 2; s++) {\n"
+    "        float cx = s == 0 ? u_top.x * 0.5 : W - u_top.x * 0.5;\n"
+    "        float cy = u_top.y + u_top.w * 0.5;\n"
+    "        for (int r = 0; r < 5; r++) for (int c = 0; c < 3; c++) {\n"
+    "            vec2 hc2 = vec2(cx + (float(c) - 1.0) * 9.0, cy + (float(r) - 2.0) * 9.0);\n"
+    "            col = mix(col, u_lid * 0.25, cover(sd_circle(p, hc2, 2.4)));\n"
+    "        }\n"
+    "    }\n"
+    "    // screen windows (black glass around each LCD)\n"
+    "    for (int s = 0; s < 2; s++) {\n"
+    "        vec4 r = s == 0 ? u_top : u_bot;\n"
+    "        float m = s == 0 ? 13.0 : 9.0;\n"
+    "        float dw = sd_box(p, r.xy + r.zw * 0.5, r.zw * 0.5 + m, vec4(s == 0 ? 7.0 : 4.0));\n"
+    "        if (s == 1) {   // raised lip around the touch screen\n"
+    "            float dl = sd_box(p, r.xy + r.zw * 0.5, r.zw * 0.5 + m + 5.0, vec4(8.0));\n"
+    "            col = mix(col, u_base * 0.86, cover(dl));\n"
+    "        }\n"
+    "        vec3 glass = vec3(0.045, 0.047, 0.05) + 0.03 * smoothstep(0.0, 1.0, 1.0 - (p.y - r.y) / r.w);\n"
+    "        col = mix(col, glass, cover(dw));\n"
+    "    }\n"
+    "    // D-pad\n"
+    "    vec2 dp = vec2(u_bot.x * 0.5, u_bot.y + 58.0);\n"
+    "    col = mix(col, u_base * 0.8, cover(min(sd_box(p, dp, vec2(45.0, 16.0), vec4(6.0)), sd_box(p, dp, vec2(16.0, 45.0), vec4(6.0)))) * 0.6);\n"
+    "    float darm = min(sd_box(p, dp, vec2(42.0, 13.0), vec4(4.0)), sd_box(p, dp, vec2(13.0, 42.0), vec4(4.0)));\n"
+    "    vec3 btn = shade_plastic(u_btn, darm, p, 0.5);\n"
+    "    btn *= 1.0 - 0.18 * smoothstep(10.0, 0.0, length(p - dp));          // dimple in the middle\n"
+    "    col = mix(col, btn, cover(darm));\n"
+    "    // A B X Y\n"
+    "    vec2 ab = vec2(W - u_bot.x * 0.5, u_bot.y + 58.0);\n"
+    "    vec2 offs[4] = vec2[4](vec2(30.0, 0.0), vec2(0.0, 30.0), vec2(0.0, -30.0), vec2(-30.0, 0.0));\n"
+    "    for (int k = 0; k < 4; k++) {\n"
+    "        vec2 c = ab + offs[k];\n"
+    "        col = mix(col, u_base * 0.75, cover(sd_circle(p, c, 15.5)) * 0.6);\n"
+    "        float db = sd_circle(p, c, 13.0);\n"
+    "        vec3 bc = u_btn * (1.0 + 0.12 * clamp(-(p.y - c.y + p.x - c.x) / 18.0, -1.0, 1.0));\n"
+    "        col = mix(col, shade_plastic(bc, db, p, 0.3), cover(db));\n"
+    "    }\n"
+    "    // START / SELECT\n"
+    "    for (int k = 0; k < 2; k++) {\n"
+    "        vec2 c = ab + vec2(4.0, 78.0 + 26.0 * float(k));\n"
+    "        col = mix(col, u_base * 0.75, cover(sd_circle(p, c, 8.5)) * 0.6);\n"
+    "        float db = sd_circle(p, c, 6.5);\n"
+    "        col = mix(col, shade_plastic(u_btn, db, p, 0.3), cover(db));\n"
+    "    }\n"
+    "    return vec4(col, 1.0);\n"
+    "}\n"
+    "\n"
+    "void main() {\n"
+    "    vec2 wp = vec2(gl_FragCoord.x, u_win.y - gl_FragCoord.y);\n"
+    "    vec2 p = (wp - u_view.xy) / u_view.z;\n"
+    "    px = 1.0 / u_view.z;\n"
+    "    vec3 outc;                                       // gamma-encoded result\n"
+    "    bool in_top = all(greaterThanEqual(p, u_top.xy)) && all(lessThan(p, u_top.xy + u_top.zw));\n"
+    "    bool in_bot = all(greaterThanEqual(p, u_bot.xy)) && all(lessThan(p, u_bot.xy + u_bot.zw));\n"
+    "    if (in_top || in_bot) {\n"
+    "        vec4 r = in_top ? u_top : u_bot;\n"
+    "        vec2 sp = (p - r.xy) * vec2(256.0, 192.0) / r.zw;          // DS pixels\n"
+    "        if (u_lcd == 0) outc = texture(u_src, vec2(sp.x / 256.0, (in_bot ? 0.5 : 1.0) - sp.y / 384.0)).rgb;   // exact\n"
+    "        else outc = pow(clamp(screen(sp, in_bot ? 1 : 0), 0.0, 1.0), vec3(1.0 / 2.2));\n"
+    "    } else if (u_shell != 0) {\n"
+    "        outc = dslite(p).rgb;\n"
+    "    } else {\n"
+    "        outc = vec3(0.0);\n"
+    "    }\n"
+    "    o_color = vec4(outc, 1.0);\n"
+    "}\n";
+
+/* LCD motion blur: each frame is mixed with what the screen still shows
+ * from the previous ones (kept in linear light). */
+static const char* FS_GHOST =
+    "#version 330 core\n"
+    "in vec2 v_uv; out vec4 o_color; uniform sampler2D u_cur, u_prev; uniform float u_keep;\n"
+    "void main() { vec3 c = pow(texture(u_cur, v_uv).rgb, vec3(2.2)); vec3 p = texture(u_prev, v_uv).rgb;\n"
+    "  o_color = vec4(mix(c, p, u_keep), 1.0); }\n";
+
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = p_glCreateShader(type);
     p_glShaderSource(s, 1, &src, NULL);
@@ -263,7 +450,8 @@ static GLuint program(const char* vs, const char* fs, int poly) {
 
 /* ---------------------------------------------------------------- state */
 static int g_scale = 2;
-static GLuint prog_poly, prog_post, prog_comp, prog_copy;
+static GLuint prog_poly, prog_post, prog_comp, prog_copy, prog_screen, prog_ghost;
+static GLuint ghost_tex[2], ghost_fbo[2]; static int ghost_cur = -1, ghost_w, ghost_h;
 static GLuint vao_poly, vbo_poly, vao_quad, vbo_quad;
 static GLuint samplers[9];                                    /* [s_mode * 3 + t_mode]: clamp, repeat, mirror */
 static GLuint white_tex;
@@ -391,7 +579,9 @@ int gl_render_init(int scale) {
     prog_post = program(VS_QUAD, FS_POST, 0);
     prog_comp = program(VS_QUAD, FS_COMP, 0);
     prog_copy = program(VS_QUAD, FS_COPY, 0);
-    if (!prog_poly || !prog_post || !prog_comp || !prog_copy) return 0;
+    prog_screen = program(VS_QUAD, FS_SCREEN, 0);
+    prog_ghost = program(VS_QUAD, FS_GHOST, 0);
+    if (!prog_poly || !prog_post || !prog_comp || !prog_copy || !prog_screen || !prog_ghost) return 0;
     p_glGenVertexArrays(1, &vao_poly); p_glBindVertexArray(vao_poly);
     p_glGenBuffers(1, &vbo_poly); p_glBindBuffer(GL_ARRAY_BUFFER, vbo_poly);
     GLsizei stride = VTX_FLOATS * sizeof(float);
@@ -679,43 +869,93 @@ void gl_compose(int a_on_top, int lcd_on) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-/* Draw the composed screens into the window: layout 0 = stacked (top above
- * bottom), 1 = side by side (top on the left). Keeps the aspect ratio. */
-void gl_present(int win_w, int win_h, int layout, int smooth) {
-    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    p_glViewport(0, 0, win_w, win_h);
+/* Motion blur buffer: mix this frame into what the LCD shows (linear light). */
+static GLuint ghost_step(float keep) {
+    if (ghost_w != g_fb_w || ghost_h != g_fb_h * 2) {
+        for (int i = 0; i < 2; i++) {
+            ghost_tex[i] = new_tex(GL_RGBA16F, g_fb_w, g_fb_h * 2, GL_RGBA, GL_FLOAT, GL_LINEAR);
+            p_glGenFramebuffers(1, &ghost_fbo[i]);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, ghost_fbo[i]);
+            p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ghost_tex[i], 0);
+        }
+        ghost_w = g_fb_w; ghost_h = g_fb_h * 2; ghost_cur = -1;
+    }
+    int prev = ghost_cur, cur = ghost_cur < 0 ? 0 : ghost_cur ^ 1;
+    p_glBindFramebuffer(GL_FRAMEBUFFER, ghost_fbo[cur]);
+    p_glViewport(0, 0, ghost_w, ghost_h);
     p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_BLEND);
-    p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT);
-    p_glUseProgram(prog_copy);
-    p_glUniform1i(p_glGetUniformLocation(prog_copy, "u_src"), 0);
-    p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, final_tex); p_glBindSampler(0, 0);
+    p_glUseProgram(prog_ghost);
+    p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, final_tex);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glActiveTexture(GL_TEXTURE1); p_glBindTexture(GL_TEXTURE_2D, prev < 0 ? final_tex : ghost_tex[prev]);
+    p_glUniform1i(p_glGetUniformLocation(prog_ghost, "u_cur"), 0);
+    p_glUniform1i(p_glGetUniformLocation(prog_ghost, "u_prev"), 1);
+    p_glUniform1f(p_glGetUniformLocation(prog_ghost, "u_keep"), prev < 0 ? 0.0f : keep);
+    p_glUniform4f(p_glGetUniformLocation(prog_ghost, "u_rect"), -1, -1, 2, 2);
+    p_glUniform4f(p_glGetUniformLocation(prog_ghost, "u_uv"), 0, 0, 1, 1);
     p_glBindVertexArray(vao_quad);
-    float cw = layout ? 512.0f : 256.0f, ch = layout ? 192.0f : 384.0f;
-    float sc = fminf((float)win_w / cw, (float)win_h / ch);
+    p_glDrawArrays(GL_TRIANGLES, 0, 6);
+    p_glActiveTexture(GL_TEXTURE0);
+    ghost_cur = cur;
+    return ghost_tex[cur];
+}
+
+/* Draw the screens (and the console, if chosen) into the window. Call once
+ * per emulated frame: the motion blur advances with every call. */
+void gl_present(const GlPresent* v) {
+    int ghost = v->lcd && v->ghost;
+    GLuint src = final_tex;
+    if (ghost) src = ghost_step(0.35f);
+    else ghost_cur = -1;
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glViewport(0, 0, v->win_w, v->win_h);
+    p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_BLEND);
+    p_glUseProgram(prog_screen);
+    p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, src); p_glBindSampler(0, 0);
     /* Shown smaller than it was rendered (3D resolution above the window size):
      * average with mipmaps so the extra detail becomes smooth edges, not shimmer.
-     * Shown larger: nearest, so the 2D pixel art stays crisp. */
-    int minify = sc < (float)g_scale - 0.01f;
+     * Shown larger: nearest (exact pixels) or, with the LCD filter, linear
+     * (the shader keeps the pixels sharp). */
+    float px_per_texel = v->sc * (float)v->top[2] / (float)g_fb_w;
+    int minify = px_per_texel < 0.99f;
     if (minify) p_glGenerateMipmap(GL_TEXTURE_2D);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minify ? GL_LINEAR_MIPMAP_LINEAR : smooth ? GL_LINEAR : GL_NEAREST);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, smooth ? GL_LINEAR : GL_NEAREST);
-    float w = cw * sc, h = ch * sc, x0 = ((float)win_w - w) / 2, y0 = ((float)win_h - h) / 2;
-    GLint loc_rect = p_glGetUniformLocation(prog_copy, "u_rect"), loc_uv = p_glGetUniformLocation(prog_copy, "u_uv");
-    /* window pixels (origin top-left) -> NDC */
-    #define NDC_RECT(px, py, pw, ph) p_glUniform4f(loc_rect, (px) / win_w * 2 - 1, 1 - ((py) + (ph)) / win_h * 2, (pw) / win_w * 2, (ph) / win_h * 2)
-    if (!layout) {
-        NDC_RECT(x0, y0, w, h);
-        p_glUniform4f(loc_uv, 0, 0, 1, 1);
-        p_glDrawArrays(GL_TRIANGLES, 0, 6);
-    } else {
-        NDC_RECT(x0, y0, w / 2, h);                 /* top screen = upper half of the texture */
-        p_glUniform4f(loc_uv, 0, 0.5f, 1, 0.5f);
-        p_glDrawArrays(GL_TRIANGLES, 0, 6);
-        NDC_RECT(x0 + w / 2, y0, w / 2, h);
-        p_glUniform4f(loc_uv, 0, 0, 1, 0.5f);
-        p_glDrawArrays(GL_TRIANGLES, 0, 6);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minify ? GL_LINEAR_MIPMAP_LINEAR : v->lcd ? GL_LINEAR : GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, v->lcd ? GL_LINEAR : GL_NEAREST);
+    GLuint P = prog_screen;
+    p_glUniform1i(p_glGetUniformLocation(P, "u_src"), 0);
+    p_glUniform1i(p_glGetUniformLocation(P, "u_src_linear"), ghost);
+    p_glUniform2f(p_glGetUniformLocation(P, "u_win"), (float)v->win_w, (float)v->win_h);
+    p_glUniform3fv(p_glGetUniformLocation(P, "u_view"), 1, (const float[3]){ v->ox, v->oy, v->sc });
+    p_glUniform2f(p_glGetUniformLocation(P, "u_canvas"), v->cw, v->ch);
+    p_glUniform4f(p_glGetUniformLocation(P, "u_top"), v->top[0], v->top[1], v->top[2], v->top[3]);
+    p_glUniform4f(p_glGetUniformLocation(P, "u_bot"), v->bot[0], v->bot[1], v->bot[2], v->bot[3]);
+    p_glUniform1i(p_glGetUniformLocation(P, "u_lcd"), v->lcd);
+    p_glUniform1i(p_glGetUniformLocation(P, "u_lcdcolor"), v->lcd_color);
+    p_glUniform1i(p_glGetUniformLocation(P, "u_grid"), v->grid);
+    p_glUniform1f(p_glGetUniformLocation(P, "u_backlight"), v->backlight);
+    p_glUniform1i(p_glGetUniformLocation(P, "u_shell"), v->shell);
+    p_glUniform3fv(p_glGetUniformLocation(P, "u_lid"), 1, v->lid);
+    p_glUniform3fv(p_glGetUniformLocation(P, "u_base"), 1, v->base);
+    p_glUniform3fv(p_glGetUniformLocation(P, "u_btn"), 1, v->btn);
+    p_glUniform3fv(p_glGetUniformLocation(P, "u_hinge"), 1, v->hinge);
+    p_glUniform4f(p_glGetUniformLocation(P, "u_rect"), -1, -1, 2, 2);
+    p_glUniform4f(p_glGetUniformLocation(P, "u_uv"), 0, 0, 1, 1);
+    p_glBindVertexArray(vao_quad);
+    p_glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
+/* The window as shown (for tests): top-down RGB, caller frees. */
+uint8_t* gl_read_window(int w, int h) {
+    uint8_t* buf = malloc((size_t)w * h * 4), *rgb = malloc((size_t)w * h * 3);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glReadBuffer(GL_BACK);
+    p_glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        const uint8_t* q = buf + ((size_t)(h - 1 - y) * w + x) * 4; uint8_t* o = rgb + ((size_t)y * w + x) * 3;
+        o[0] = q[0]; o[1] = q[1]; o[2] = q[2];
     }
-    #undef NDC_RECT
+    free(buf);
+    return rgb;
 }
 
 /* For screenshots/reports: read the composed screens at 256x384 (nearest). */

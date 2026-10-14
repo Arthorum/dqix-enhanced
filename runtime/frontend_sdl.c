@@ -6,9 +6,12 @@
  *   L <- Q                  R <- W      START <- Enter         SELECT <- Right Shift / Backspace
  *   touch screen <- left mouse button on the bottom screen
  *   Tab (hold) = fast forward     F11 = fullscreen     F2 = screens side by side / stacked
- *   F3 = window size 1x..4x       F4 = 3D resolution 1x..4x (OpenGL)   F12 = screenshot (dqix-shot-N.bmp)
+ *   F3 = window size 1x..4x       F4 = 3D resolution 1x..4x (Enhanced)  F5 = Classic / Enhanced
+ *   F6 = DS Lite screen filter    F7 = DS Lite console around the screens   P = pause
+ *   F12 = screenshot (dqix-shot-N.bmp)
  *   F10 = bug report (reports/<date-time>/: screenshot, inputs, saves, log)
  *   Esc = quit (the save file is always up to date)
+ * On Windows every setting is also in the menu bar (menu_win32 below).
  * A game controller works too (Nintendo layout by position: right face button = A). */
 #define SDL_MAIN_HANDLED
 #include "SDL.h"
@@ -19,6 +22,7 @@
 #include "nds.h"
 #include "frontend.h"
 #include "gl_render.h"
+#include "menu.h"
 
 #define DS_FPS 59.8261
 
@@ -40,6 +44,65 @@ extern void (*g_report_perf)(FILE* f);
 static void perf_write(FILE* f);
 static int g_classic = 1;       /* Classic: the DS's own 3D renderer, exact; Enhanced: 3D on the GPU at 1-4x */
 extern int g_comp_gl;
+static int g_paused, g_turbo;   /* Game > Pause, Game > Fast forward (latched) */
+
+/* How the screens are shown (View and Screen menus). The DS Lite parts need OpenGL. */
+static struct {
+    int lcd;                     /* DS Lite screen filter */
+    int lcd_color, grid, ghost;  /* ... its LCD colours, pixel grid, motion blur */
+    int backlight;               /* 1 (low) .. 4 (max) */
+    int gap;                     /* the real distance between the screens */
+    int shell;                   /* draw the console around the screens */
+    int shell_color;             /* index into SHELLS */
+    int integer;                 /* whole-number scaling only */
+} g_opt = { 0, 1, 1, 1, 4, 0, 0, 0, 0 };
+
+/* DS Lite colours: lid, base, buttons, hinge (sRGB). */
+typedef struct { const char* name; const char* key; uint32_t lid, base, btn, hinge; } Shell;
+static const Shell SHELLS[] = {
+    { "Polar White", "white", 0xECECEA, 0xECECEA, 0xDCDCDA, 0xCFCFCC },
+    { "Jet Black", "black", 0x222225, 0x222225, 0x2E2E32, 0x161618 },
+    { "Ice Blue", "ice_blue", 0xBCD6E6, 0xBCD6E6, 0xE4EDF2, 0xA6C0D0 },
+    { "Coral Pink", "coral_pink", 0xF0B7C1, 0xF0B7C1, 0xF6E1E5, 0xDBA0AB },
+    { "Enamel Navy", "navy", 0x24314F, 0x24314F, 0x313E5F, 0x1A2440 },
+    { "Crimson / Black", "crimson", 0xB21F2B, 0x222225, 0x2E2E32, 0x161618 },
+};
+#define N_SHELLS ((int)(sizeof SHELLS / sizeof SHELLS[0]))
+static const float BACKLIGHT[5] = { 0, 0.36f, 0.56f, 0.78f, 1.0f };
+static const char* BACKLIGHT_NAME[5] = { "", "low", "medium", "high", "max" };
+
+/* Canvas (in DS pixels) for the current layout, and where the screens sit on it.
+ * The DS Lite: 0.24 mm per pixel; the lid and base are 133 mm wide; the
+ * screens are 90 pixels (21.5 mm) apart. */
+static void canvas_layout(GlPresent* v, int ww, int wh) {
+    memset(v, 0, sizeof *v);
+    int shell = g_gl && g_opt.shell && !g_side_by_side;
+    if (g_side_by_side) {
+        v->cw = 512; v->ch = 192;
+        v->top[0] = 0; v->bot[0] = 256; v->top[1] = v->bot[1] = 0;
+    } else if (shell) {
+        v->cw = 560; v->ch = 630;
+        v->top[0] = v->bot[0] = 152; v->top[1] = 78; v->bot[1] = 78 + 192 + 90;
+    } else {
+        int gap = g_gl && g_opt.gap ? 90 : 0;
+        v->cw = 256; v->ch = (float)(384 + gap);
+        v->top[0] = v->bot[0] = 0; v->top[1] = 0; v->bot[1] = (float)(192 + gap);
+    }
+    v->top[2] = v->bot[2] = 256; v->top[3] = v->bot[3] = 192;
+    v->win_w = ww; v->win_h = wh;
+    float sc = fminf((float)ww / v->cw, (float)wh / v->ch);
+    if (g_opt.integer && sc >= 1.0f) sc = floorf(sc);
+    v->sc = sc;
+    v->ox = floorf(((float)ww - v->cw * sc) / 2); v->oy = floorf(((float)wh - v->ch * sc) / 2);
+    v->shell = shell;
+    v->lcd = g_gl && g_opt.lcd;
+    v->lcd_color = g_opt.lcd_color; v->grid = g_opt.grid; v->ghost = g_opt.ghost;
+    v->backlight = BACKLIGHT[g_opt.backlight];
+    const Shell* sh = &SHELLS[g_opt.shell_color];
+    uint32_t cols[4] = { sh->lid, sh->base, sh->btn, sh->hinge };
+    float* dst[4] = { v->lid, v->base, v->btn, v->hinge };
+    for (int i = 0; i < 4; i++) for (int k = 0; k < 3; k++) dst[i][k] = (float)((cols[i] >> (16 - 8 * k)) & 255) / 255.0f;
+}
 
 /* ---------------------------------------------------------------- settings.ini
  * Remembers the player's choices between launches (next to the game). */
@@ -56,6 +119,15 @@ static void settings_load(void) {
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
         else if (!strcmp(key, "layout")) g_side_by_side = !strcmp(val, "side_by_side");
         else if (!strcmp(key, "fullscreen")) g_fullscreen = atoi(val) != 0;
+        else if (!strcmp(key, "dslite_filter")) g_opt.lcd = atoi(val) != 0;
+        else if (!strcmp(key, "lcd_colors")) g_opt.lcd_color = atoi(val) != 0;
+        else if (!strcmp(key, "pixel_grid")) g_opt.grid = atoi(val) != 0;
+        else if (!strcmp(key, "motion_blur")) g_opt.ghost = atoi(val) != 0;
+        else if (!strcmp(key, "backlight")) { for (int i = 1; i <= 4; i++) if (!strcmp(val, BACKLIGHT_NAME[i])) g_opt.backlight = i; }
+        else if (!strcmp(key, "screen_gap")) g_opt.gap = atoi(val) != 0;
+        else if (!strcmp(key, "console")) g_opt.shell = atoi(val) != 0;
+        else if (!strcmp(key, "console_color")) { for (int i = 0; i < N_SHELLS; i++) if (!strcmp(val, SHELLS[i].key)) g_opt.shell_color = i; }
+        else if (!strcmp(key, "integer_scaling")) g_opt.integer = atoi(val) != 0;
     }
     fclose(f);
 }
@@ -74,6 +146,19 @@ static void settings_save(void) {
     fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : "stacked");
     fprintf(f, "# 0 or 1 (F11)\n");
     fprintf(f, "fullscreen = %d\n", g_fullscreen);
+    fprintf(f, "# DS Lite screen filter (F6) and its parts: 0 or 1; backlight: low, medium, high, max\n");
+    fprintf(f, "dslite_filter = %d\n", g_opt.lcd);
+    fprintf(f, "lcd_colors = %d\n", g_opt.lcd_color);
+    fprintf(f, "pixel_grid = %d\n", g_opt.grid);
+    fprintf(f, "motion_blur = %d\n", g_opt.ghost);
+    fprintf(f, "backlight = %s\n", BACKLIGHT_NAME[g_opt.backlight]);
+    fprintf(f, "# the real gap between the screens; the DS Lite drawn around them (F7) and its colour:\n");
+    fprintf(f, "# white, black, ice_blue, coral_pink, navy, crimson\n");
+    fprintf(f, "screen_gap = %d\n", g_opt.gap);
+    fprintf(f, "console = %d\n", g_opt.shell);
+    fprintf(f, "console_color = %s\n", SHELLS[g_opt.shell_color].key);
+    fprintf(f, "# whole-number scaling only (every DS pixel the same size): 0 or 1\n");
+    fprintf(f, "integer_scaling = %d\n", g_opt.integer);
     fclose(f);
 }
 
@@ -113,10 +198,20 @@ static void audio_cb(void* u, Uint8* stream, int len) {
     }
 }
 
+/* Window size = canvas x scale, made smaller if it would not fit on the screen. */
+static void menu_sync(void);
 static void layout_window(void) {
-    int w = g_side_by_side ? 512 : 256, h = g_side_by_side ? 192 : 384;
+    GlPresent v; canvas_layout(&v, 1, 1);
+    int w = (int)v.cw, h = (int)v.ch;
     if (!g_gl) SDL_RenderSetLogicalSize(g_ren, w, h);
-    if (!g_fullscreen) SDL_SetWindowSize(g_win, w * g_scale, h * g_scale);
+    if (g_fullscreen) return;
+    float s = (float)g_scale;
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(g_win), &r) == 0) {
+        float fit = fminf((float)(r.w - 16) / (float)w, (float)(r.h - 64) / (float)h);   /* room for the title and menu bars */
+        if (s > fit) s = fit;
+    }
+    SDL_SetWindowSize(g_win, (int)((float)w * s), (int)((float)h * s));
 }
 
 /* OpenGL: a 3.3 core context; on any failure fall back to SDL_Renderer + software 3D. */
@@ -168,8 +263,12 @@ void frontend_init(int argc, char** argv) {
             g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
         }
         apply_mode();
+        const char* names[N_SHELLS];
+        for (int i = 0; i < N_SHELLS; i++) names[i] = SHELLS[i].name;
+        menu_init(g_win, names, N_SHELLS);
+        menu_sync();
         layout_window();
-        if (g_fullscreen) SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        if (g_fullscreen) { menu_show(0); SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP); }
         atexit(settings_save);
     }
     SDL_AudioSpec want, have;
@@ -227,14 +326,13 @@ static uint16_t pad_bits(void) {
 /* Window pixel -> bottom-screen pixel; returns 0 when outside it. */
 static int to_touch(int wx, int wy, int* tx, int* ty) {
     float lx, ly;
-    if (g_gl) {                                                  /* same fit as gl_present() */
+    GlPresent v;
+    if (g_gl) {                                                  /* same layout as gl_present() */
         int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
-        float cw = g_side_by_side ? 512.0f : 256.0f, ch = g_side_by_side ? 192.0f : 384.0f;
-        float sc = fminf((float)ww / cw, (float)wh / ch);
-        lx = (wx - ((float)ww - cw * sc) / 2) / sc; ly = (wy - ((float)wh - ch * sc) / 2) / sc;
-    } else SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly);
-    int x = (int)lx, y = (int)ly;
-    if (g_side_by_side) { x -= 256; } else { y -= 192; }
+        canvas_layout(&v, ww, wh);
+        lx = ((float)wx + 0.5f - v.ox) / v.sc; ly = ((float)wy + 0.5f - v.oy) / v.sc;
+    } else { canvas_layout(&v, 1, 1); SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly); }
+    int x = (int)floorf(lx - v.bot[0]), y = (int)floorf(ly - v.bot[1]);
     if (x < 0 || x > 255 || y < 0 || y > 191) return 0;
     *tx = x; *ty = y;
     return 1;
@@ -343,17 +441,36 @@ static void perf_write(FILE* f) {
     }
 }
 
+/* DQIX_WINSHOT_AT=frame[,frame...]: save the whole window as shown (tests) */
+static void window_shot_hook(int w, int h) {
+    static char list[400]; static int init;
+    if (!init) { init = 1; const char* e = getenv("DQIX_WINSHOT_AT"); if (e) snprintf(list, sizeof list, ",%s,", e); }
+    if (!list[0]) return;
+    char key[32]; snprintf(key, sizeof key, ",%llu,", (unsigned long long)g_frame);
+    if (!strstr(list, key)) return;
+    uint8_t* rgb = gl_read_window(w, h);
+    char path[64]; snprintf(path, sizeof path, "win%06llu.ppm", (unsigned long long)g_frame);
+    FILE* f = fopen(path, "wb");
+    if (f) { fprintf(f, "P6\n%d %d\n255\n", w, h); fwrite(rgb, 1, (size_t)w * h * 3, f); fclose(f); }
+    free(rgb);
+}
+
 static void present_gl(void) {
     uint16_t pow; memcpy(&pow, &g_io[0x304], 2);
     gl_compose((pow >> 15) & 1, pow & 1);
     gl_dump_hook();
     test_hooks();
     int w, h; SDL_GL_GetDrawableSize(g_win, &w, &h);
-    gl_present(w, h, g_side_by_side, 0);
+    GlPresent v; canvas_layout(&v, w, h);
+    gl_present(&v);
+    window_shot_hook(w, h);
     SDL_GL_SwapWindow(g_win);
 }
 
 static void present(void) {
+    static long long skip = -2;                               /* DQIX_PRESENT_FROM=frame: don't draw before it (tests) */
+    if (skip == -2) { const char* e = getenv("DQIX_PRESENT_FROM"); skip = e ? atoll(e) : -1; }
+    if (skip >= 0 && g_frame < (uint64_t)skip) return;
     if (g_gl) { present_gl(); return; }
     void* pix; int pitch;
     if (SDL_LockTexture(g_tex, NULL, &pix, &pitch) == 0) {
@@ -374,6 +491,136 @@ static void present(void) {
     SDL_RenderPresent(g_ren);
 }
 
+/* ---------------------------------------------------------------- settings changes (keys and menu) */
+static void update_title(double fps) {
+    char title[128];
+    if (g_paused) snprintf(title, sizeof title, "Dragon Quest IX - paused (P to continue)");
+    else snprintf(title, sizeof title, "Dragon Quest IX - %s%s - %.1f fps%s", g_classic ? "Classic" : "Enhanced",
+                  g_gl && g_opt.lcd ? " - DS Lite screen" : "", fps, g_fast ? " (fast)" : "");
+    SDL_SetWindowTitle(g_win, title);
+}
+
+static void menu_sync(void) {
+    int stacked = !g_side_by_side;
+    menu_check(MI_PAUSE, g_paused);
+    menu_check(MI_TURBO, g_turbo);
+    menu_check(MI_CLASSIC, g_classic); menu_check(MI_ENHANCED, !g_classic);
+    menu_enable(MI_ENHANCED, g_gl);
+    for (int i = 0; i < 4; i++) { menu_check(MI_RES1 + i, g_scale3d == i + 1); menu_enable(MI_RES1 + i, g_gl && !g_classic); }
+    menu_check(MI_LCD, g_opt.lcd); menu_enable(MI_LCD, g_gl);
+    int lcd = g_gl && g_opt.lcd;
+    menu_check(MI_LCDCOL, g_opt.lcd_color); menu_enable(MI_LCDCOL, lcd);
+    menu_check(MI_GRID, g_opt.grid); menu_enable(MI_GRID, lcd);
+    menu_check(MI_GHOST, g_opt.ghost); menu_enable(MI_GHOST, lcd);
+    for (int i = 0; i < 4; i++) { menu_check(MI_BL1 + i, g_opt.backlight == i + 1); menu_enable(MI_BL1 + i, lcd); }
+    menu_check(MI_SHELL, g_opt.shell); menu_enable(MI_SHELL, g_gl && stacked);
+    for (int i = 0; i < N_SHELLS; i++) { menu_check(MI_SHELLC0 + i, g_opt.shell_color == i); menu_enable(MI_SHELLC0 + i, g_gl && stacked && g_opt.shell); }
+    menu_check(MI_GAP, g_opt.gap || g_opt.shell); menu_enable(MI_GAP, g_gl && stacked && !g_opt.shell);
+    menu_check(MI_STACKED, stacked); menu_check(MI_SIDE, !stacked);
+    for (int i = 0; i < 4; i++) menu_check(MI_SIZE1 + i, g_scale == i + 1);
+    menu_check(MI_INTEGER, g_opt.integer);
+    menu_check(MI_FULL, g_fullscreen);
+}
+
+static const char* CONTROLS_TEXT =
+    "DS button      Keyboard              Controller\n"
+    "D-pad          arrow keys            D-pad / left stick\n"
+    "A / B          X / Z                 right / bottom button\n"
+    "X / Y          S / A                 top / left button\n"
+    "L / R          Q / W                 shoulder buttons\n"
+    "START          Enter                 Start\n"
+    "SELECT         Right Shift           Back\n"
+    "Touch screen   left mouse button on the bottom screen\n\n"
+    "Tab (hold) fast forward   P pause   F5 Classic / Enhanced\n"
+    "F6 DS Lite screen   F7 DS Lite console   F2 layout   F3 window size\n"
+    "F4 3D resolution   F11 fullscreen   F12 screenshot   F10 bug report   Esc quit";
+
+static void do_action(int id) {
+    int relayout = 0;
+    switch (id) {
+    case MI_PAUSE: g_paused = !g_paused; break;
+    case MI_TURBO: g_turbo = !g_turbo; break;
+    case MI_SHOT: g_shot_req = 1; break;
+    case MI_REPORT:
+        report_write("F10 pressed");
+        if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
+        g_fps_t0 = SDL_GetPerformanceCounter();                    /* keep that title up for a second */
+        break;
+    case MI_EXIT: exit(0);
+    case MI_CLASSIC: case MI_ENHANCED:
+        if (!g_gl) break;
+        g_classic = id == MI_CLASSIC; apply_mode(); g_fps_t0 = 0;
+        break;
+    case MI_RES1: case MI_RES2: case MI_RES3: case MI_RES4:
+        if (!g_gl || g_classic) break;
+        g_scale3d = id - MI_RES1 + 1; gl_render_set_scale(g_scale3d);
+        break;
+    case MI_LCD: if (g_gl) g_opt.lcd = !g_opt.lcd; g_fps_t0 = 0; break;
+    case MI_LCDCOL: g_opt.lcd_color = !g_opt.lcd_color; break;
+    case MI_GRID: g_opt.grid = !g_opt.grid; break;
+    case MI_GHOST: g_opt.ghost = !g_opt.ghost; break;
+    case MI_BL1: case MI_BL2: case MI_BL3: case MI_BL4: g_opt.backlight = id - MI_BL1 + 1; break;
+    case MI_SHELL: if (g_gl && !g_side_by_side) { g_opt.shell = !g_opt.shell; relayout = 1; } break;
+    case MI_GAP: if (g_gl) { g_opt.gap = !g_opt.gap; relayout = 1; } break;
+    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; relayout = 1; break;
+    case MI_SIZE1: case MI_SIZE2: case MI_SIZE3: case MI_SIZE4: g_scale = id - MI_SIZE1 + 1; relayout = 1; break;
+    case MI_INTEGER: g_opt.integer = !g_opt.integer; break;
+    case MI_FULL:
+        g_fullscreen = !g_fullscreen;
+        menu_show(!g_fullscreen);
+        SDL_SetWindowFullscreen(g_win, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+        relayout = !g_fullscreen;
+        break;
+    case MI_CONTROLS: SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Controls", CONTROLS_TEXT, g_win); break;
+    case MI_ABOUT:
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "About",
+            "Dragon Quest IX for PC (private build, " __DATE__ ")\n\n"
+            "Classic draws the game exactly like the DS; Enhanced draws its 3D\n"
+            "on the graphics card at up to 4x.\n\n"
+            "DS Lite screen colours: Pokefan531's measured DS Lite profile.", g_win);
+        break;
+    default:
+        if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) g_opt.shell_color = id - MI_SHELLC0;
+        else return;
+    }
+    if (relayout && g_win) layout_window();
+    menu_sync();
+    if (id != MI_SHOT && id != MI_REPORT && id != MI_PAUSE && id != MI_TURBO) settings_save();
+}
+
+static void handle_events(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        int mi = menu_command(&e);
+        if (mi) { do_action(mi); continue; }
+        switch (e.type) {
+        case SDL_QUIT: exit(0);
+        case SDL_KEYDOWN: {
+            if (e.key.repeat || !g_win) break;
+            SDL_Scancode k = e.key.keysym.scancode;
+            if (k == SDL_SCANCODE_ESCAPE) exit(0);
+            if (k == SDL_SCANCODE_F11) do_action(MI_FULL);
+            if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? MI_STACKED : MI_SIDE);
+            if (k == SDL_SCANCODE_F3) do_action(MI_SIZE1 + g_scale % 4);
+            if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) do_action(MI_RES1 + g_scale3d % 4);
+            if (k == SDL_SCANCODE_F5 && g_gl) do_action(g_classic ? MI_ENHANCED : MI_CLASSIC);
+            if (k == SDL_SCANCODE_F6) do_action(MI_LCD);
+            if (k == SDL_SCANCODE_F7) do_action(MI_SHELL);
+            if (k == SDL_SCANCODE_F12) do_action(MI_SHOT);
+            if (k == SDL_SCANCODE_F10) do_action(MI_REPORT);
+            if (k == SDL_SCANCODE_P || k == SDL_SCANCODE_PAUSE) do_action(MI_PAUSE);
+            break;
+        }
+        case SDL_CONTROLLERDEVICEADDED:
+            if (!g_pad) g_pad = SDL_GameControllerOpen(e.cdevice.which);
+            break;
+        case SDL_CONTROLLERDEVICEREMOVED:
+            if (g_pad && SDL_GameControllerGetJoystick(g_pad) == SDL_JoystickFromInstanceID(e.cdevice.which)) { SDL_GameControllerClose(g_pad); g_pad = NULL; }
+            break;
+        }
+    }
+}
+
 void frontend_frame(void) {
     uint64_t t_start = SDL_GetPerformanceCounter();
     if (!g_perf_end) g_perf_end = t_start;
@@ -383,42 +630,12 @@ void frontend_frame(void) {
     memset(&g_gl_stats, 0, sizeof g_gl_stats);
     { extern double g_t2d_ms; static double last; pr->d2 = (float)(g_t2d_ms - last); last = g_t2d_ms; }
     pr->audio_ms = (int)(sound_buffered() * 1000 / 32768);
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-        switch (e.type) {
-        case SDL_QUIT: exit(0);
-        case SDL_KEYDOWN:
-            if (e.key.repeat) break;
-            if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) exit(0);
-            if (e.key.keysym.scancode == SDL_SCANCODE_F11 && g_win) {
-                g_fullscreen = !g_fullscreen;
-                SDL_SetWindowFullscreen(g_win, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-                settings_save();
-            }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F2 && g_win) { g_side_by_side = !g_side_by_side; layout_window(); settings_save(); }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F3 && g_win) { g_scale = g_scale % 4 + 1; layout_window(); settings_save(); }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F12) g_shot_req = 1;
-            if (e.key.keysym.scancode == SDL_SCANCODE_F4 && g_gl && !g_classic) { g_scale3d = g_scale3d % 4 + 1; gl_render_set_scale(g_scale3d); settings_save(); }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F5 && g_gl) { g_classic = !g_classic; apply_mode(); settings_save(); g_fps_t0 = 0; }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F10) {
-                report_write("F10 pressed");
-                if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
-                g_fps_t0 = SDL_GetPerformanceCounter();           /* keep that title up for a second */
-            }
-            break;
-        case SDL_CONTROLLERDEVICEADDED:
-            if (!g_pad) g_pad = SDL_GameControllerOpen(e.cdevice.which);
-            break;
-        case SDL_CONTROLLERDEVICEREMOVED:
-            if (g_pad && SDL_GameControllerGetJoystick(g_pad) == SDL_JoystickFromInstanceID(e.cdevice.which)) { SDL_GameControllerClose(g_pad); g_pad = NULL; }
-            break;
-        }
-    }
+    handle_events();
     if (g_win) {
         const Uint8* ks = SDL_GetKeyboardState(NULL);
         g_fe_keys = key_bits(ks) | pad_bits();
         static int always_fast = -1; if (always_fast < 0) always_fast = getenv("DQIX_FAST") != NULL;   /* tests */
-        g_fast = ks[SDL_SCANCODE_TAB] || always_fast;
+        g_fast = ks[SDL_SCANCODE_TAB] || always_fast || g_turbo;
         int mx, my;
         Uint32 mb = SDL_GetMouseState(&mx, &my);
         int tx, ty;
@@ -427,6 +644,12 @@ void frontend_frame(void) {
         uint64_t tp = SDL_GetPerformanceCounter();
         present();
         pr->present = (float)ticks_ms(SDL_GetPerformanceCounter() - tp);
+        if (g_paused) {                                       /* Game > Pause: keep the window alive, the game waits */
+            update_title(0);
+            while (g_paused) { handle_events(); present(); SDL_Delay(15); }
+            g_next_frame = SDL_GetPerformanceCounter();
+            g_fps_t0 = 0;
+        }
     } else g_fe_keys = pad_bits();
     uint64_t t_wait = SDL_GetPerformanceCounter();
 
@@ -465,10 +688,7 @@ void frontend_frame(void) {
     g_perf_pos++;
     g_fps_frames++;
     if (g_win && now - g_fps_t0 > g_perf_freq) {
-        char title[96];
-        snprintf(title, sizeof title, "Dragon Quest IX - %s - %.1f fps%s", g_classic ? "Classic" : "Enhanced",
-                 g_fps_frames * (double)g_perf_freq / (double)(now - g_fps_t0), g_fast ? " (fast)" : "");
-        SDL_SetWindowTitle(g_win, title);
+        update_title(g_fps_frames * (double)g_perf_freq / (double)(now - g_fps_t0));
         g_fps_frames = 0; g_fps_t0 = now;
     }
 }

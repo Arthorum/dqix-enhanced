@@ -30,9 +30,12 @@ the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
 | START / SELECT | Enter / Right Shift | Start / Back |
 | touch screen | left mouse button on the bottom screen | |
 
-Tab (hold) = fast forward, F5 = Classic / Enhanced, F2 = screens side by side,
-F3 = window size, F4 = 3D resolution in Enhanced (1x / 2x / 3x / 4x),
-F11 = fullscreen, F12 = screenshot, F10 = bug report, Esc = quit.
+Every setting is in the **menu bar** at the top of the window (Game,
+Graphics, Screen, View, Help); the keys are shortcuts: Tab (hold) = fast
+forward, P = pause, F5 = Classic / Enhanced, F4 = 3D resolution in Enhanced,
+F6 = DS Lite screen, F7 = DS Lite console, F2 = screens side by side,
+F3 = window size, F11 = fullscreen (hides the menu bar), F12 = screenshot,
+F10 = bug report, Esc = quit.
 
 **Classic and Enhanced.** The game starts in **Classic** mode: the two
 screens exactly as a DS draws them (256x192 each, 6-bit colour, the DS's
@@ -43,8 +46,17 @@ reference DS emulator and match pixel for pixel. **Enhanced** (F5) draws the
 3D on the graphics card at 1-4x resolution (F4); the 2D is unchanged. The game
 itself runs the same in both modes, so you can switch at any time.
 
-**Settings.** The game remembers the mode, 3D resolution, window size,
-layout and fullscreen in `settings.ini` next to `dqix.exe` (delete it to go
+**DS Lite screen (Screen menu, F6).** Makes the screens look like a DS
+Lite's instead of exact pixels: the LCD's colours (Pokefan531's measured DS
+Lite profile), the red/green/blue stripes and dark lines between pixels
+(visible at 3x and larger), the slight motion blur of the LCD, its never
+fully black backlight, and four backlight levels. Each part can be turned off.
+**View > Show the DS Lite (F7)** draws the console around the screens, at
+real proportions (the screens 21.5 mm apart), in six colours; **Gap between
+the screens** keeps the real gap without the console. The game underneath is
+still Classic or Enhanced; with the filter off, Classic is pixel-exact.
+
+**Settings.** The game remembers every menu choice in `settings.ini` next to `dqix.exe` (delete it to go
 back to the defaults). Enhanced needs OpenGL 3.3 (nearly every PC from the
 last 12 years); without it, the game stays in Classic. `set DQIX_SOFTWARE=1`
 in `play.bat` forces Classic.
@@ -154,7 +166,9 @@ runtime/gpu2d.c        both 2D engines, per scanline
 runtime/gpu3d.c        3D geometry engine + software rasterizer
 runtime/sound.c        sound channels and mixer
 runtime/input.c        DS buttons / touch from the frontend or a script
-runtime/frontend_sdl.c window, input, audio, pacing (SDL2)
+runtime/frontend_sdl.c window, input, audio, pacing, settings (SDL2)
+runtime/menu_win32.c   the menu bar (Windows)
+runtime/gl_render.c    OpenGL: Enhanced 3D, composition, the DS Lite screen + console
 runtime/frontend_none.c headless frontend (tests)
 runtime/report.c       F10 / crash reports (inputs, saves, screenshot, log)
 patches.txt            instruction overrides applied when recompiling

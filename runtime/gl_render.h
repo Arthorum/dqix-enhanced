@@ -8,7 +8,19 @@ int gl_render_init(int scale);                        /* 0 on failure (use the s
 void gl_render_set_scale(int scale);
 const Renderer3D* gl_renderer3d(void);
 void gl_compose(int a_on_top, int lcd_on);           /* at VBlank: 2D + 3D -> both screens */
-void gl_present(int win_w, int win_h, int layout, int smooth);
+/* How to show the screens: canvas (DS pixels) placed in the window at
+ * (ox, oy) with sc window pixels per DS pixel. */
+typedef struct {
+    int win_w, win_h;
+    float ox, oy, sc, cw, ch;
+    float top[4], bot[4];                             /* screen rects on the canvas: x, y, w, h */
+    int lcd, lcd_color, grid, ghost;                  /* DS Lite screen filter and its parts */
+    float backlight;                                  /* 0..1 */
+    int shell;                                        /* draw the console around the screens */
+    float lid[3], base[3], btn[3], hinge[3];          /* its colours (linear 0..1, as shown) */
+} GlPresent;
+void gl_present(const GlPresent* v);
+uint8_t* gl_read_window(int w, int h);
 uint8_t* gl_read_full(int* w, int* h);
 void gl_read_screens(uint32_t out[2][256 * 192]);
 int gl_read_3d(uint8_t* out, int* w, int* h);

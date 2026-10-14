@@ -17,8 +17,8 @@ cp /ucrt64/bin/SDL2.dll "$OUT/"
 cat > "$OUT/play.bat" <<'BAT'
 @echo off
 rem Dragon Quest IX (PC). Keys: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R,
-rem Enter = START, Right Shift = SELECT, mouse = touch screen, Tab = fast forward,
-rem F2 = side by side, F3 = window size, F11 = fullscreen, F12 = screenshot, Esc = quit.
+rem Enter = START, Right Shift = SELECT, mouse = touch screen, Tab = fast forward.
+rem Every setting is in the menu bar at the top of the window.
 cd /d "%~dp0"
 dqix.exe ..\..\extract\baserom_dqix_usa.nds ..\..\extract\usa 0 1 dqix.sav
 if errorlevel 1 pause
