@@ -384,17 +384,27 @@ void frontend_frame(void) {
     if (g_fast) {
         sound_discard();
         g_next_frame = now;
-    } else if (g_audio) {
-        /* follow the sound card's clock: wait while enough audio is queued */
-        uint64_t give_up = now + g_perf_freq / 5;
-        while (sound_buffered() > AUDIO_TARGET && (now = SDL_GetPerformanceCounter()) < give_up) SDL_Delay(1);
-        g_next_frame = now;
     } else {
-        g_next_frame += period;
+        /* An even beat of one frame per 1/59.83 s from the PC's precise clock.
+         * The sound card's clock drifts slightly from it, so the amount of sound
+         * queued (averaged, since the card takes it in ~31 ms chunks) nudges the
+         * beat by at most 0.5%: too much queued -> slightly slower, too little ->
+         * slightly faster. Pacing by the queue directly released frames in pairs. */
+        double adjust = 1.0;
+        if (g_audio) {
+            static double avg = -1;
+            double q = (double)sound_buffered();
+            avg = avg < 0 ? q : avg + (q - avg) * 0.02;
+            double err = (avg - (double)AUDIO_TARGET) / (double)AUDIO_TARGET;
+            adjust = 1.0 + fmax(-0.005, fmin(0.005, err * 0.02));
+        }
+        g_next_frame += (uint64_t)((double)period * adjust);
         if (now > g_next_frame + period * 6) g_next_frame = now;          /* fell far behind: don't try to catch up */
-        else while ((now = SDL_GetPerformanceCounter()) < g_next_frame) {
-            uint64_t left_ms = (g_next_frame - now) * 1000 / g_perf_freq;
-            if (left_ms > 1) SDL_Delay((Uint32)(left_ms - 1));
+        else {
+            while ((now = SDL_GetPerformanceCounter()) < g_next_frame) {
+                uint64_t left_us = (g_next_frame - now) * 1000000 / g_perf_freq;
+                if (left_us > 2500) SDL_Delay((Uint32)(left_us / 1000 - 2));   /* sleep, then wait out the last ~2 ms precisely */
+            }
         }
     }
     if (!g_audio) sound_discard();
