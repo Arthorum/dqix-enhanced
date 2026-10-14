@@ -18,3 +18,7 @@ extract/
 *.wav
 __pycache__/
 *.pyc
+
+# One-time history setup files
+*.bundle
+setup-history.bat
