@@ -33,7 +33,7 @@ the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
 Every setting is in the **menu bar** at the top of the window (Game,
 Graphics, Screen, View, Help); the keys are shortcuts: Tab (hold) = fast
 forward, P = pause, F5 = Classic / Enhanced, F4 = 3D resolution in Enhanced,
-F6 = DS Lite screen, F7 = DS Lite console, F2 = screens side by side,
+F6 = DS Lite screen, F7 = DS Lite console, F8 = actual size, F2 = screens side by side,
 F3 = window size, F11 = fullscreen (hides the menu bar), F12 = screenshot,
 F10 = bug report, Esc = quit.
 
@@ -53,7 +53,13 @@ Lite profile), the red/green/blue stripes and dark lines between pixels
 fully black backlight, and four backlight levels. Each part can be turned off.
 **View > Show the DS Lite (F7)** draws the console around the screens, at
 real proportions (the screens 21.5 mm apart), in six colours; **Gap between
-the screens** keeps the real gap without the console. The game underneath is
+the screens** keeps the real gap without the console. **View > Actual size
+(F8)** shows everything as big as a real DS Lite (each screen 61 mm wide),
+using the size your monitor reports; if that is wrong, set
+`monitor_width_mm` in `settings.ini`. The drawn pixel grid needs about 3
+monitor pixels per DS pixel; at actual size that takes a very dense screen
+(a high-resolution laptop or tablet). On most desktop monitors the monitor's
+own pixels are about as fine as the DS Lite's, so they provide the grid. The game underneath is
 still Classic or Enhanced; with the filter off, Classic is pixel-exact.
 
 **Settings.** The game remembers every menu choice in `settings.ini` next to `dqix.exe` (delete it to go

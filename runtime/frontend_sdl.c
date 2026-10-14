@@ -8,6 +8,7 @@
  *   Tab (hold) = fast forward     F11 = fullscreen     F2 = screens side by side / stacked
  *   F3 = window size 1x..4x       F4 = 3D resolution 1x..4x (Enhanced)  F5 = Classic / Enhanced
  *   F6 = DS Lite screen filter    F7 = DS Lite console around the screens   P = pause
+ *   F8 = actual size (the screens as big as a real DS Lite's)
  *   F12 = screenshot (dqix-shot-N.bmp)
  *   F10 = bug report (reports/<date-time>/: screenshot, inputs, saves, log)
  *   Esc = quit (the save file is always up to date)
@@ -55,7 +56,24 @@ static struct {
     int shell;                   /* draw the console around the screens */
     int shell_color;             /* index into SHELLS */
     int integer;                 /* whole-number scaling only */
-} g_opt = { 0, 1, 1, 1, 4, 0, 0, 0, 0 };
+    int actual;                  /* screens as big as a real DS Lite's */
+    float monitor_width_mm;      /* settings.ini override for the monitor's width (0 = ask the monitor) */
+} g_opt = { 0, 1, 1, 1, 4, 0, 0, 0, 0, 0, 0 };
+
+/* Actual size: a DS Lite pixel is 0.238 mm (a 3-inch 4:3 screen, 256 pixels
+ * across = 60.96 mm). Window pixels per DS pixel on the current monitor. */
+#define DSLITE_MM_PER_PIXEL (60.96f / 256.0f)
+static float g_actual_sc;        /* 0 = monitor size unknown */
+static void update_actual(void) {
+    g_actual_sc = 0;
+    if (!g_win) return;
+    float mm = 0;
+    if (g_opt.monitor_width_mm > 0) {
+        SDL_DisplayMode dm;
+        if (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(g_win), &dm) == 0 && dm.w > 0) mm = g_opt.monitor_width_mm / (float)dm.w;
+    } else mm = display_mm_per_pixel(g_win);
+    if (mm > 0) g_actual_sc = DSLITE_MM_PER_PIXEL / mm;
+}
 
 /* DS Lite colours: lid, base, buttons, hinge (sRGB). */
 typedef struct { const char* name; const char* key; uint32_t lid, base, btn, hinge; } Shell;
@@ -91,7 +109,8 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
     v->top[2] = v->bot[2] = 256; v->top[3] = v->bot[3] = 192;
     v->win_w = ww; v->win_h = wh;
     float sc = fminf((float)ww / v->cw, (float)wh / v->ch);
-    if (g_opt.integer && sc >= 1.0f) sc = floorf(sc);
+    if (g_opt.actual && g_actual_sc > 0) { if (g_actual_sc < sc) sc = g_actual_sc; }   /* real size (smaller if it doesn't fit) */
+    else if (g_opt.integer && sc >= 1.0f) sc = floorf(sc);
     v->sc = sc;
     v->ox = floorf(((float)ww - v->cw * sc) / 2); v->oy = floorf(((float)wh - v->ch * sc) / 2);
     v->shell = shell;
@@ -128,6 +147,8 @@ static void settings_load(void) {
         else if (!strcmp(key, "console")) g_opt.shell = atoi(val) != 0;
         else if (!strcmp(key, "console_color")) { for (int i = 0; i < N_SHELLS; i++) if (!strcmp(val, SHELLS[i].key)) g_opt.shell_color = i; }
         else if (!strcmp(key, "integer_scaling")) g_opt.integer = atoi(val) != 0;
+        else if (!strcmp(key, "actual_size")) g_opt.actual = atoi(val) != 0;
+        else if (!strcmp(key, "monitor_width_mm")) g_opt.monitor_width_mm = (float)atof(val);
     }
     fclose(f);
 }
@@ -159,6 +180,10 @@ static void settings_save(void) {
     fprintf(f, "console_color = %s\n", SHELLS[g_opt.shell_color].key);
     fprintf(f, "# whole-number scaling only (every DS pixel the same size): 0 or 1\n");
     fprintf(f, "integer_scaling = %d\n", g_opt.integer);
+    fprintf(f, "# screens as big as a real DS Lite's (F8): 0 or 1. The size of your monitor is read from the\n");
+    fprintf(f, "# monitor itself; if it comes out wrong, put its visible width in millimetres here (0 = automatic)\n");
+    fprintf(f, "actual_size = %d\n", g_opt.actual);
+    fprintf(f, "monitor_width_mm = %g\n", g_opt.monitor_width_mm);
     fclose(f);
 }
 
@@ -205,13 +230,13 @@ static void layout_window(void) {
     int w = (int)v.cw, h = (int)v.ch;
     if (!g_gl) SDL_RenderSetLogicalSize(g_ren, w, h);
     if (g_fullscreen) return;
-    float s = (float)g_scale;
+    float s = g_opt.actual && g_actual_sc > 0 ? g_actual_sc : (float)g_scale;
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(g_win), &r) == 0) {
         float fit = fminf((float)(r.w - 16) / (float)w, (float)(r.h - 64) / (float)h);   /* room for the title and menu bars */
         if (s > fit) s = fit;
     }
-    SDL_SetWindowSize(g_win, (int)((float)w * s), (int)((float)h * s));
+    SDL_SetWindowSize(g_win, (int)ceilf((float)w * s), (int)ceilf((float)h * s));
 }
 
 /* OpenGL: a 3.3 core context; on any failure fall back to SDL_Renderer + software 3D. */
@@ -245,6 +270,9 @@ void frontend_init(int argc, char** argv) {
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
     if (!getenv("DQIX_NO_SETTINGS")) settings_load();
     if (getenv("DQIX_MODE")) g_classic = strcmp(getenv("DQIX_MODE"), "enhanced") != 0;   /* tests */
+    /* real pixels on high-DPI Windows setups (not stretched by the system), so
+     * the pixel grid and actual size are drawn on the monitor's own pixels */
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
     if (SDL_Init((g_headless ? 0 : SDL_INIT_VIDEO) | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         exit(1);
@@ -266,6 +294,7 @@ void frontend_init(int argc, char** argv) {
         const char* names[N_SHELLS];
         for (int i = 0; i < N_SHELLS; i++) names[i] = SHELLS[i].name;
         menu_init(g_win, names, N_SHELLS);
+        update_actual();
         menu_sync();
         layout_window();
         if (g_fullscreen) { menu_show(0); SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP); }
@@ -517,8 +546,9 @@ static void menu_sync(void) {
     for (int i = 0; i < N_SHELLS; i++) { menu_check(MI_SHELLC0 + i, g_opt.shell_color == i); menu_enable(MI_SHELLC0 + i, g_gl && stacked && g_opt.shell); }
     menu_check(MI_GAP, g_opt.gap || g_opt.shell); menu_enable(MI_GAP, g_gl && stacked && !g_opt.shell);
     menu_check(MI_STACKED, stacked); menu_check(MI_SIDE, !stacked);
-    for (int i = 0; i < 4; i++) menu_check(MI_SIZE1 + i, g_scale == i + 1);
-    menu_check(MI_INTEGER, g_opt.integer);
+    for (int i = 0; i < 4; i++) { menu_check(MI_SIZE1 + i, g_scale == i + 1); menu_enable(MI_SIZE1 + i, !g_opt.actual); }
+    menu_check(MI_INTEGER, g_opt.integer); menu_enable(MI_INTEGER, !g_opt.actual);
+    menu_check(MI_ACTUAL, g_opt.actual); menu_enable(MI_ACTUAL, g_gl);
     menu_check(MI_FULL, g_fullscreen);
 }
 
@@ -532,7 +562,7 @@ static const char* CONTROLS_TEXT =
     "SELECT         Right Shift           Back\n"
     "Touch screen   left mouse button on the bottom screen\n\n"
     "Tab (hold) fast forward   P pause   F5 Classic / Enhanced\n"
-    "F6 DS Lite screen   F7 DS Lite console   F2 layout   F3 window size\n"
+    "F6 DS Lite screen   F7 DS Lite console   F8 actual size   F2 layout   F3 window size\n"
     "F4 3D resolution   F11 fullscreen   F12 screenshot   F10 bug report   Esc quit";
 
 static void do_action(int id) {
@@ -565,6 +595,16 @@ static void do_action(int id) {
     case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; relayout = 1; break;
     case MI_SIZE1: case MI_SIZE2: case MI_SIZE3: case MI_SIZE4: g_scale = id - MI_SIZE1 + 1; relayout = 1; break;
     case MI_INTEGER: g_opt.integer = !g_opt.integer; break;
+    case MI_ACTUAL:
+        if (!g_gl) break;
+        g_opt.actual = !g_opt.actual; relayout = 1;
+        update_actual();
+        if (g_opt.actual && g_actual_sc <= 0)
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Actual size",
+                "Your monitor didn't say how big it is, so the real size can't be worked out.\n\n"
+                "Measure the width of its picture area in millimetres and put it in settings.ini\n"
+                "(next to the game) as monitor_width_mm, e.g. monitor_width_mm = 597", g_win);
+        break;
     case MI_FULL:
         g_fullscreen = !g_fullscreen;
         menu_show(!g_fullscreen);
@@ -606,11 +646,15 @@ static void handle_events(void) {
             if (k == SDL_SCANCODE_F5 && g_gl) do_action(g_classic ? MI_ENHANCED : MI_CLASSIC);
             if (k == SDL_SCANCODE_F6) do_action(MI_LCD);
             if (k == SDL_SCANCODE_F7) do_action(MI_SHELL);
+            if (k == SDL_SCANCODE_F8) do_action(MI_ACTUAL);
             if (k == SDL_SCANCODE_F12) do_action(MI_SHOT);
             if (k == SDL_SCANCODE_F10) do_action(MI_REPORT);
             if (k == SDL_SCANCODE_P || k == SDL_SCANCODE_PAUSE) do_action(MI_PAUSE);
             break;
         }
+        case SDL_WINDOWEVENT:
+            if (e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED && g_opt.actual) { update_actual(); if (!g_fullscreen) layout_window(); }
+            break;
         case SDL_CONTROLLERDEVICEADDED:
             if (!g_pad) g_pad = SDL_GameControllerOpen(e.cdevice.which);
             break;

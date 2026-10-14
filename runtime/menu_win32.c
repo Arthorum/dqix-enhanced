@@ -5,6 +5,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "SDL_syswm.h"
+#include <string.h>
+#include <wchar.h>
+#include <stdio.h>
 
 static HWND g_hwnd;
 static HMENU g_bar;
@@ -64,6 +67,7 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
         item(col, MI_SHELLC0 + i, w);
     }
     item(view, MI_GAP, L"&Gap between the screens");
+    item(view, MI_ACTUAL, L"&Actual size (as big as a real DS Lite)\tF8");
     sep(view);
     item(view, MI_STACKED, L"S&tacked\tF2");
     item(view, MI_SIDE, L"&Side by side\tF2");
@@ -103,7 +107,46 @@ int menu_command(const SDL_Event* e) {
     return LOWORD(m->msg.win.wParam);
 }
 
+/* The monitor's EDID (in the registry under its device id) holds its
+ * physical size: the first detailed timing block in mm, else the basic
+ * size in cm. Divided by the monitor's width in pixels. */
+float display_mm_per_pixel(SDL_Window* win) {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(win, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return 0;
+    HMONITOR mon = MonitorFromWindow(info.info.win.window, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW mi; mi.cbSize = sizeof mi;
+    if (!GetMonitorInfoW(mon, (MONITORINFO*)&mi)) return 0;
+    DEVMODEW dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+    if (!EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) || !dm.dmPelsWidth) return 0;
+    int px_w = (int)dm.dmPelsWidth, px_h = (int)dm.dmPelsHeight;
+    DISPLAY_DEVICEW dd; dd.cb = sizeof dd;
+    for (DWORD k = 0; EnumDisplayDevicesW(mi.szDevice, k, &dd, EDD_GET_DEVICE_INTERFACE_NAME); k++) {
+        if (!(dd.StateFlags & DISPLAY_DEVICE_ACTIVE)) continue;
+        /* \\?\DISPLAY#<model>#<instance>#{guid} -> SYSTEM\CurrentControlSet\Enum\DISPLAY\<model>\<instance> */
+        wchar_t id[256]; wcsncpy(id, dd.DeviceID, 255); id[255] = 0;
+        wchar_t* parts[4] = { 0 }; int n = 0;
+        for (wchar_t *ctx = NULL, *t = wcstok(id, L"#", &ctx); t && n < 4; t = wcstok(NULL, L"#", &ctx)) parts[n++] = t;
+        if (n < 3) continue;
+        wchar_t key[512];
+        _snwprintf(key, 511, L"SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\%ls\\%ls\\Device Parameters", parts[1], parts[2]);
+        key[511] = 0;
+        BYTE edid[256]; DWORD len = sizeof edid;
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, key, L"EDID", RRF_RT_REG_BINARY, NULL, edid, &len) != ERROR_SUCCESS || len < 128) continue;
+        if (edid[0] != 0 || edid[1] != 0xFF || edid[7] != 0) continue;
+        int w_mm = 0, h_mm = 0;
+        if (edid[54] | edid[55]) { w_mm = edid[66] | ((edid[68] & 0xF0) << 4); h_mm = edid[67] | ((edid[68] & 0x0F) << 8); }
+        if (w_mm < 100 || h_mm < 50) { w_mm = edid[21] * 10; h_mm = edid[22] * 10; }    /* cm */
+        if (w_mm < 100 || h_mm < 50) continue;
+        if ((px_w < px_h) != (w_mm < h_mm)) { int t = w_mm; w_mm = h_mm; h_mm = t; } /* rotated monitor */
+        float mm = (float)w_mm / (float)px_w;
+        if (mm > 0.05f && mm < 1.5f) return mm;
+    }
+    return 0;
+}
+
 #else
+float display_mm_per_pixel(SDL_Window* win) { (void)win; return 0; }
 void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) { (void)win; (void)shell_names; (void)n_shells; }
 void menu_show(int on) { (void)on; }
 void menu_check(int id, int on) { (void)id; (void)on; }
