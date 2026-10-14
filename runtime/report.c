@@ -34,7 +34,12 @@ void report_log_line(const char* line) {
     g_log_ring[i] = strdup(line);
 }
 
+void (*g_report_capture)(uint32_t out[2][256 * 192]);    /* set when the picture is not in g_screen (OpenGL) */
+
 static void write_bmp(const char* path) {
+    static uint32_t cap[2][256 * 192];
+    const uint32_t (*scr)[256 * 192] = (const uint32_t (*)[256 * 192])g_screen;
+    if (g_report_capture) { g_report_capture(cap); scr = (const uint32_t (*)[256 * 192])cap; }
     FILE* f = fopen(path, "wb");
     if (!f) return;
     int w = 256, h = 384, row = w * 3;
@@ -47,7 +52,7 @@ static void write_bmp(const char* path) {
     fwrite(hdr, 1, 54, f);
     uint8_t* line = malloc((size_t)row);
     for (int y = h - 1; y >= 0; y--) {                       /* bottom-up */
-        const uint32_t* src = &g_screen[y / 192][(y % 192) * 256];
+        const uint32_t* src = &scr[y / 192][(y % 192) * 256];
         for (int x = 0; x < w; x++) { line[x * 3] = (uint8_t)src[x]; line[x * 3 + 1] = (uint8_t)(src[x] >> 8); line[x * 3 + 2] = (uint8_t)(src[x] >> 16); }
         fwrite(line, 1, (size_t)row, f);
     }

@@ -12,11 +12,12 @@ FRONTEND ?= none
 OUT ?= dqix
 
 RT = $(wildcard runtime/*.c)
-RT := $(filter-out runtime/stub_runtime.c runtime/frontend_%.c,$(RT)) runtime/frontend_$(FRONTEND).c
+RT := $(filter-out runtime/stub_runtime.c runtime/frontend_%.c runtime/gl_render.c,$(RT)) runtime/frontend_$(FRONTEND).c
 
 ifeq ($(FRONTEND),sdl)
 SDL_CFLAGS ?= $(shell sdl2-config --cflags)
 SDL_LIBS ?= $(shell sdl2-config --libs)
+RT += runtime/gl_render.c
 endif
 
 GENOBJ = $(patsubst $(GEN)/%.c,$(OBJ)/gen/%.o,$(wildcard $(GEN)/*.c))
@@ -34,7 +35,11 @@ $(OBJ)/gen7/%.o: $(GEN7)/%.c runtime/cpu.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEFS) -Iruntime -I$(GEN7) -c $< -o $@
 
-$(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.h
+$(OBJ)/rt/gl_render.o: runtime/gl_render.c runtime/gl_render.h runtime/gpu3d.h runtime/nds.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -Wall -Wno-unused-parameter $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
+
+$(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.h runtime/gl_render.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wno-unused-parameter $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
 

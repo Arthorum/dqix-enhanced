@@ -5,6 +5,12 @@
 #include <time.h>
 #include "nds.h"
 #include "frontend.h"
+#include "gpu3d.h"
+
+/* DQIX_NO3D: build 3D frames but do not draw them (measures what a GPU renderer leaves on the CPU). */
+static void null_vblank(void) {}
+static void null_render(const Frame3D* f) { (void)f; }
+static const Renderer3D g_null3d = { null_vblank, null_render };
 
 static FILE* g_wav;
 static uint32_t g_wav_frames;
@@ -28,6 +34,7 @@ void frontend_init(int argc, char** argv) {
     (void)argc; (void)argv;
     const char* p = getenv("DQIX_WAV");
     if (p && (g_wav = fopen(p, "wb"))) { wav_header(g_wav, 0); atexit(wav_close); }
+    if (getenv("DQIX_NO3D")) g_renderer3d = &g_null3d;
 }
 
 /* DQIX_FRAMETIME=from_frame: histogram of host time per frame (performance checks) */
@@ -58,6 +65,10 @@ static void frame_time(void) {
         int b = d < 4 ? 0 : d < 8 ? 1 : d < 12 ? 2 : d < 16.7 ? 3 : d < 25 ? 4 : d < 33 ? 5 : d < 50 ? 6 : 7;
         g_hist[b]++;
         if (d > g_ft_max) { g_ft_max = d; g_ft_maxf = g_frame; }
+        static double slow_ms = -1; if (slow_ms < 0) { const char* e = getenv("DQIX_SLOWLOG"); slow_ms = e ? atof(e) : 0; }
+        { extern double g_t3d_ms, g_t2d_ms; static double q3, q2;
+          if (slow_ms > 0 && d >= slow_ms) fprintf(stderr, "slow frame %llu: %.1f ms (3D %.1f, 2D %.1f)\n", (unsigned long long)g_frame, d, g_t3d_ms - q3, g_t2d_ms - q2);
+          q3 = g_t3d_ms; q2 = g_t2d_ms; }
     }
     g_ft_last = t;
 }

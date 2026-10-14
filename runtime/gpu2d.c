@@ -9,7 +9,7 @@
 #include "nds.h"
 
 uint32_t g_screen[2][256 * 192];
-static uint32_t g_engine_out[2][256 * 192];
+uint32_t g_engine_out[2][256 * 192];
 
 /* 3D layer of engine A for the current line (gpu3d.c fills it later). */
 uint16_t g_3d_line[256];
@@ -275,10 +275,35 @@ static inline uint32_t to_rgb(uint16_t c) {
     return ((r << 3 | r >> 2) << 16) | ((g << 3 | g >> 2) << 8) | (b << 3 | b >> 2);
 }
 
+/* GL mode outputs (engine A): see gl_render.c */
+int g_comp_gl;
+int g_comp_has3d;
+uint32_t g_comp_c2[256 * 192];
+uint8_t g_comp_info[256 * 192 * 4];
+
+/* One pixel from its top two layers, with color effects (no master brightness). */
+static uint16_t compose_px(int l1, uint16_t c1, int l2, uint16_t c2, int x, int fx, uint16_t bldcnt, int effect,
+                           int eva, int evb, int evy, const ObjLine* objl, int bg_3d) {
+    uint16_t out = c1 & 0x7FFF;
+    int top_t1 = (bldcnt >> l1) & 1, sec_t2 = (bldcnt >> (8 + l2)) & 1;
+    if (l1 == 4 && objl->semi[x] && sec_t2) out = blend(c1, c2, eva, evb);
+    else if (l1 == 0 && bg_3d && g_3d_present && sec_t2 && g_3d_alpha[x] < 31) {
+        int a = g_3d_alpha[x] + 1;                                  /* 3D layer's own alpha */
+        out = blend(c1, c2, a / 2, 16 - a / 2);
+    } else if (fx && top_t1) {
+        if (effect == 1 && sec_t2) out = blend(c1, c2, eva, evb);
+        else if (effect == 2) out = brighten(c1 & 0x7FFF, evy);
+        else if (effect == 3) out = darken(c1 & 0x7FFF, evy);
+    }
+    return out;
+}
+
 static void render_engine_line(int eng, int y) {
     Engine* e = &g_eng[eng];
     uint32_t* dst = &g_engine_out[eng][y * 256];
     uint32_t disp = R32(e, 0);
+    if (eng == 0 && y == 0) g_comp_has3d = 0;                       /* set again below if the 3D layer shows */
+    if (eng == 0 && g_comp_gl) memset(&g_comp_info[y * 256 * 4], 0, 256 * 4);
     int dmode = (disp >> 16) & 3;
     if (eng == 1) dmode &= 1;
     if (dmode == 0) { for (int x = 0; x < 256; x++) dst[x] = 0xFFFFFF; return; }
@@ -349,35 +374,59 @@ static void render_engine_line(int eng, int y) {
         if (obj_on) order[norder++] = 4 + prio;
         for (int bg = 0; bg < 4; bg++) if (bg_on[bg] && (R16(e, 0x08 + bg * 2) & 3) == prio) order[norder++] = bg;
     }
+    /* GL mode (engine A with the 3D layer on): the 3D layer is drawn on the GPU at
+     * high resolution, so for each pixel record how it shows (see gl_render.c). */
+    int gl3d = eng == 0 && bg_3d && bg_on[0] && g_comp_gl;
+    if (gl3d) g_comp_has3d = 1;
+    uint32_t* c2out = &g_comp_c2[y * 256];
+    uint8_t* info = &g_comp_info[y * 256 * 4];
+    uint32_t mbbyte = (uint32_t)(((mb_mode & 3) << 5) | (mb_f & 31)) << 24;
     for (int x = 0; x < 256; x++) {
-        /* top two layers: layer ids 0-3 BG, 4 OBJ, 5 backdrop */
-        int l1 = 5, l2 = 5;
-        uint16_t c1 = backdrop, c2 = backdrop;
+        /* top three candidate layers: ids 0-3 BG, 4 OBJ, 5 backdrop */
+        int ids[3] = { 5, 5, 5 };
+        uint16_t cols[3] = { backdrop, backdrop, backdrop };
+        int nc = 0;
         uint8_t wm = winmask[x];
-        for (int k = 0; k < norder; k++) {
+        for (int k = 0; k < norder && nc < 3; k++) {
             int L = order[k], id;
             uint16_t c;
             if (L >= 4) {
                 if (!(wm & 0x10) || !(objl.col[x] & PX_OPAQUE) || objl.prio[x] != L - 4) continue;
                 id = 4; c = objl.col[x];
+            } else if (L == 0 && gl3d) {
+                if (!(wm & 1)) continue;
+                id = 0; c = 0;                                      /* the 3D layer: decided on the GPU */
             } else {
                 if (!(wm & (1 << L)) || !(bgl[L].col[x] & PX_OPAQUE)) continue;
                 id = L; c = bgl[L].col[x];
             }
-            if (l1 == 5) { l1 = id; c1 = c; } else { l2 = id; c2 = c; break; }
+            ids[nc] = id; cols[nc] = c; nc++;
         }
-        uint16_t out = c1 & 0x7FFF;
         int fx = (wm & 0x20) != 0;
-        int top_t1 = (bldcnt >> l1) & 1, sec_t2 = (bldcnt >> (8 + l2)) & 1;
-        if (l1 == 4 && objl.semi[x] && sec_t2) out = blend(c1, c2, eva, evb);
-        else if (l1 == 0 && bg_3d && g_3d_present && sec_t2 && g_3d_alpha[x] < 31) {
-            int a = g_3d_alpha[x] + 1;                              /* 3D layer's own alpha */
-            out = blend(c1, c2, a / 2, 16 - a / 2);
-        } else if (fx && top_t1) {
-            if (effect == 1 && sec_t2) out = blend(c1, c2, eva, evb);
-            else if (effect == 2) out = brighten(c1 & 0x7FFF, evy);
-            else if (effect == 3) out = darken(c1 & 0x7FFF, evy);
+        int k0 = 0;
+        if (gl3d && ids[0] == 0) {                                  /* 3D on top */
+            int sec = (bldcnt >> (8 + ids[1])) & 1;
+            int eff = (fx && (bldcnt & 1)) ? effect : 0;
+            uint16_t below = compose_px(ids[1], cols[1], ids[2], cols[2], x, fx, bldcnt, effect, eva, evb, evy, &objl, 0);
+            dst[x] = to_rgb(below);
+            c2out[x] = to_rgb(cols[1] & 0x7FFF) | mbbyte;
+            info[x * 4] = (uint8_t)(1 | (sec << 2) | (eff << 3)); info[x * 4 + 1] = (uint8_t)eva; info[x * 4 + 2] = (uint8_t)evb; info[x * 4 + 3] = (uint8_t)evy;
+            continue;
         }
+        if (gl3d && ids[1] == 0) {                                  /* 2D on top, 3D as the blend partner? */
+            int sec = (bldcnt >> 8) & 1;
+            int top_t1 = (bldcnt >> ids[0]) & 1;
+            if (sec && ((ids[0] == 4 && objl.semi[x]) || (fx && top_t1 && effect == 1))) {
+                dst[x] = to_rgb(cols[0] & 0x7FFF);
+                c2out[x] = to_rgb(cols[2] & 0x7FFF) | mbbyte;
+                info[x * 4] = 2; info[x * 4 + 1] = (uint8_t)eva; info[x * 4 + 2] = (uint8_t)evb; info[x * 4 + 3] = 0;
+                continue;
+            }
+            /* otherwise the 3D layer only matters if the 2D one is transparent: treat it as the backdrop below */
+            ids[1] = ids[2]; cols[1] = cols[2];
+        }
+        if (gl3d) info[x * 4] = 0;
+        uint16_t out = compose_px(ids[k0], cols[k0], ids[k0 + 1], cols[k0 + 1], x, fx, bldcnt, effect, eva, evb, evy, &objl, bg_3d);
         if (mb_mode == 1) out = brighten(out, mb_f);
         else if (mb_mode == 2) out = darken(out, mb_f);
         dst[x] = to_rgb(out);

@@ -8,8 +8,11 @@ natively, plus the runtime that stands in for the DS hardware.
 * Milestone 3 (done): graphics. 2D engines and a software 3D renderer. Logos,
   opening movie, title, adventure-log menu, character creation, the story
   opening in Angel Falls and the first battle all render.
-* Milestone 4 (now): a playable PC build. Window, keyboard / mouse / gamepad,
+* Milestone 4 (done): a playable PC build. Window, keyboard / mouse / gamepad,
   sound, frame pacing (SDL2). Built on Windows with `build-pc.bat`.
+* Milestone 5 (now): enhancements. 3D drawn on the graphics card (OpenGL 3.3)
+  at 1-4x resolution; the 2D layers are still drawn exactly like the DS and
+  combined with the 3D on the graphics card.
 
 ## Building the PC version (Windows)
 
@@ -27,7 +30,14 @@ the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
 | touch screen | left mouse button on the bottom screen | |
 
 Tab (hold) = fast forward, F2 = screens side by side, F3 = window size,
-F11 = fullscreen, F12 = screenshot, F10 = bug report, Esc = quit.
+F4 = 3D resolution (1x / 2x / 3x / 4x, starts at 2x), F11 = fullscreen,
+F12 = screenshot, F10 = bug report, Esc = quit.
+
+**Graphics.** 3D is drawn by the graphics card when it supports OpenGL 3.3
+(nearly every PC from the last 12 years). If it doesn't, the game falls back
+to the original software renderer by itself. To force the software renderer,
+start it with `set DQIX_SOFTWARE=1` in `play.bat`; `set DQIX_SCALE3D=4` picks
+the starting 3D resolution.
 
 **Bug reports.** F10 (or a crash) writes `reports/<date-time>/` next to the
 game: a screenshot, every input since launch, the save as it was at launch and

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include "gpu3d.h"
 #include <time.h>
 #ifdef DQIX_TIMING   /* render timing for performance work (Linux test builds) */
 static double ms_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
@@ -49,23 +50,6 @@ typedef struct {
     float r, g, b;           /* vertex color 0..31 */
     float s, t;              /* texel coordinates */
 } Vtx;
-
-typedef struct {             /* screen-space vertex */
-    float x, y;              /* pixels */
-    float zn;                /* z/w mapped to 0..1 */
-    float iw;                /* 1/w */
-    float r, g, b, s, t;
-} SVtx;
-
-#define MAX_POLY 2048
-#define MAX_PV 10
-typedef struct {
-    SVtx v[MAX_PV];
-    int n;
-    uint32_t attr, teximg, pltt;
-    int translucent;
-    float ymin, ymax;
-} Poly;
 
 static Poly g_polybuf[2][MAX_POLY];
 static int g_npoly[2], g_nvert[2];
@@ -750,6 +734,19 @@ static int poly_cmp_y(const void* x, const void* y) {
     return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/* Hardware drawing order: opaque polygons sorted by Y, then translucent ones
+ * (sorted by Y unless SWAP_BUFFERS asked for manual order). */
+static int build_order(int buf, const Poly** order, int* n_opaque) {
+    int n = g_npoly[buf], no = 0;
+    for (int i = 0; i < n; i++) if (!g_polybuf[buf][i].translucent) order[no++] = &g_polybuf[buf][i];
+    qsort(order, no, sizeof order[0], poly_cmp_y);
+    int nt = no;
+    for (int i = 0; i < n; i++) if (g_polybuf[buf][i].translucent) order[nt++] = &g_polybuf[buf][i];
+    if (!(g_render_flags & 1)) qsort(order + no, nt - no, sizeof order[0], poly_cmp_y);
+    *n_opaque = no;
+    return nt;
+}
+
 double g_t3d_part[4];
 static void render_frame(int buf) {
     double tA = ms_now();
@@ -771,12 +768,8 @@ static void render_frame(int buf) {
     double tB = ms_now(); g_t3d_part[0] += tB - tA;
     int n = g_npoly[buf];
     static const Poly* order[MAX_POLY];
-    int no = 0;
-    for (int i = 0; i < n; i++) if (!g_polybuf[buf][i].translucent) order[no++] = &g_polybuf[buf][i];
-    qsort(order, no, sizeof order[0], poly_cmp_y);
-    int nt = no;
-    for (int i = 0; i < n; i++) if (g_polybuf[buf][i].translucent) order[nt++] = &g_polybuf[buf][i];
-    if (!(g_render_flags & 1)) qsort(order + no, nt - no, sizeof order[0], poly_cmp_y);
+    int no;
+    int nt = build_order(buf, order, &no);
     for (int i = 0; i < nt; i++) {
         const Poly* p = order[i];
         poly_edges(p);
@@ -878,8 +871,12 @@ static void render_frame(int buf) {
 
 /* VBlank: SWAP_BUFFERS takes effect, the new list is rendered. */
 double g_t3d_ms;
+const Renderer3D* g_renderer3d;
+int g_renderer3d_verify;
+
 void gpu3d_vblank(void) {
     if (gxstat_irq_mode) irq_raise(&g_c9, IRQ_GXFIFO);
+    if (g_renderer3d) g_renderer3d->vblank();
     if (!g_swap_pending) return;
     g_swap_pending = 0;
     g_render_flags = g_swap_flags;
@@ -887,8 +884,89 @@ void gpu3d_vblank(void) {
     g_geo ^= 1;
     g_npoly[g_geo] = 0; g_nvert[g_geo] = 0;
     double t0 = ms_now();
-    render_frame(buf);
+    if (g_renderer3d) {
+        static const Poly* order[MAX_POLY];
+        Frame3D f;
+        f.order = order;
+        f.n = build_order(buf, order, &f.n_opaque);
+        f.wbuf = (g_render_flags >> 1) & 1;
+        g_renderer3d->render(&f);
+        g_3d_have_frame = 1;
+    }
+    if (!g_renderer3d || g_renderer3d_verify) render_frame(buf);
     g_t3d_ms += ms_now() - t0;
+}
+
+const uint16_t* gpu3d_soft_color(void) { return &fb_color[0][0]; }
+const uint8_t*  gpu3d_soft_alpha(void) { return &fb_alpha[0][0]; }
+
+/* ---------------------------------------------------------------- texture helpers for renderers */
+int gpu3d_tex_size(uint32_t ti, int* w, int* h) {
+    *w = 8 << ((ti >> 20) & 7); *h = 8 << ((ti >> 23) & 7);
+    return ((ti >> 26) & 7) != 0;
+}
+
+void gpu3d_decode_texture(uint32_t ti, uint32_t pl, uint8_t* rgba) {
+    Poly p;
+    p.teximg = ti & ~(0xFu << 16);              /* no repeat/flip: texels are inside anyway */
+    p.pltt = pl;
+    int w, h; gpu3d_tex_size(ti, &w, &h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int a;
+            uint16_t c = texel(&p, x, y, &a);
+            uint8_t* o = rgba + (y * w + x) * 4;
+            int r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+            o[0] = (uint8_t)(r << 3 | r >> 2); o[1] = (uint8_t)(g << 3 | g >> 2); o[2] = (uint8_t)(b << 3 | b >> 2);
+            o[3] = (uint8_t)(a << 3 | a >> 2);
+        }
+}
+
+/* Hash of everything a texture is made from: its texels, the 4x4 format's
+ * index data, and its palette (with the current VRAM slot mapping). */
+static uint64_t hash_range(uint64_t h, uint32_t addr, uint32_t len, int pal) {
+    while (len) {
+        uint8_t* base = pal ? g_texpal_slot[(addr >> 14) < 6 ? addr >> 14 : 0] : g_tex_slot[(addr >> 17) & 3];
+        uint32_t span = pal ? 0x4000 - (addr & 0x3FFF) : 0x20000 - (addr & 0x1FFFF);
+        if (span > len) span = len;
+        h = (h ^ (uint64_t)(uintptr_t)base) * 0x100000001B3ull;
+        if (base) {
+            const uint8_t* q = base + (pal ? (addr & 0x3FFF) : (addr & 0x1FFFF));
+            uint32_t i = 0;
+            for (; i + 8 <= span; i += 8) { uint64_t v; memcpy(&v, q + i, 8); h = (h ^ v) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
+            for (; i < span; i++) h = (h ^ q[i]) * 0x100000001B3ull;
+        }
+        addr += span; len -= span;
+    }
+    return h;
+}
+
+uint64_t gpu3d_texture_hash(uint32_t ti, uint32_t pl) {
+    int w, h; gpu3d_tex_size(ti, &w, &h);
+    int fmt = (ti >> 26) & 7;
+    uint32_t base = (ti & 0xFFFF) * 8, n = (uint32_t)(w * h);
+    uint64_t hs = 0xCBF29CE484222325ull ^ ((uint64_t)(ti & 0x3FF0FFFFu) << 16) ^ pl;
+    static const uint32_t bits[8] = { 0, 8, 2, 4, 8, 2, 8, 16 };
+    hs = hash_range(hs, base, n * bits[fmt] / 8, 0);
+    uint32_t pb = pl * 16;
+    switch (fmt) {
+    case 1: hs = hash_range(hs, pb, 64, 1); break;
+    case 2: hs = hash_range(hs, pl * 8, 8, 1); break;
+    case 3: hs = hash_range(hs, pb, 32, 1); break;
+    case 4: hs = hash_range(hs, pb, 512, 1); break;
+    case 6: hs = hash_range(hs, pb, 16, 1); break;
+    case 5: {
+        uint32_t ia = 0x20000 + ((base & 0x1FFFF) >> 1) + (base >= 0x40000 ? 0x10000 : 0);
+        hs = hash_range(hs, ia, n / 8, 0);
+        /* palette: up to the largest offset the blocks use */
+        uint32_t maxoff = 0;
+        for (uint32_t i = 0; i < n / 16; i++) { uint32_t o = (tex16(ia + i * 2) & 0x3FFF) * 4; if (o > maxoff) maxoff = o; }
+        hs = hash_range(hs, pb, maxoff + 8, 1);
+        break;
+    }
+    default: break;
+    }
+    return hs;
 }
 
 extern uint16_t g_3d_line[256];

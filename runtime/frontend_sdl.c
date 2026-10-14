@@ -6,7 +6,7 @@
  *   L <- Q                  R <- W      START <- Enter         SELECT <- Right Shift / Backspace
  *   touch screen <- left mouse button on the bottom screen
  *   Tab (hold) = fast forward     F11 = fullscreen     F2 = screens side by side / stacked
- *   F3 = window size 1x..4x       F12 = screenshot (dqix-shot-N.bmp)
+ *   F3 = window size 1x..4x       F4 = 3D resolution 1x..4x (OpenGL)   F12 = screenshot (dqix-shot-N.bmp)
  *   F10 = bug report (reports/<date-time>/: screenshot, inputs, saves, log)
  *   Esc = quit (the save file is always up to date)
  * A game controller works too (Nintendo layout by position: right face button = A). */
@@ -15,8 +15,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "nds.h"
 #include "frontend.h"
+#include "gl_render.h"
 
 #define DS_FPS 59.8261
 
@@ -30,6 +32,11 @@ static uint64_t g_next_frame, g_perf_freq;
 static int g_fast;
 static uint32_t g_fps_frames; static uint64_t g_fps_t0;
 static int g_headless;          /* DQIX_NOWINDOW: run without a window (still uses SDL audio off) */
+static int g_gl;                /* OpenGL renderer active (else SDL_Renderer + software 3D) */
+static SDL_GLContext g_glctx;
+static int g_scale3d = 2;
+extern int g_comp_gl;
+extern void (*g_report_capture)(uint32_t out[2][256 * 192]);
 
 /* Audio drives the pacing: the game runs ~100 ms ahead of what is being
  * heard, so a slow frame only eats into that cushion instead of causing a
@@ -59,8 +66,35 @@ static void audio_cb(void* u, Uint8* stream, int len) {
 
 static void layout_window(void) {
     int w = g_side_by_side ? 512 : 256, h = g_side_by_side ? 192 : 384;
-    SDL_RenderSetLogicalSize(g_ren, w, h);
+    if (!g_gl) SDL_RenderSetLogicalSize(g_ren, w, h);
     if (!g_fullscreen) SDL_SetWindowSize(g_win, w * g_scale, h * g_scale);
+}
+
+/* OpenGL: a 3.3 core context; on any failure fall back to SDL_Renderer + software 3D. */
+static int try_gl(void) {
+    if (getenv("DQIX_SOFTWARE")) return 0;
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    g_win = SDL_CreateWindow("Dragon Quest IX", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 256 * g_scale, 384 * g_scale,
+                             SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!g_win) return 0;
+    g_glctx = SDL_GL_CreateContext(g_win);
+    if (!g_glctx) { fprintf(stderr, "OpenGL 3.3 not available (%s): using the software renderer\n", SDL_GetError()); SDL_DestroyWindow(g_win); g_win = NULL; return 0; }
+    SDL_GL_SetSwapInterval(0);                                   /* pacing follows the audio clock */
+    const char* e = getenv("DQIX_SCALE3D");
+    if (e) g_scale3d = atoi(e);
+    if (!gl_render_init(g_scale3d)) {
+        fprintf(stderr, "OpenGL renderer failed to start: using the software renderer\n");
+        SDL_GL_DeleteContext(g_glctx); SDL_DestroyWindow(g_win); g_win = NULL; return 0;
+    }
+    g_gl = 1;
+    g_renderer3d = gl_renderer3d();
+    g_renderer3d_verify = getenv("DQIX_GL_VERIFY") != NULL;
+    g_comp_gl = 1;
+    g_report_capture = gl_read_screens;
+    return 1;
 }
 
 void frontend_init(int argc, char** argv) {
@@ -75,13 +109,15 @@ void frontend_init(int argc, char** argv) {
     if (!g_headless) {
         const char* sc = getenv("DQIX_SCALE");
         if (sc) { g_scale = atoi(sc); if (g_scale < 1) g_scale = 1; if (g_scale > 8) g_scale = 8; }
-        g_win = SDL_CreateWindow("Dragon Quest IX", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 256 * g_scale, 384 * g_scale,
-                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-        if (!g_win) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); exit(1); }
-        g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);
-        if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
-        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-        g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
+        if (!try_gl()) {
+            g_win = SDL_CreateWindow("Dragon Quest IX", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 256 * g_scale, 384 * g_scale,
+                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+            if (!g_win) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); exit(1); }
+            g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);
+            if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
+            SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+            g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
+        }
         layout_window();
     }
     SDL_AudioSpec want, have;
@@ -139,7 +175,12 @@ static uint16_t pad_bits(void) {
 /* Window pixel -> bottom-screen pixel; returns 0 when outside it. */
 static int to_touch(int wx, int wy, int* tx, int* ty) {
     float lx, ly;
-    SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly);
+    if (g_gl) {                                                  /* same fit as gl_present() */
+        int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
+        float cw = g_side_by_side ? 512.0f : 256.0f, ch = g_side_by_side ? 192.0f : 384.0f;
+        float sc = fminf((float)ww / cw, (float)wh / ch);
+        lx = (wx - ((float)ww - cw * sc) / 2) / sc; ly = (wy - ((float)wh - ch * sc) / 2) / sc;
+    } else SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly);
     int x = (int)lx, y = (int)ly;
     if (g_side_by_side) { x -= 256; } else { y -= 192; }
     if (x < 0 || x > 255 || y < 0 || y > 191) return 0;
@@ -148,7 +189,25 @@ static int to_touch(int wx, int wy, int* tx, int* ty) {
 }
 
 static int g_shot_req;
+static void save_bmp_screens(const uint32_t scr[2][256 * 192], const char* path) {
+    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(0, 256, 384, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!sf) return;
+    for (int y = 0; y < 384; y++) memcpy((uint8_t*)sf->pixels + y * sf->pitch, &scr[y / 192][(y % 192) * 256], 256 * 4);
+    SDL_SaveBMP(sf, path);
+    SDL_FreeSurface(sf);
+}
+
 static void save_screenshot(void) {
+    if (g_gl) {
+        static uint32_t scr[2][256 * 192];
+        static int n;
+        char path[64];
+        gl_read_screens(scr);
+        snprintf(path, sizeof path, "dqix-shot-%d.bmp", n++);
+        save_bmp_screens(scr, path);
+        fprintf(stderr, "screenshot: %s\n", path);
+        return;
+    }
     int w, h;
     SDL_GetRendererOutputSize(g_ren, &w, &h);
     SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -163,7 +222,53 @@ static void save_screenshot(void) {
     SDL_FreeSurface(sf);
 }
 
+static void test_hooks(void) {
+    static long long report_at = -2;
+    if (report_at == -2) { const char* e = getenv("DQIX_REPORT_AT"); report_at = e ? atoll(e) : -1; }
+    if (report_at >= 0 && g_frame == (uint64_t)report_at) report_write("DQIX_REPORT_AT (test)");
+    static long long shot_at = -2;
+    if (shot_at == -2) { const char* e = getenv("DQIX_SHOT_AT"); shot_at = e ? atoll(e) : -1; }
+    if (g_shot_req || (shot_at >= 0 && g_frame == (uint64_t)shot_at)) { save_screenshot(); g_shot_req = 0; }
+}
+
+/* DQIX_GL_DUMP="dir,every": write the GL-composed screens (256x384) like DQIX_DUMP (tests) */
+static void gl_dump_hook(void) {
+    static int every = -1; static char dir[400];
+    if (every < 0) {
+        const char* e = getenv("DQIX_GL_DUMP");
+        every = 0;
+        if (e) { const char* c = strchr(e, ','); size_t n = c ? (size_t)(c - e) : strlen(e); if (n >= sizeof dir) n = sizeof dir - 1; memcpy(dir, e, n); dir[n] = 0; every = c ? atoi(c + 1) : 60; }
+    }
+    if (every <= 0 || g_frame % (uint64_t)every) return;
+    char path[600]; snprintf(path, sizeof path, "%s/f%06llu.ppm", dir, (unsigned long long)g_frame);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    if (getenv("DQIX_GL_DUMP_FULL")) {                       /* at the rendering resolution */
+        int w, h; uint8_t* rgb = gl_read_full(&w, &h);
+        fprintf(f, "P6\n%d %d\n255\n", w, h);
+        fwrite(rgb, 1, (size_t)w * h * 3, f);
+        free(rgb);
+    } else {                                                 /* native 256x384, for comparisons */
+        static uint32_t scr[2][256 * 192];
+        gl_read_screens(scr);
+        fprintf(f, "P6\n256 384\n255\n");
+        for (int sc = 0; sc < 2; sc++) for (int i = 0; i < 256 * 192; i++) { uint32_t c = scr[sc][i]; uint8_t rgb[3] = { (uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c }; fwrite(rgb, 1, 3, f); }
+    }
+    fclose(f);
+}
+
+static void present_gl(void) {
+    uint16_t pow; memcpy(&pow, &g_io[0x304], 2);
+    gl_compose((pow >> 15) & 1, pow & 1);
+    gl_dump_hook();
+    test_hooks();
+    int w, h; SDL_GL_GetDrawableSize(g_win, &w, &h);
+    gl_present(w, h, g_side_by_side, 0);
+    SDL_GL_SwapWindow(g_win);
+}
+
 static void present(void) {
+    if (g_gl) { present_gl(); return; }
     void* pix; int pitch;
     if (SDL_LockTexture(g_tex, NULL, &pix, &pitch) == 0) {
         for (int s = 0; s < 2; s++)
@@ -179,12 +284,7 @@ static void present(void) {
         SDL_RenderCopy(g_ren, g_tex, &top, &dt);
         SDL_RenderCopy(g_ren, g_tex, &bot, &db);
     } else SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
-    static long long report_at = -2;
-    if (report_at == -2) { const char* e = getenv("DQIX_REPORT_AT"); report_at = e ? atoll(e) : -1; }
-    if (report_at >= 0 && g_frame == (uint64_t)report_at) report_write("DQIX_REPORT_AT (test)");
-    static long long shot_at = -2;
-    if (shot_at == -2) { const char* e = getenv("DQIX_SHOT_AT"); shot_at = e ? atoll(e) : -1; }
-    if (g_shot_req || (shot_at >= 0 && g_frame == (uint64_t)shot_at)) { save_screenshot(); g_shot_req = 0; }
+    test_hooks();
     SDL_RenderPresent(g_ren);
 }
 
@@ -203,6 +303,7 @@ void frontend_frame(void) {
             if (e.key.keysym.scancode == SDL_SCANCODE_F2 && g_win) { g_side_by_side = !g_side_by_side; layout_window(); }
             if (e.key.keysym.scancode == SDL_SCANCODE_F3 && g_win) { g_scale = g_scale % 4 + 1; layout_window(); }
             if (e.key.keysym.scancode == SDL_SCANCODE_F12) g_shot_req = 1;
+            if (e.key.keysym.scancode == SDL_SCANCODE_F4 && g_gl) { g_scale3d = g_scale3d % 4 + 1; gl_render_set_scale(g_scale3d); }
             if (e.key.keysym.scancode == SDL_SCANCODE_F10) {
                 report_write("F10 pressed");
                 if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
@@ -220,7 +321,8 @@ void frontend_frame(void) {
     if (g_win) {
         const Uint8* ks = SDL_GetKeyboardState(NULL);
         g_fe_keys = key_bits(ks) | pad_bits();
-        g_fast = ks[SDL_SCANCODE_TAB];
+        static int always_fast = -1; if (always_fast < 0) always_fast = getenv("DQIX_FAST") != NULL;   /* tests */
+        g_fast = ks[SDL_SCANCODE_TAB] || always_fast;
         int mx, my;
         Uint32 mb = SDL_GetMouseState(&mx, &my);
         int tx, ty;
