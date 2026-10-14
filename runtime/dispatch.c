@@ -106,63 +106,39 @@ int overlay_is_loaded(int id) {
     return o->loaded;
 }
 
-/* ---------------------------------------------------------------- call budget */
-#define BUDGET (1u << 20)
-uint32_t g_call_budget = BUDGET, g_call_budget7 = BUDGET;
+/* ---------------------------------------------------------------- emulated time
+ * Generated code adds each instruction run's estimated ARM9 cycles to g_cyc
+ * (g_cyc7 for the ARM7). At function entries and loop iterations, once
+ * CYC_SYNC has built up:
+ *   ARM9: the cycles become emulated time. DQIX_CPI is bus cycles per 64
+ *         estimated ARM9 cycles; the default was calibrated so the game's
+ *         frame-by-frame progress matches a reference DS emulator.
+ *   ARM7: hand over to the ARM9 (the ARM7 runs as a coroutine per scanline). */
+#define CPI_DEFAULT 31
+uint32_t g_cyc, g_cyc7;
+static int g_cpi = -1;
+static uint32_t g_cyc_frac;
+
+static void arm9_sync(void) {
+    if (g_cpi < 0) { const char* e = getenv("DQIX_CPI"); g_cpi = e ? atoi(e) : CPI_DEFAULT; }
+    uint32_t total = g_cyc * (uint32_t)g_cpi + g_cyc_frac;
+    g_cyc = 0;
+    g_cyc_frac = total & 63;
+    if (arm7_is_running()) return;
+    time_spend(total >> 6);
+    irq_service(&g_arm9);
+}
+
+/* Turn the ARM9's pending cycles into emulated time now (before comparing
+ * against a hardware timeline, e.g. a card transfer, so the work done while
+ * waiting is not counted twice). */
+void cpu_time_sync(void) { if (g_cyc) arm9_sync(); }
 
 void recomp_budget_expired(Cpu* c) {
-    if (c == &g_arm7) {
-        g_call_budget7 = BUDGET;
-        arm7_yield();
-    } else {
-        g_call_budget = BUDGET;
-        if (!arm7_is_running()) { time_advance_lines(1); irq_service(&g_arm9); }
-    }
+    if (c == &g_arm7) { g_cyc7 = 0; arm7_yield(); }
+    else arm9_sync();
 }
-
-#define LOOP_BUDGET 1024u
-uint32_t g_loop_budget = LOOP_BUDGET, g_loop_budget7 = LOOP_BUDGET;
-
-/* Background threads (priority 31-32: the file loader, the idle thread) mostly
- * run while the game waits for the next frame. Charge their loops ~32 cycles
- * per pass (LOOP_BUDGET * 4 cycles per LOOP_BUDGET_BG passes), about what a
- * pass costs on the DS, so polling doesn't spin hundreds of thousands of times
- * per frame on the host. (512 cycles per pass made the loader's real work, and
- * so every area load, several times slower than on the DS.) */
-#define LOOP_BUDGET_BG 128u
-int threads_current_priority9(void);
-
-/* DQIX_BGLOG="from,to": which functions low-priority (background) threads loop in (tests). */
-static uint32_t g_bgl_addr[4096], g_bgl_cnt[4096];
-static unsigned long long g_bgl_from, g_bgl_to; static int g_bgl = -1;
-static uint32_t last_arm9_entry(void);
-static void bgl_report(void) {
-    fprintf(stderr, "background loop budget expiries by function:\n");
-    for (int k = 0; k < 15; k++) {
-        int b = -1; for (int i = 0; i < 4096; i++) if (g_bgl_cnt[i] && (b < 0 || g_bgl_cnt[i] > g_bgl_cnt[b])) b = i;
-        if (b < 0) break;
-        uint32_t a = g_bgl_addr[b] & 0x03FFFFFF;
-        fprintf(stderr, "  %8u  prio %u  %08x %s\n", g_bgl_cnt[b], g_bgl_addr[b] >> 26, a, recomp_func_name(a)); g_bgl_cnt[b] = 0;
-    }
-}
-static void bgl_note(void) {
-    if (g_bgl < 0) { const char* e = getenv("DQIX_BGLOG"); g_bgl = e && sscanf(e, "%llu,%llu", &g_bgl_from, &g_bgl_to) == 2; if (g_bgl) atexit(bgl_report); }
-    if (!g_bgl || g_frame < g_bgl_from || g_frame > g_bgl_to) return;
-    uint32_t a = last_arm9_entry() | ((uint32_t)threads_current_priority9() << 26), h = (a * 2654435761u) >> 20;
-    for (;; h = (h + 1) & 4095) { if (g_bgl_addr[h] == a) { g_bgl_cnt[h]++; return; } if (!g_bgl_addr[h]) { g_bgl_addr[h] = a; g_bgl_cnt[h] = 1; return; } }
-}
-
-void recomp_loop_expired(Cpu* c) {
-    if (c == &g_arm7) {
-        g_loop_budget7 = LOOP_BUDGET;
-        arm7_yield();
-    } else {
-        static int bg = -1; if (bg < 0) { const char* e = getenv("DQIX_BGBUDGET"); bg = e ? atoi(e) : (int)LOOP_BUDGET_BG; }   /* tests */
-        g_loop_budget = threads_current_priority9() >= 31 ? (unsigned)bg : LOOP_BUDGET;
-        if (g_loop_budget == (unsigned)bg) bgl_note();
-        if (!arm7_is_running()) { time_spend(LOOP_BUDGET * 4); irq_service(&g_arm9); }
-    }
-}
+void recomp_loop_expired(Cpu* c) { recomp_budget_expired(c); }
 
 /* ---------------------------------------------------------------- tracing */
 #define TRACE_N 256
@@ -288,7 +264,3 @@ void dispatch_call(Cpu* c, uint32_t target, uint32_t from) { dispatch_any(&g_c9,
 void dispatch7_call(Cpu* c, uint32_t target, uint32_t from) { dispatch_any(&g_c7, c, target, from); }
 void interp_stub(Cpu* c, uint32_t addr) { interp_call(core_of(c), addr); }
 
-static uint32_t last_arm9_entry(void) {
-    for (unsigned k = 1; k <= TRACE_N; k++) { unsigned i = (g_trace_pos - k) % TRACE_N; if (g_trace_cpu[i] == 9) return g_trace[i]; }
-    return 0;
-}

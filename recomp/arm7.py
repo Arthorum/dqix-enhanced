@@ -38,8 +38,8 @@ PRELUDE7 = """/* ARM7 code: memory, BIOS and dispatch go to the ARM7's side of t
 #define bios_swi bios7_swi
 #define dispatch_call dispatch7_call
 #define cpu_unhandled cpu7_unhandled
-#define g_call_budget g_call_budget7
-#define g_loop_budget g_loop_budget7
+#define g_cyc g_cyc7
+#define CYC_SYNC 2048u   /* the ARM7 runs at the bus clock: about one scanline of work between yields */
 #define recomp_trace_enter recomp7_trace_enter
 #include "cpu.h"
 #include "funcs7.h"

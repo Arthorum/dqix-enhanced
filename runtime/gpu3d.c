@@ -1,8 +1,19 @@
-/* 3D engine: geometry commands (packed FIFO and command ports), matrix
- * stacks, lighting, polygon assembly and clipping, and a software
- * rasterizer. The geometry list is swapped at VBlank after SWAP_BUFFERS and
- * rendered in one go; the 2D engine then reads it line by line as BG0. */
-#include <math.h>
+/* 3D engine: geometry (command FIFO and ports, matrix stacks, lighting,
+ * polygon assembly, clipping, viewport) and the software rasterizer.
+ *
+ * Everything works in the DS's own fixed-point formats and follows the
+ * hardware's rounding, edge, interpolation and pixel rules, so frames come out
+ * pixel-identical to the DS ("Classic"). These rules were worked out by the
+ * melonDS project (GPU3D.cpp, GPU3D_Soft.cpp, GPL); this is a C
+ * reimplementation of the same behaviour, checked frame by frame against a
+ * melonDS build (tools: the reference runner, DQIX_CRC).
+ *
+ * Timing: polygons are collected into one of two polygon/vertex RAM banks.
+ * SWAP_BUFFERS (FLUSH) takes effect at VBlank (scanline 192): the bank becomes
+ * the render list and the registers that affect rendering are latched. The
+ * frame is rendered at scanline 215 and shown during the next frame, read
+ * line by line by the 2D engine as BG0. Without a new FLUSH the last list is
+ * rendered again with the newly latched registers, like the hardware. */
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
@@ -14,227 +25,394 @@ static double ms_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 static double ms_now(void) { return 0; }
 #endif
 
+typedef int32_t s32; typedef uint32_t u32; typedef int64_t s64; typedef uint64_t u64;
+typedef int16_t s16; typedef uint16_t u16; typedef uint8_t u8;
+
+#define IO8_(o)  (g_io[o])
 #define IO16_(o) (*(uint16_t*)&g_io[o])
 #define IO32_(o) (*(uint32_t*)&g_io[o])
 
-/* ---------------------------------------------------------------- matrices
- * 4x4, 20.12 fixed point, row-major (m[row*4+col]); vectors are rows: v' = v M. */
-typedef int32_t Mtx[16];
-
-static Mtx m_proj, m_pos, m_vec, m_tex, m_clip;
-static Mtx s_proj[1], s_pos[32], s_vec[32], s_tex[1];
-static int sp_proj, sp_pos, sp_tex, stack_overflow;
-static int mtx_mode;
-static int clip_dirty = 1;
-
-static void mtx_identity(int32_t* m) { memset(m, 0, sizeof(Mtx)); m[0] = m[5] = m[10] = m[15] = 0x1000; }
-
-static void mtx_mul(int32_t* r, const int32_t* a, const int32_t* b) {   /* r = a * b */
-    Mtx t;
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++) {
-            int64_t s = 0;
-            for (int k = 0; k < 4; k++) s += (int64_t)a[i * 4 + k] * b[k * 4 + j];
-            t[i * 4 + j] = (int32_t)(s >> 12);
-        }
-    memcpy(r, t, sizeof t);
-}
-
-static void update_clip(void) {
-    if (clip_dirty) { mtx_mul(m_clip, m_pos, m_proj); clip_dirty = 0; }
-}
-
-/* ---------------------------------------------------------------- polygons */
+/* ---------------------------------------------------------------- types */
 typedef struct {
-    float x, y, z, w;        /* clip space (w in units of 1.0) */
-    float r, g, b;           /* vertex color 0..31 */
-    float s, t;              /* texel coordinates */
+    s32 pos[4];            /* clip space */
+    s32 col[3];            /* 5-bit colour << 12 (kept like this through clipping) */
+    s16 tex[2];            /* 12.4 texel coordinates */
+    int clipped;
+    s32 fpos[2];           /* screen position */
+    s32 fcol[3];           /* 9-bit colour for the rasterizer */
+    s32 hpos[2];           /* screen position with 4 fractional bits (GPU renderer) */
 } Vtx;
 
-static Poly g_polybuf[2][MAX_POLY];
-static int g_npoly[2], g_nvert[2];
-static int g_geo = 0;                      /* buffer being filled by geometry */
-static int g_swap_pending, g_swap_flags, g_render_flags;
-static int g_render_ready;
+typedef struct {
+    Vtx* v[10];
+    u32 n;
+    s32 z[10], w[10];
+    int wbuf;
+    u32 attr, texparam, texpal;
+    int degenerate, facing, translucent, shadowmask, shadow;
+    u32 vtop, vbot;
+    s32 ytop, ybot, xtop, xbot;
+    u32 sortkey;
+} HPoly;
 
-/* current geometry state */
-static uint32_t cur_color = 0x7FFF;        /* 15-bit */
-static float cur_r = 31, cur_g = 31, cur_b = 31;
-static int32_t raw_s, raw_t;               /* 1.11.4 */
-static float cur_s, cur_t;                 /* transformed, texels */
-static uint32_t poly_attr_pending, poly_attr;
-static uint32_t teximg, pltt;
-static int prim_type, in_begin;
-static int16_t last_vx, last_vy, last_vz;  /* last vertex (for VTX_XY etc.), 4.12 */
-static int vp_x1 = 0, vp_y1 = 0, vp_x2 = 255, vp_y2 = 191;
-static Vtx strip[4];
-static int strip_n, strip_count;
+/* ---------------------------------------------------------------- geometry state */
+static s32 m_proj[16], m_pos[16], m_vec[16], m_tex[16], m_clip[16];
+static s32 st_proj[16], st_pos[32][16], st_vec[32][16], st_tex[16];
+static s32 sp_proj, sp_pos, sp_tex;
+static int clip_dirty = 1;
+static u32 mtx_mode;
+static u32 gxstat;                      /* bit 1 box test result, bit 15 stack error, bits 30-31 IRQ mode */
 
-/* lighting */
-static float light_dir[4][3];
-static int light_col[4][3];
-static int mat_dif[3], mat_amb[3], mat_spe[3], mat_emi[3];
+static u32 poly_mode, poly_attr, cur_poly_attr, tex_param, tex_pal;
+static s16 cur_vtx[3];
+static u8 vtx_color[3];
+static s16 tex_coords[2], raw_tex[2], normal[3];
+static s16 light_dir[4][3];
+static s32 spec_recip[4];
+static u8 light_col[4][3];
+static u8 mat_dif[3], mat_amb[3], mat_spe[3], mat_emi[3];
 static int use_shine;
-static uint8_t shine_table[128];
-static int shine_pos;
+static u8 shine_table[128];
+static u32 viewport[6];
+static s32 postest[4];
+static s16 vectest[3];
 
-/* test results */
-static int box_result;
+static Vtx tmp_vtx[4];
+static u32 vtx_num, vtx_in_poly, consecutive;
+static HPoly* last_strip;
+static u32 n_opaque;
 
-static void rgb15(uint32_t c, int* r, int* g, int* b) { *r = c & 31; *g = (c >> 5) & 31; *b = (c >> 10) & 31; }
+#define VTX_MAX 6144
+#define POLY_MAX 2048
+static Vtx vram_bank_v[VTX_MAX * 2];
+static HPoly pram[POLY_MAX * 2];
+static Vtx* cur_vram; static HPoly* cur_pram;
+static u32 n_vtx, n_poly, cur_bank;
+static HPoly* render_list[POLY_MAX];
+static u32 render_n;
+static u32 flush_request, flush_attr;
 
-/* Clip a polygon against the 6 planes of the view volume (homogeneous). */
-static int clip_plane(Vtx* in, int n, Vtx* out, int axis, int sign) {
-    int m = 0;
-    for (int i = 0; i < n; i++) {
-        Vtx* a = &in[i];
-        Vtx* b = &in[(i + 1) % n];
-        float ca = (axis == 0 ? a->x : axis == 1 ? a->y : a->z) * sign;
-        float cb = (axis == 0 ? b->x : axis == 1 ? b->y : b->z) * sign;
-        float da = a->w - ca, db = b->w - cb;      /* inside when >= 0 */
-        if (da >= 0) { if (m < MAX_PV) out[m++] = *a; }
-        if ((da >= 0) != (db >= 0)) {
-            float t = da / (da - db);
-            Vtx v;
-            v.x = a->x + (b->x - a->x) * t; v.y = a->y + (b->y - a->y) * t;
-            v.z = a->z + (b->z - a->z) * t; v.w = a->w + (b->w - a->w) * t;
-            v.r = a->r + (b->r - a->r) * t; v.g = a->g + (b->g - a->g) * t; v.b = a->b + (b->b - a->b) * t;
-            v.s = a->s + (b->s - a->s) * t; v.t = a->t + (b->t - a->t) * t;
-            if (m < MAX_PV) out[m++] = v;
+/* registers latched at VBlank for rendering */
+static u32 r_disp, r_clear1, r_clear2, r_fogcolor, r_fogoffset, r_fogshift;
+static u8 r_alpharef;
+static u16 r_toon[32], r_edge[8];
+static u8 r_fogtab[34];
+static int g_3d_have_frame;
+
+/* ---------------------------------------------------------------- matrices (m = s * m) */
+static void mtx_identity(s32* m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 0x1000; }
+static void mtx_load4x4(s32* m, const u32* s) { for (int i = 0; i < 16; i++) m[i] = (s32)s[i]; }
+static void mtx_load4x3(s32* m, const u32* s) {
+    for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) m[r * 4 + c] = (s32)s[r * 3 + c]; m[r * 4 + 3] = r == 3 ? 0x1000 : 0; }
+}
+static void mtx_mult4x4(s32* m, const u32* p) {
+    s32 t[16], s[16]; memcpy(t, m, 64); for (int i = 0; i < 16; i++) s[i] = (s32)p[i];
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++)
+        m[r * 4 + c] = (s32)(((s64)s[r * 4] * t[c] + (s64)s[r * 4 + 1] * t[4 + c] + (s64)s[r * 4 + 2] * t[8 + c] + (s64)s[r * 4 + 3] * t[12 + c]) >> 12);
+}
+static void mtx_mult4x3(s32* m, const u32* p) {
+    s32 t[16], s[12]; memcpy(t, m, 64); for (int i = 0; i < 12; i++) s[i] = (s32)p[i];
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 4; c++)
+        m[r * 4 + c] = (s32)(((s64)s[r * 3] * t[c] + (s64)s[r * 3 + 1] * t[4 + c] + (s64)s[r * 3 + 2] * t[8 + c]) >> 12);
+    for (int c = 0; c < 4; c++)
+        m[12 + c] = (s32)(((s64)s[9] * t[c] + (s64)s[10] * t[4 + c] + (s64)s[11] * t[8 + c] + (s64)0x1000 * t[12 + c]) >> 12);
+}
+static void mtx_mult3x3(s32* m, const u32* p) {
+    s32 t[12], s[9]; memcpy(t, m, 48); for (int i = 0; i < 9; i++) s[i] = (s32)p[i];
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 4; c++)
+        m[r * 4 + c] = (s32)(((s64)s[r * 3] * t[c] + (s64)s[r * 3 + 1] * t[4 + c] + (s64)s[r * 3 + 2] * t[8 + c]) >> 12);
+}
+static void mtx_scale(s32* m, const u32* p) {
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 4; c++) m[r * 4 + c] = (s32)(((s64)(s32)p[r] * m[r * 4 + c]) >> 12);
+}
+static void mtx_translate(s32* m, const u32* p) {
+    s32 s0 = (s32)p[0], s1 = (s32)p[1], s2 = (s32)p[2];
+    for (int c = 0; c < 4; c++) m[12 + c] += (s32)(((s64)s0 * m[c] + (s64)s1 * m[4 + c] + (s64)s2 * m[8 + c]) >> 12);
+}
+static void update_clip(void) {
+    if (!clip_dirty) return;
+    clip_dirty = 0;
+    memcpy(m_clip, m_proj, 64);
+    u32 p[16]; for (int i = 0; i < 16; i++) p[i] = (u32)m_pos[i];
+    mtx_mult4x4(m_clip, p);
+}
+
+/* ---------------------------------------------------------------- clipping */
+static void clip_segment(Vtx* out, const Vtx* vin, const Vtx* vout, int comp, s32 plane, int attribs) {
+    s64 fnum = (s64)vin->pos[3] - (s64)plane * vin->pos[comp];
+    s32 fden = (s32)(fnum - ((s64)vout->pos[3] - (s64)plane * vout->pos[comp]));
+#define INTERP(var) out->var = (s32)(vin->var + ((s64)(vout->var - vin->var) * fnum) / fden)
+    if (comp != 0) INTERP(pos[0]);
+    if (comp != 1) INTERP(pos[1]);
+    if (comp != 2) INTERP(pos[2]);
+    INTERP(pos[3]);
+    out->pos[comp] = plane * out->pos[3];
+    if (attribs) {
+        INTERP(col[0]); INTERP(col[1]); INTERP(col[2]);
+        out->tex[0] = (s16)(vin->tex[0] + ((s64)(vout->tex[0] - vin->tex[0]) * fnum) / fden);
+        out->tex[1] = (s16)(vin->tex[1] + ((s64)(vout->tex[1] - vin->tex[1]) * fnum) / fden);
+    }
+#undef INTERP
+    out->clipped = 1;
+}
+
+static int clip_plane(Vtx* v, int n, int clipstart, int comp, int attribs) {
+    Vtx temp[10];
+    int c = clipstart;
+    if (clipstart == 2) { temp[0] = v[0]; temp[1] = v[1]; }
+    for (int i = clipstart; i < n; i++) {
+        int prev = i - 1; if (prev < 0) prev = n - 1;
+        int next = i + 1; if (next >= n) next = 0;
+        Vtx vtx = v[i];
+        if (vtx.pos[comp] > vtx.pos[3]) {
+            if (comp == 2 && !(cur_poly_attr & (1 << 12))) return 0;   /* far plane: reject unless "render far" */
+            if (v[prev].pos[comp] <= v[prev].pos[3]) clip_segment(&temp[c++], &vtx, &v[prev], comp, 1, attribs);
+            if (v[next].pos[comp] <= v[next].pos[3]) clip_segment(&temp[c++], &vtx, &v[next], comp, 1, attribs);
+        } else temp[c++] = vtx;
+    }
+    n = c; c = clipstart;
+    for (int i = clipstart; i < n; i++) {
+        int prev = i - 1; if (prev < 0) prev = n - 1;
+        int next = i + 1; if (next >= n) next = 0;
+        Vtx vtx = temp[i];
+        if (vtx.pos[comp] < -vtx.pos[3]) {
+            if (temp[prev].pos[comp] >= -temp[prev].pos[3]) clip_segment(&v[c++], &vtx, &temp[prev], comp, -1, attribs);
+            if (temp[next].pos[comp] >= -temp[next].pos[3]) clip_segment(&v[c++], &vtx, &temp[next], comp, -1, attribs);
+        } else v[c++] = vtx;
+    }
+    for (int i = 0; i < c; i++)
+        for (int k = 0; k < 3; k++) { v[i].col[k] &= ~0xFFF; v[i].col[k] += 0xFFF; }
+    return c;
+}
+
+static int clip_polygon(Vtx* v, int n, int clipstart, int attribs) {
+    n = clip_plane(v, n, clipstart, 2, attribs);           /* Z, then Y, then X, like the hardware */
+    n = clip_plane(v, n, clipstart, 1, attribs);
+    n = clip_plane(v, n, clipstart, 0, attribs);
+    return n;
+}
+
+static int clip_coords_equal(const Vtx* a, const Vtx* b) {
+    return a->pos[0] == b->pos[0] && a->pos[1] == b->pos[1] && a->pos[2] == b->pos[2] && a->pos[3] == b->pos[3];
+}
+
+/* ---------------------------------------------------------------- polygon setup */
+static void submit_polygon(void) {
+    Vtx cv[10];
+    Vtx* reused[2] = { 0, 0 };
+    int clipstart = 0, lastpolyverts = 0;
+    int nverts = (poly_mode & 1) ? 4 : 3;
+
+    /* culling: sign of the normal against the view, normalised to 32 bits */
+    Vtx *v0 = &tmp_vtx[0], *v1 = &tmp_vtx[1], *v2 = &tmp_vtx[2];
+    s64 nx = (s64)(v0->pos[1] - v1->pos[1]) * (v2->pos[3] - v1->pos[3]) - (s64)(v0->pos[3] - v1->pos[3]) * (v2->pos[1] - v1->pos[1]);
+    s64 ny = (s64)(v0->pos[3] - v1->pos[3]) * (v2->pos[0] - v1->pos[0]) - (s64)(v0->pos[0] - v1->pos[0]) * (v2->pos[3] - v1->pos[3]);
+    s64 nz = (s64)(v0->pos[0] - v1->pos[0]) * (v2->pos[1] - v1->pos[1]) - (s64)(v0->pos[1] - v1->pos[1]) * (v2->pos[0] - v1->pos[0]);
+    while ((((nx >> 31) ^ (nx >> 63)) != 0) || (((ny >> 31) ^ (ny >> 63)) != 0) || (((nz >> 31) ^ (nz >> 63)) != 0)) { nx >>= 4; ny >>= 4; nz >>= 4; }
+    s64 dot = (s64)v1->pos[0] * nx + (s64)v1->pos[1] * ny + (s64)v1->pos[3] * nz;
+    int facing = dot <= 0;
+    if (dot < 0) { if (!(cur_poly_attr & (1 << 7))) { last_strip = NULL; return; } }
+    else if (dot > 0) { if (!(cur_poly_attr & (1 << 6))) { last_strip = NULL; return; } }
+
+    /* strips: share two unclipped vertices with the previous polygon */
+    if (poly_mode >= 2 && last_strip) {
+        int id0, id1;
+        if (poly_mode == 2) { if (consecutive & 1) { id0 = 2; id1 = 1; } else { id0 = 0; id1 = 2; } lastpolyverts = 3; }
+        else { id0 = 3; id1 = 2; lastpolyverts = 4; }
+        if (last_strip->n == (u32)lastpolyverts && !last_strip->v[id0]->clipped && !last_strip->v[id1]->clipped) {
+            reused[0] = last_strip->v[id0]; reused[1] = last_strip->v[id1];
+            cv[0] = *reused[0]; cv[1] = *reused[1];
+            clipstart = 2;
         }
     }
-    return m;
+    for (int i = clipstart; i < nverts; i++) cv[i] = tmp_vtx[i];
+    (void)clip_coords_equal;
+
+    nverts = clip_polygon(cv, nverts, clipstart, 1);
+    if (nverts == 0) { last_strip = NULL; return; }
+    if (n_poly >= POLY_MAX || n_vtx + (u32)nverts > VTX_MAX) {
+        last_strip = NULL;
+        g_io[0x61] |= 0x20;                                         /* DISP3DCNT: polygon/vertex RAM overflow */
+        return;
+    }
+
+    /* viewport transform (the hardware's 32-bit divider: halve when W > 0xFFFF) */
+    for (int i = clipstart; i < nverts; i++) {
+        Vtx* v = &cv[i];
+        v->pos[3] &= 0x00FFFFFF;
+        u32 px, py, w = (u32)v->pos[3];
+        if (w == 0) { px = 0; py = 0; }
+        else {
+            px = (u32)(v->pos[0] + (s32)w);
+            py = (u32)(-v->pos[1] + (s32)w);
+            u32 den = w;
+            if (w > 0xFFFF) { px >>= 1; py >>= 1; den >>= 1; }
+            den <<= 1;
+            px = ((px * viewport[4]) / den) + viewport[0];
+            py = ((py * viewport[5]) / den) + viewport[3];
+        }
+        v->fpos[0] = (s32)(px & 0x1FF);
+        v->fpos[1] = (s32)(py & 0xFF);
+        if (w != 0) {
+            u32 hx = (u32)(((((s64)(v->pos[0] + (s32)w) * viewport[4]) << 4) / (((s64)w) << 1)) + (viewport[0] << 4));
+            u32 hy = (u32)(((((s64)(-v->pos[1] + (s32)w) * viewport[5]) << 4) / (((s64)w) << 1)) + (viewport[3] << 4));
+            v->hpos[0] = (s32)(hx & 0x1FFF); v->hpos[1] = (s32)(hy & 0xFFF);
+        } else { v->hpos[0] = 0; v->hpos[1] = 0; }
+    }
+
+    /* zero-dot polygons behind the DISP_1DOT_DEPTH limit are dropped */
+    if (!(cur_poly_attr & (1 << 13))) {
+        u32 limit = ((u32)(IO16_(0x610) & 0x7FFF) * 0x200) + 0x1FF;
+        int zerodot = 1, allbehind = 1;
+        for (int i = 0; i < nverts; i++) {
+            if (cv[i].fpos[0] != cv[0].fpos[0] || cv[i].fpos[1] != cv[0].fpos[1]) { zerodot = 0; break; }
+            if ((u32)cv[i].pos[3] <= limit) { allbehind = 0; break; }
+        }
+        if (zerodot && allbehind) { last_strip = NULL; return; }
+    }
+
+    HPoly* p = &cur_pram[n_poly++];
+    memset(p, 0, sizeof *p);
+    p->attr = cur_poly_attr; p->texparam = tex_param; p->texpal = tex_pal;
+    p->facing = facing;
+    u32 texfmt = (tex_param >> 26) & 7, polyalpha = (cur_poly_attr >> 16) & 0x1F;
+    p->translucent = (texfmt == 1 || texfmt == 6) || (polyalpha > 0 && polyalpha < 31);
+    p->shadowmask = (cur_poly_attr & 0x3F000030) == 0x00000030;
+    p->shadow = (cur_poly_attr & 0x30) == 0x30 && !p->shadowmask;
+    if (!p->translucent) n_opaque++;
+
+    if (last_strip && clipstart > 0) {
+        if (nverts == lastpolyverts) { p->v[0] = reused[0]; p->v[1] = reused[1]; }
+        else {
+            cur_vram[n_vtx] = *reused[0]; p->v[0] = &cur_vram[n_vtx];
+            cur_vram[n_vtx + 1] = *reused[1]; p->v[1] = &cur_vram[n_vtx + 1];
+            n_vtx += 2;
+        }
+        p->n += 2;
+    }
+    for (int i = clipstart; i < nverts; i++) {
+        Vtx* v = &cur_vram[n_vtx++];
+        *v = cv[i];
+        p->v[i] = v;
+        p->n++;
+        for (int k = 0; k < 3; k++) { s32 c = v->col[k] >> 12; v->fcol[k] = c ? ((c << 4) + 0xF) : 0; }
+    }
+
+    u32 vtop = 0, vbot = 0;
+    s32 ytop = 192, ybot = 0, xtop = 256, xbot = 0;
+    u32 wsize = 0;
+    for (int i = 0; i < nverts; i++) {
+        Vtx* v = p->v[i];
+        if (v->fpos[1] < ytop) { xtop = v->fpos[0]; ytop = v->fpos[1]; vtop = (u32)i; }
+        if (v->fpos[1] > ybot || (v->fpos[1] == ybot && v->fpos[0] > xbot)) { xbot = v->fpos[0]; ybot = v->fpos[1]; vbot = (u32)i; }
+        u32 w = (u32)v->pos[3];
+        if (w == 0) p->degenerate = 1;
+        while (wsize < 32 && (w >> wsize)) wsize += 4;
+    }
+    p->vtop = vtop; p->vbot = vbot; p->ytop = ytop; p->ybot = ybot; p->xtop = xtop; p->xbot = xbot;
+    if (ybot > 192) p->degenerate = 1;
+    p->sortkey = ((u32)ybot << 8) | (u32)ytop;
+    if (p->translucent) p->sortkey |= 0x10000;
+    p->wbuf = (flush_attr & 2) != 0;
+    for (int i = 0; i < nverts; i++) {
+        Vtx* v = p->v[i];
+        s32 w, wsh;
+        if (wsize < 16) { w = v->pos[3] << (16 - wsize); wsh = w >> (16 - wsize); }
+        else { w = v->pos[3] >> (wsize - 16); wsh = w << (wsize - 16); }
+        s32 z;
+        if (flush_attr & 2) z = wsh;
+        else if (v->pos[3]) z = (s32)(((((s64)v->pos[2] * 0x4000) / v->pos[3]) + 0x3FFF) * 0x200);
+        else z = 0x7FFE00;
+        if (z < 0) z = 0; else if (z > 0xFFFFFF) z = 0xFFFFFF;
+        p->z[i] = z; p->w[i] = w;
+    }
+    last_strip = poly_mode >= 2 ? p : NULL;
 }
 
-static void emit_polygon(Vtx* src, int n) {
-    if (g_npoly[g_geo] >= MAX_POLY) return;
-    int mode = (poly_attr >> 4) & 3;
-    if (mode == 3) return;                                   /* shadow polygons: not yet */
-    /* far plane: hide the polygon unless "render clipped" is set */
-    if (!(poly_attr & 0x1000)) for (int i = 0; i < n; i++) if (src[i].z > src[i].w) return;
-    Vtx a[MAX_PV], b[MAX_PV];
-    int m = n;
-    memcpy(a, src, sizeof(Vtx) * n);
-    m = clip_plane(a, m, b, 2, -1); if (m < 3) return;      /* near: z >= -w */
-    m = clip_plane(b, m, a, 2, 1);  if (m < 3) return;      /* far */
-    m = clip_plane(a, m, b, 0, -1); if (m < 3) return;
-    m = clip_plane(b, m, a, 0, 1);  if (m < 3) return;
-    m = clip_plane(a, m, b, 1, -1); if (m < 3) return;
-    m = clip_plane(b, m, a, 1, 1);  if (m < 3) return;
-
-    Poly* p = &g_polybuf[g_geo][g_npoly[g_geo]];
-    float vw = (float)(vp_x2 - vp_x1 + 1), vh = (float)(vp_y2 - vp_y1 + 1);
-    float area = 0;
-    p->ymin = 1e9f; p->ymax = -1e9f;
-    for (int i = 0; i < m; i++) {
-        float w = a[i].w > 1e-6f ? a[i].w : 1e-6f;
-        SVtx* v = &p->v[i];
-        v->x = vp_x1 + (a[i].x / w + 1) * vw * 0.5f;
-        v->y = 192 - (vp_y1 + (a[i].y / w + 1) * vh * 0.5f);
-        v->zn = (a[i].z / w + 1) * 0.5f;
-        v->iw = 1.0f / w;
-        v->r = a[i].r; v->g = a[i].g; v->b = a[i].b; v->s = a[i].s; v->t = a[i].t;
-        if (v->y < p->ymin) p->ymin = v->y;
-        if (v->y > p->ymax) p->ymax = v->y;
-    }
-    for (int i = 0; i < m; i++) {
-        SVtx* u = &p->v[i]; SVtx* v = &p->v[(i + 1) % m];
-        area += u->x * v->y - v->x * u->y;
-    }
-    /* Facing: visually counter-clockwise (negative area with y down) is the front. */
-    int front = area < 0;
-    if (area == 0) { if (!(poly_attr & 0xC0)) return; }
-    else if (front ? !(poly_attr & 0x80) : !(poly_attr & 0x40)) return;
-    p->n = m;
-    p->attr = poly_attr;
-    p->teximg = teximg;
-    p->pltt = pltt;
-    int alpha = (poly_attr >> 16) & 31;
-    int fmt = (teximg >> 26) & 7;
-    p->translucent = (alpha > 0 && alpha < 31) || fmt == 1 || fmt == 6;
-    g_npoly[g_geo]++;
-    g_nvert[g_geo] += m;
-}
-
-static void submit_vertex(int16_t x, int16_t y, int16_t z) {
-    last_vx = x; last_vy = y; last_vz = z;
-    if (!in_begin) return;
+static void submit_vertex(void) {
+    s64 vx = cur_vtx[0], vy = cur_vtx[1], vz = cur_vtx[2], vw = 0x1000;
+    Vtx* t = &tmp_vtx[vtx_in_poly];
     update_clip();
-    int64_t vx = x, vy = y, vz = z;
-    int32_t* c = m_clip;
-    Vtx v;
-    v.x = (float)((vx * c[0] + vy * c[4] + vz * c[8] + ((int64_t)c[12] << 12)) >> 12) / 4096.0f;
-    v.y = (float)((vx * c[1] + vy * c[5] + vz * c[9] + ((int64_t)c[13] << 12)) >> 12) / 4096.0f;
-    v.z = (float)((vx * c[2] + vy * c[6] + vz * c[10] + ((int64_t)c[14] << 12)) >> 12) / 4096.0f;
-    v.w = (float)((vx * c[3] + vy * c[7] + vz * c[11] + ((int64_t)c[15] << 12)) >> 12) / 4096.0f;
-    v.r = cur_r; v.g = cur_g; v.b = cur_b;
-    if ((teximg >> 30) == 3) {                               /* texcoords from the vertex */
-        int32_t* t = m_tex;
-        cur_s = (float)(((vx * t[0] + vy * t[4] + vz * t[8]) >> 24) + raw_s) / 16.0f;
-        cur_t = (float)(((vx * t[1] + vy * t[5] + vz * t[9]) >> 24) + raw_t) / 16.0f;
-    }
-    v.s = cur_s; v.t = cur_t;
-    strip[strip_n % 4] = v;
-    strip_n++;
-    strip_count++;
-    Vtx q[4];
-    switch (prim_type) {
-    case 0:                                                  /* triangles */
-        if (strip_count == 3) { q[0] = strip[(strip_n - 3) % 4]; q[1] = strip[(strip_n - 2) % 4]; q[2] = strip[(strip_n - 1) % 4]; emit_polygon(q, 3); strip_count = 0; }
-        break;
-    case 1:                                                  /* quads */
-        if (strip_count == 4) { for (int i = 0; i < 4; i++) q[i] = strip[(strip_n - 4 + i) % 4]; emit_polygon(q, 4); strip_count = 0; }
-        break;
-    case 2:                                                  /* triangle strip */
-        if (strip_count >= 3) {
-            Vtx* a = &strip[(strip_n - 3) % 4]; Vtx* b = &strip[(strip_n - 2) % 4]; Vtx* cc = &strip[(strip_n - 1) % 4];
-            if (strip_count & 1) { q[0] = *a; q[1] = *b; } else { q[0] = *b; q[1] = *a; }
-            q[2] = *cc;
-            emit_polygon(q, 3);
+    for (int c = 0; c < 4; c++) t->pos[c] = (s32)((vx * m_clip[c] + vy * m_clip[4 + c] + vz * m_clip[8 + c] + vw * m_clip[12 + c]) >> 12);
+    for (int k = 0; k < 3; k++) t->col[k] = ((s32)vtx_color[k] << 12) + 0xFFF;
+    if ((tex_param >> 30) == 3) {
+        t->tex[0] = (s16)(((vx * m_tex[0] + vy * m_tex[4] + vz * m_tex[8]) >> 24) + raw_tex[0]);
+        t->tex[1] = (s16)(((vx * m_tex[1] + vy * m_tex[5] + vz * m_tex[9]) >> 24) + raw_tex[1]);
+    } else { t->tex[0] = tex_coords[0]; t->tex[1] = tex_coords[1]; }
+    t->clipped = 0;
+    vtx_num++; vtx_in_poly++;
+    switch (poly_mode) {
+    case 0: if (vtx_in_poly == 3) { vtx_in_poly = 0; submit_polygon(); consecutive++; } break;
+    case 1: if (vtx_in_poly == 4) { vtx_in_poly = 0; submit_polygon(); consecutive++; } break;
+    case 2:
+        if (consecutive & 1) {
+            Vtx tmp = tmp_vtx[1]; tmp_vtx[1] = tmp_vtx[0]; tmp_vtx[0] = tmp;
+            vtx_in_poly = 2; submit_polygon(); consecutive++;
+            tmp_vtx[1] = tmp_vtx[2];
+        } else if (vtx_in_poly == 3) {
+            vtx_in_poly = 2; submit_polygon(); consecutive++;
+            tmp_vtx[0] = tmp_vtx[1]; tmp_vtx[1] = tmp_vtx[2];
         }
         break;
-    case 3:                                                  /* quad strip */
-        if (strip_count >= 4 && !(strip_count & 1)) {
-            q[0] = strip[(strip_n - 4) % 4]; q[1] = strip[(strip_n - 3) % 4];
-            q[2] = strip[(strip_n - 1) % 4]; q[3] = strip[(strip_n - 2) % 4];
-            emit_polygon(q, 4);
+    case 3:
+        if (vtx_in_poly == 4) {
+            Vtx tmp = tmp_vtx[3]; tmp_vtx[3] = tmp_vtx[2]; tmp_vtx[2] = tmp;
+            vtx_in_poly = 2; submit_polygon(); consecutive++;
+            tmp_vtx[0] = tmp_vtx[3]; tmp_vtx[1] = tmp_vtx[2];
         }
         break;
     }
 }
 
-static void do_lighting(int32_t param) {
-    float n[3];
-    for (int i = 0; i < 3; i++) n[i] = (float)((int32_t)((param >> (10 * i)) << 22) >> 22) / 512.0f;
-    if ((teximg >> 30) == 2) {                               /* texcoords from the normal */
-        int32_t nx = (int32_t)((param) << 22) >> 22, ny = (int32_t)((param >> 10) << 22) >> 22, nz = (int32_t)((param >> 20) << 22) >> 22;
-        int64_t N[3] = { (int64_t)nx << 3, (int64_t)ny << 3, (int64_t)nz << 3 };
-        int32_t* t = m_tex;
-        cur_s = (float)(((N[0] * t[0] + N[1] * t[4] + N[2] * t[8]) >> 21) + raw_s) / 16.0f;
-        cur_t = (float)(((N[0] * t[1] + N[1] * t[5] + N[2] * t[9]) >> 21) + raw_t) / 16.0f;
+static void calc_lighting(void) {
+    if ((tex_param >> 30) == 2) {
+        tex_coords[0] = (s16)(raw_tex[0] + (((s64)normal[0] * m_tex[0] + (s64)normal[1] * m_tex[4] + (s64)normal[2] * m_tex[8]) >> 21));
+        tex_coords[1] = (s16)(raw_tex[1] + (((s64)normal[0] * m_tex[1] + (s64)normal[1] * m_tex[5] + (s64)normal[2] * m_tex[9]) >> 21));
     }
-    float tn[3];
-    for (int j = 0; j < 3; j++) tn[j] = (n[0] * m_vec[0 * 4 + j] + n[1] * m_vec[1 * 4 + j] + n[2] * m_vec[2 * 4 + j]) / 4096.0f;
-    float col[3] = { (float)mat_emi[0], (float)mat_emi[1], (float)mat_emi[2] };
-    for (int l = 0; l < 4; l++) {
-        if (!(poly_attr & (1u << l))) continue;
-        float* L = light_dir[l];
-        float dl = -(L[0] * tn[0] + L[1] * tn[1] + L[2] * tn[2]);
-        if (dl < 0) dl = 0; if (dl > 1) dl = 1;
-        float h[3] = { (L[0]) * 0.5f, (L[1]) * 0.5f, (L[2] - 1.0f) * 0.5f };
-        float sl = -(h[0] * tn[0] + h[1] * tn[1] + h[2] * tn[2]);
-        if (sl < 0) sl = 0; if (sl > 1) sl = 1;
-        sl = sl * sl;
-        if (use_shine) sl = shine_table[(int)(sl * 127.0f)] / 255.0f;
-        for (int c = 0; c < 3; c++)
-            col[c] += (mat_spe[c] * light_col[l][c] * sl + mat_dif[c] * light_col[l][c] * dl + mat_amb[c] * light_col[l][c]) / 31.0f;
+    s32 nt[3];
+    for (int c = 0; c < 3; c++) nt[c] = (s32)((u32)(normal[0] * m_vec[c] + normal[1] * m_vec[4 + c] + normal[2] * m_vec[8 + c]) << 9) >> 21;
+    u32 buf[3] = { (u32)mat_emi[0] << 14, (u32)mat_emi[1] << 14, (u32)mat_emi[2] << 14 };
+    for (int i = 0; i < 4; i++) {
+        if (!(cur_poly_attr & (1u << i))) continue;
+        s32 dot = ((light_dir[i][0] * nt[0]) >> 9) + ((light_dir[i][1] * nt[1]) >> 9) + ((light_dir[i][2] * nt[2]) >> 9);
+        s32 shine;
+        if (dot > 0) {
+            s32 diffdot = (s32)((u32)dot << 21) >> 21;
+            for (int k = 0; k < 3; k++) buf[k] += (u32)(mat_dif[k] * light_col[i][k] * diffdot) & 0xFFFFF;
+            dot += nt[2];
+            dot = (s32)((u32)dot << 21) >> 21;
+            dot = ((dot * dot) >> 10) & 0x3FF;
+            shine = ((dot * spec_recip[i]) >> 8) - (1 << 9);
+            if (shine < 0) shine = 0;
+            else {
+                shine = (s32)((u32)shine << 18) >> 18;
+                if (shine < 0) shine = 0; else if (shine > 0x1FF) shine = 0x1FF;
+            }
+        } else shine = 0;
+        if (use_shine) { shine >>= 2; shine = shine_table[shine]; shine <<= 1; }
+        for (int k = 0; k < 3; k++) buf[k] += (u32)(((mat_spe[k] * shine) + (mat_amb[k] << 9)) * light_col[i][k]);
     }
-    cur_r = col[0] > 31 ? 31 : col[0]; cur_g = col[1] > 31 ? 31 : col[1]; cur_b = col[2] > 31 ? 31 : col[2];
+    for (int k = 0; k < 3; k++) vtx_color[k] = (u8)((buf[k] >> 14) > 31 ? 31 : (buf[k] >> 14));
 }
 
-static void set_color15(uint32_t c) {
-    int r, g, b; rgb15(c, &r, &g, &b);
-    cur_color = c & 0x7FFF; cur_r = (float)r; cur_g = (float)g; cur_b = (float)b;
+static void box_test(const u32* p) {
+    Vtx cube[8], face[10];
+    gxstat &= ~2u;
+    s16 x0 = (s16)(p[0] & 0xFFFF), y0 = (s16)(p[0] >> 16), z0 = (s16)(p[1] & 0xFFFF);
+    s16 x1 = (s16)(p[1] >> 16), y1 = (s16)(p[2] & 0xFFFF), z1 = (s16)(p[2] >> 16);
+    x1 = (s16)(x1 + x0); y1 = (s16)(y1 + y0); z1 = (s16)(z1 + z0);
+    const s16 cx[8] = { x0, x1, x1, x0, x0, x0, x1, x1 }, cy[8] = { y0, y0, y1, y1, y1, y0, y0, y1 }, cz[8] = { z0, z0, z0, z0, z1, z1, z1, z1 };
+    update_clip();
+    for (int i = 0; i < 8; i++) {
+        memset(&cube[i], 0, sizeof cube[i]);
+        for (int c = 0; c < 4; c++)
+            cube[i].pos[c] = (s32)(((s64)cx[i] * m_clip[c] + (s64)cy[i] * m_clip[4 + c] + (s64)cz[i] * m_clip[8 + c] + (s64)0x1000 * m_clip[12 + c]) >> 12);
+    }
+    static const int faces[6][4] = { { 0, 1, 2, 3 }, { 4, 5, 6, 7 }, { 0, 3, 4, 5 }, { 1, 2, 7, 6 }, { 0, 1, 6, 5 }, { 2, 3, 4, 7 } };
+    for (int f = 0; f < 6; f++) {
+        for (int k = 0; k < 4; k++) face[k] = cube[faces[f][k]];
+        if (clip_polygon(face, 4, 0, 0) > 0) { gxstat |= 2; return; }
+    }
 }
 
 /* ---------------------------------------------------------------- commands */
@@ -251,162 +429,134 @@ static int cmd_valid(uint8_t c) {
            c == 0x40 || c == 0x41 || c == 0x50 || c == 0x60 || (c >= 0x70 && c <= 0x72);
 }
 
-static int32_t* cur_mtx_for_load(int* both) {
-    *both = mtx_mode == 2;
-    return mtx_mode == 0 ? m_proj : mtx_mode == 3 ? m_tex : m_pos;
-}
+/* the matrix a load/multiply goes to: projection, texture, or position (+ vector in mode 2) */
+#define ON_MATRIX(op, both_vec)                                                     \
+    do {                                                                            \
+        if (mtx_mode == 0) { op(m_proj, p); clip_dirty = 1; }                       \
+        else if (mtx_mode == 3) op(m_tex, p);                                       \
+        else { op(m_pos, p); if (mtx_mode == 2 && (both_vec)) op(m_vec, p); clip_dirty = 1; } \
+    } while (0)
 
-static void mtx_changed(void) { clip_dirty = 1; }
-
-static void load_mtx(const int32_t* m) {
-    int both; int32_t* d = cur_mtx_for_load(&both);
-    memcpy(d, m, sizeof(Mtx));
-    if (both) memcpy(m_vec, m, sizeof(Mtx));
-    mtx_changed();
-}
-
-static void mult_mtx(const int32_t* m) {
-    int both; int32_t* d = cur_mtx_for_load(&both);
-    mtx_mul(d, m, d);
-    if (both) mtx_mul(m_vec, m, m_vec);
-    mtx_changed();
-}
-
-static void exec(uint8_t cmd, const uint32_t* p) {
+static void exec(uint8_t cmd, const u32* p) {
     switch (cmd) {
     case 0x10: mtx_mode = p[0] & 3; break;
     case 0x11:                                                       /* PUSH */
-        if (mtx_mode == 0) { if (sp_proj) stack_overflow = 1; memcpy(s_proj[0], m_proj, sizeof(Mtx)); sp_proj = 1; }
-        else if (mtx_mode == 3) { memcpy(s_tex[0], m_tex, sizeof(Mtx)); sp_tex = 1; }
+        if (mtx_mode == 0) { if (sp_proj > 0) gxstat |= 1u << 15; memcpy(st_proj, m_proj, 64); sp_proj = (sp_proj + 1) & 1; }
+        else if (mtx_mode == 3) { if (sp_tex > 0) gxstat |= 1u << 15; memcpy(st_tex, m_tex, 64); sp_tex = (sp_tex + 1) & 1; }
         else {
-            if (sp_pos >= 31) stack_overflow = 1;
-            memcpy(s_pos[sp_pos & 31], m_pos, sizeof(Mtx)); memcpy(s_vec[sp_pos & 31], m_vec, sizeof(Mtx));
-            sp_pos = (sp_pos + 1) & 63;
+            if (sp_pos > 30) gxstat |= 1u << 15;
+            memcpy(st_pos[sp_pos & 31], m_pos, 64); memcpy(st_vec[sp_pos & 31], m_vec, 64);
+            sp_pos = (sp_pos + 1) & 0x3F;
         }
         break;
-    case 0x12: {                                                     /* POP */
-        if (mtx_mode == 0) { sp_proj = 0; memcpy(m_proj, s_proj[0], sizeof(Mtx)); }
-        else if (mtx_mode == 3) { sp_tex = 0; memcpy(m_tex, s_tex[0], sizeof(Mtx)); }
+    case 0x12:                                                       /* POP */
+        if (mtx_mode == 0) { if (sp_proj == 0) gxstat |= 1u << 15; sp_proj = (sp_proj - 1) & 1; memcpy(m_proj, st_proj, 64); clip_dirty = 1; }
+        else if (mtx_mode == 3) { if (sp_tex == 0) gxstat |= 1u << 15; sp_tex = (sp_tex - 1) & 1; memcpy(m_tex, st_tex, 64); }
         else {
-            int n = (int32_t)(p[0] << 26) >> 26;
-            sp_pos = (sp_pos - n) & 63;
-            if (sp_pos >= 31) stack_overflow = 1;
-            memcpy(m_pos, s_pos[sp_pos & 31], sizeof(Mtx)); memcpy(m_vec, s_vec[sp_pos & 31], sizeof(Mtx));
+            s32 off = (s32)(p[0] << 26) >> 26;
+            sp_pos = (sp_pos - off) & 0x3F;
+            if (sp_pos > 30) gxstat |= 1u << 15;
+            memcpy(m_pos, st_pos[sp_pos & 31], 64); memcpy(m_vec, st_vec[sp_pos & 31], 64);
+            clip_dirty = 1;
         }
-        mtx_changed();
         break;
-    }
-    case 0x13: {                                                     /* STORE */
-        if (mtx_mode == 0) memcpy(s_proj[0], m_proj, sizeof(Mtx));
-        else if (mtx_mode == 3) memcpy(s_tex[0], m_tex, sizeof(Mtx));
-        else { int n = p[0] & 31; if (n == 31) stack_overflow = 1; memcpy(s_pos[n], m_pos, sizeof(Mtx)); memcpy(s_vec[n], m_vec, sizeof(Mtx)); }
+    case 0x13:                                                       /* STORE */
+        if (mtx_mode == 0) memcpy(st_proj, m_proj, 64);
+        else if (mtx_mode == 3) memcpy(st_tex, m_tex, 64);
+        else { u32 a = p[0] & 31; if (a > 30) gxstat |= 1u << 15; memcpy(st_pos[a], m_pos, 64); memcpy(st_vec[a], m_vec, 64); }
         break;
-    }
-    case 0x14: {                                                     /* RESTORE */
-        if (mtx_mode == 0) memcpy(m_proj, s_proj[0], sizeof(Mtx));
-        else if (mtx_mode == 3) memcpy(m_tex, s_tex[0], sizeof(Mtx));
-        else { int n = p[0] & 31; if (n == 31) stack_overflow = 1; memcpy(m_pos, s_pos[n], sizeof(Mtx)); memcpy(m_vec, s_vec[n], sizeof(Mtx)); }
-        mtx_changed();
+    case 0x14:                                                       /* RESTORE */
+        if (mtx_mode == 0) { memcpy(m_proj, st_proj, 64); clip_dirty = 1; }
+        else if (mtx_mode == 3) memcpy(m_tex, st_tex, 64);
+        else { u32 a = p[0] & 31; if (a > 30) gxstat |= 1u << 15; memcpy(m_pos, st_pos[a], 64); memcpy(m_vec, st_vec[a], 64); clip_dirty = 1; }
         break;
-    }
-    case 0x15: { Mtx m; mtx_identity(m); load_mtx(m); break; }
-    case 0x16: { Mtx m; for (int i = 0; i < 16; i++) m[i] = (int32_t)p[i]; load_mtx(m); break; }
-    case 0x17: { Mtx m; for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) m[r * 4 + c] = (int32_t)p[r * 3 + c]; m[r * 4 + 3] = r == 3 ? 0x1000 : 0; } load_mtx(m); break; }
-    case 0x18: { Mtx m; for (int i = 0; i < 16; i++) m[i] = (int32_t)p[i]; mult_mtx(m); break; }
-    case 0x19: { Mtx m; for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) m[r * 4 + c] = (int32_t)p[r * 3 + c]; m[r * 4 + 3] = r == 3 ? 0x1000 : 0; } mult_mtx(m); break; }
-    case 0x1A: { Mtx m; mtx_identity(m); for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) m[r * 4 + c] = (int32_t)p[r * 3 + c]; mult_mtx(m); break; }
-    case 0x1B: {                                                     /* SCALE: not applied to the vector matrix */
-        Mtx m; mtx_identity(m); m[0] = (int32_t)p[0]; m[5] = (int32_t)p[1]; m[10] = (int32_t)p[2];
-        int32_t* d = mtx_mode == 0 ? m_proj : mtx_mode == 3 ? m_tex : m_pos;
-        mtx_mul(d, m, d); mtx_changed();
+    case 0x15:                                                       /* IDENTITY */
+        if (mtx_mode == 0) { mtx_identity(m_proj); clip_dirty = 1; }
+        else if (mtx_mode == 3) mtx_identity(m_tex);
+        else { mtx_identity(m_pos); if (mtx_mode == 2) mtx_identity(m_vec); clip_dirty = 1; }
         break;
-    }
-    case 0x1C: { Mtx m; mtx_identity(m); m[12] = (int32_t)p[0]; m[13] = (int32_t)p[1]; m[14] = (int32_t)p[2]; mult_mtx(m); break; }
-    case 0x20: set_color15(p[0]); break;
-    case 0x21: do_lighting((int32_t)p[0]); break;
+    case 0x16: ON_MATRIX(mtx_load4x4, 1); break;
+    case 0x17: ON_MATRIX(mtx_load4x3, 1); break;
+    case 0x18: ON_MATRIX(mtx_mult4x4, 1); break;
+    case 0x19: ON_MATRIX(mtx_mult4x3, 1); break;
+    case 0x1A: ON_MATRIX(mtx_mult3x3, 1); break;
+    case 0x1B: ON_MATRIX(mtx_scale, 0); break;                       /* scale never touches the vector matrix */
+    case 0x1C: ON_MATRIX(mtx_translate, 1); break;
+    case 0x20: vtx_color[0] = p[0] & 0x1F; vtx_color[1] = (p[0] >> 5) & 0x1F; vtx_color[2] = (p[0] >> 10) & 0x1F; break;
+    case 0x21:
+        normal[0] = (s16)((p[0] & 0x000003FF) << 6) >> 6;
+        normal[1] = (s16)((p[0] & 0x000FFC00) >> 4) >> 6;
+        normal[2] = (s16)((p[0] & 0x3FF00000) >> 14) >> 6;
+        calc_lighting();
+        break;
     case 0x22:
-        raw_s = (int16_t)(p[0] & 0xFFFF); raw_t = (int16_t)(p[0] >> 16);
-        if ((teximg >> 30) == 1) {
-            int32_t* t = m_tex;
-            int64_t s = raw_s, tt = raw_t;
-            cur_s = (float)((s * t[0] + tt * t[4] + t[8] + t[12]) >> 12) / 16.0f;
-            cur_t = (float)((s * t[1] + tt * t[5] + t[9] + t[13]) >> 12) / 16.0f;
-        } else if ((teximg >> 30) == 0) { cur_s = raw_s / 16.0f; cur_t = raw_t / 16.0f; }
-        /* modes 2/3: the raw value is only an offset, applied at NORMAL / VTX */
+        raw_tex[0] = (s16)(p[0] & 0xFFFF); raw_tex[1] = (s16)(p[0] >> 16);
+        if ((tex_param >> 30) == 1) {
+            tex_coords[0] = (s16)((raw_tex[0] * m_tex[0] + raw_tex[1] * m_tex[4] + m_tex[8] + m_tex[12]) >> 12);
+            tex_coords[1] = (s16)((raw_tex[0] * m_tex[1] + raw_tex[1] * m_tex[5] + m_tex[9] + m_tex[13]) >> 12);
+        } else { tex_coords[0] = raw_tex[0]; tex_coords[1] = raw_tex[1]; }
         break;
-    case 0x23: submit_vertex((int16_t)(p[0] & 0xFFFF), (int16_t)(p[0] >> 16), (int16_t)(p[1] & 0xFFFF)); break;
-    case 0x24: submit_vertex((int16_t)((p[0] & 0x3FF) << 6), (int16_t)(((p[0] >> 10) & 0x3FF) << 6), (int16_t)(((p[0] >> 20) & 0x3FF) << 6)); break;
-    case 0x25: submit_vertex((int16_t)(p[0] & 0xFFFF), (int16_t)(p[0] >> 16), last_vz); break;
-    case 0x26: submit_vertex((int16_t)(p[0] & 0xFFFF), last_vy, (int16_t)(p[0] >> 16)); break;
-    case 0x27: submit_vertex(last_vx, (int16_t)(p[0] & 0xFFFF), (int16_t)(p[0] >> 16)); break;
-    case 0x28: {
-        int16_t dx = (int16_t)((p[0] & 0x3FF) << 6) >> 6, dy = (int16_t)(((p[0] >> 10) & 0x3FF) << 6) >> 6, dz = (int16_t)(((p[0] >> 20) & 0x3FF) << 6) >> 6;
-        submit_vertex((int16_t)(last_vx + dx), (int16_t)(last_vy + dy), (int16_t)(last_vz + dz));
-        break;
-    }
-    case 0x29: poly_attr_pending = p[0]; break;
-    case 0x2A: teximg = p[0]; break;
-    case 0x2B: pltt = p[0] & 0x1FFF; break;
+    case 0x23: cur_vtx[0] = (s16)(p[0] & 0xFFFF); cur_vtx[1] = (s16)(p[0] >> 16); cur_vtx[2] = (s16)(p[1] & 0xFFFF); submit_vertex(); break;
+    case 0x24:
+        cur_vtx[0] = (s16)((p[0] & 0x000003FF) << 6); cur_vtx[1] = (s16)((p[0] & 0x000FFC00) >> 4); cur_vtx[2] = (s16)((p[0] & 0x3FF00000) >> 14);
+        submit_vertex(); break;
+    case 0x25: cur_vtx[0] = (s16)(p[0] & 0xFFFF); cur_vtx[1] = (s16)(p[0] >> 16); submit_vertex(); break;
+    case 0x26: cur_vtx[0] = (s16)(p[0] & 0xFFFF); cur_vtx[2] = (s16)(p[0] >> 16); submit_vertex(); break;
+    case 0x27: cur_vtx[1] = (s16)(p[0] & 0xFFFF); cur_vtx[2] = (s16)(p[0] >> 16); submit_vertex(); break;
+    case 0x28:
+        cur_vtx[0] = (s16)(cur_vtx[0] + ((s16)((p[0] & 0x000003FF) << 6) >> 6));
+        cur_vtx[1] = (s16)(cur_vtx[1] + ((s16)((p[0] & 0x000FFC00) >> 4) >> 6));
+        cur_vtx[2] = (s16)(cur_vtx[2] + ((s16)((p[0] & 0x3FF00000) >> 14) >> 6));
+        submit_vertex(); break;
+    case 0x29: poly_attr = p[0]; break;
+    case 0x2A: tex_param = p[0]; break;
+    case 0x2B: tex_pal = p[0] & 0x1FFF; break;
     case 0x30:
-        rgb15(p[0], &mat_dif[0], &mat_dif[1], &mat_dif[2]);
-        rgb15(p[0] >> 16, &mat_amb[0], &mat_amb[1], &mat_amb[2]);
-        if (p[0] & 0x8000) set_color15(p[0]);
+        for (int k = 0; k < 3; k++) { mat_dif[k] = (p[0] >> (5 * k)) & 0x1F; mat_amb[k] = (p[0] >> (16 + 5 * k)) & 0x1F; }
+        if (p[0] & 0x8000) memcpy(vtx_color, mat_dif, 3);
         break;
     case 0x31:
-        rgb15(p[0], &mat_spe[0], &mat_spe[1], &mat_spe[2]);
-        rgb15(p[0] >> 16, &mat_emi[0], &mat_emi[1], &mat_emi[2]);
-        use_shine = (p[0] >> 15) & 1;
+        for (int k = 0; k < 3; k++) { mat_spe[k] = (p[0] >> (5 * k)) & 0x1F; mat_emi[k] = (p[0] >> (16 + 5 * k)) & 0x1F; }
+        use_shine = (p[0] & 0x8000) != 0;
         break;
     case 0x32: {
-        int l = p[0] >> 30;
-        float v[3];
-        for (int i = 0; i < 3; i++) v[i] = (float)((int32_t)((p[0] >> (10 * i)) << 22) >> 22) / 512.0f;
-        for (int j = 0; j < 3; j++) light_dir[l][j] = (v[0] * m_vec[0 * 4 + j] + v[1] * m_vec[1 * 4 + j] + v[2] * m_vec[2 * 4 + j]) / 4096.0f;
+        u32 l = p[0] >> 30;
+        s16 d[3] = { (s16)((p[0] & 0x000003FF) << 6) >> 6, (s16)((p[0] & 0x000FFC00) >> 4) >> 6, (s16)((p[0] & 0x3FF00000) >> 14) >> 6 };
+        for (int c = 0; c < 3; c++)
+            light_dir[l][c] = (s16)((s32)((u32)(-((d[0] * m_vec[c] + d[1] * m_vec[4 + c] + d[2] * m_vec[8 + c]) >> 12)) << 21) >> 21);
+        s32 den = -((s32)((u32)(d[0] * m_vec[2] + d[1] * m_vec[6] + d[2] * m_vec[10]) << 9) >> 21) + (1 << 9);
+        spec_recip[l] = den == 0 ? 0 : (1 << 18) / den;
         break;
     }
-    case 0x33: { int l = p[0] >> 30; rgb15(p[0], &light_col[l][0], &light_col[l][1], &light_col[l][2]); break; }
-    case 0x34: for (int i = 0; i < 32; i++) for (int k = 0; k < 4; k++) shine_table[i * 4 + k] = (uint8_t)(p[i] >> (8 * k)); (void)shine_pos; break;
-    case 0x40: poly_attr = poly_attr_pending; prim_type = p[0] & 3; in_begin = 1; strip_n = strip_count = 0; break;
-    case 0x41: in_begin = 0; break;
-    case 0x50: g_swap_pending = 1; g_swap_flags = p[0] & 3; break;
-    case 0x60: vp_x1 = p[0] & 0xFF; vp_y1 = (p[0] >> 8) & 0xFF; vp_x2 = (p[0] >> 16) & 0xFF; vp_y2 = (p[0] >> 24) & 0xFF; break;
-    case 0x70: {                                                     /* BOX_TEST */
+    case 0x33: { u32 l = p[0] >> 30; for (int k = 0; k < 3; k++) light_col[l][k] = (p[0] >> (5 * k)) & 0x1F; break; }
+    case 0x34: for (int i = 0; i < 128; i++) shine_table[i] = (u8)(p[i >> 2] >> (8 * (i & 3))); break;
+    case 0x40:
+        poly_mode = p[0] & 3; vtx_num = 0; vtx_in_poly = 0; consecutive = 0; last_strip = NULL;
+        cur_poly_attr = poly_attr;
+        break;
+    case 0x41: break;
+    case 0x50: flush_request = 1; flush_attr = p[0] & 3; break;
+    case 0x60:
+        viewport[0] = p[0] & 0xFF;
+        viewport[1] = (191 - ((p[0] >> 8) & 0xFF)) & 0xFF;
+        viewport[2] = (p[0] >> 16) & 0xFF;
+        viewport[3] = (191 - (p[0] >> 24)) & 0xFF;
+        viewport[4] = (viewport[2] - viewport[0] + 1) & 0x1FF;
+        viewport[5] = (viewport[1] - viewport[3] + 1) & 0xFF;
+        break;
+    case 0x70: box_test(p); break;
+    case 0x71: {
+        cur_vtx[0] = (s16)(p[0] & 0xFFFF); cur_vtx[1] = (s16)(p[0] >> 16); cur_vtx[2] = (s16)(p[1] & 0xFFFF);
+        s64 vx = cur_vtx[0], vy = cur_vtx[1], vz = cur_vtx[2];
         update_clip();
-        int16_t bx = (int16_t)(p[0] & 0xFFFF), by = (int16_t)(p[0] >> 16), bz = (int16_t)(p[1] & 0xFFFF);
-        int16_t bw = (int16_t)(p[1] >> 16), bh = (int16_t)(p[2] & 0xFFFF), bd = (int16_t)(p[2] >> 16);
-        int out_all[6] = { 1, 1, 1, 1, 1, 1 };
-        for (int k = 0; k < 8; k++) {
-            int64_t x = bx + ((k & 1) ? bw : 0), y = by + ((k & 2) ? bh : 0), z = bz + ((k & 4) ? bd : 0);
-            int32_t* c = m_clip;
-            int64_t cx = (x * c[0] + y * c[4] + z * c[8] + ((int64_t)c[12] << 12)) >> 12;
-            int64_t cy = (x * c[1] + y * c[5] + z * c[9] + ((int64_t)c[13] << 12)) >> 12;
-            int64_t cz = (x * c[2] + y * c[6] + z * c[10] + ((int64_t)c[14] << 12)) >> 12;
-            int64_t cw = (x * c[3] + y * c[7] + z * c[11] + ((int64_t)c[15] << 12)) >> 12;
-            if (cx >= -cw) out_all[0] = 0; if (cx <= cw) out_all[1] = 0;
-            if (cy >= -cw) out_all[2] = 0; if (cy <= cw) out_all[3] = 0;
-            if (cz >= -cw) out_all[4] = 0; if (cz <= cw) out_all[5] = 0;
-        }
-        box_result = !(out_all[0] || out_all[1] || out_all[2] || out_all[3] || out_all[4] || out_all[5]);
+        for (int c = 0; c < 4; c++) postest[c] = (s32)((vx * m_clip[c] + vy * m_clip[4 + c] + vz * m_clip[8 + c] + (s64)0x1000 * m_clip[12 + c]) >> 12);
         break;
     }
-    case 0x71: {                                                     /* POS_TEST */
-        update_clip();
-        last_vx = (int16_t)(p[0] & 0xFFFF); last_vy = (int16_t)(p[0] >> 16); last_vz = (int16_t)(p[1] & 0xFFFF);
-        int64_t x = last_vx, y = last_vy, z = last_vz;
-        for (int j = 0; j < 4; j++) {
-            int32_t* c = m_clip;
-            int32_t v = (int32_t)((x * c[j] + y * c[4 + j] + z * c[8 + j] + ((int64_t)c[12 + j] << 12)) >> 12);
-            memcpy(&g_io[0x620 + 4 * j], &v, 4);
-        }
-        break;
-    }
-    case 0x72: {                                                     /* VEC_TEST */
-        int64_t v[3];
-        for (int i = 0; i < 3; i++) v[i] = ((int32_t)((p[0] >> (10 * i)) << 22) >> 22) << 3;
-        for (int j = 0; j < 3; j++) {
-            int16_t r = (int16_t)(((v[0] * m_vec[j] + v[1] * m_vec[4 + j] + v[2] * m_vec[8 + j]) >> 12));
-            if (r & 0x1000) r |= (int16_t)0xF000;
-            memcpy(&g_io[0x630 + 2 * j], &r, 2);
+    case 0x72: {
+        s16 n[3] = { (s16)((p[0] & 0x000003FF) << 6) >> 6, (s16)((p[0] & 0x000FFC00) >> 4) >> 6, (s16)((p[0] & 0x3FF00000) >> 14) >> 6 };
+        for (int c = 0; c < 3; c++) {
+            vectest[c] = (s16)((n[0] * m_vec[c] + n[1] * m_vec[4 + c] + n[2] * m_vec[8 + c]) >> 9);
+            if (vectest[c] & 0x1000) vectest[c] = (s16)(vectest[c] | 0xF000);
         }
         break;
     }
@@ -414,27 +564,27 @@ static void exec(uint8_t cmd, const uint32_t* p) {
     }
 }
 
-/* Packed FIFO state */
+/* Packed FIFO (GXFIFO): a command word holds up to 4 commands, then their
+ * parameters follow. Commands run as soon as their parameters are complete. */
 static uint8_t fifo_cmds[4];
 static int fifo_ncmd, fifo_idx;
-static uint32_t fifo_params[32];
+static u32 fifo_params[32];
 static int fifo_np;
 
 static void fifo_run_zero_param(void) {
     while (fifo_idx < fifo_ncmd) {
         uint8_t c = fifo_cmds[fifo_idx];
-        if (!cmd_valid(c)) { fifo_idx++; continue; }               /* NOP / unused */
+        if (!cmd_valid(c)) { fifo_idx++; continue; }
         if (param_count[c] != 0) return;
         exec(c, fifo_params);
         fifo_idx++;
     }
 }
 
-static void fifo_write(uint32_t v) {
-    if (fifo_idx >= fifo_ncmd) {                                    /* a new command word */
+static void fifo_write(u32 v) {
+    if (fifo_idx >= fifo_ncmd) {
         fifo_ncmd = 0; fifo_idx = 0; fifo_np = 0;
         for (int i = 0; i < 4; i++) fifo_cmds[fifo_ncmd++] = (uint8_t)(v >> (8 * i));
-        /* trailing zero bytes are padding */
         while (fifo_ncmd > 0 && fifo_cmds[fifo_ncmd - 1] == 0) fifo_ncmd--;
         fifo_run_zero_param();
         return;
@@ -449,12 +599,12 @@ static void fifo_write(uint32_t v) {
     }
 }
 
-/* Direct command ports */
+/* Direct command ports (0x04000440-0x040005FF) */
 static uint8_t port_cmd;
-static uint32_t port_params[32];
+static u32 port_params[32];
 static int port_np;
 
-static void port_write(uint8_t cmd, uint32_t v) {
+static void port_write(uint8_t cmd, u32 v) {
     if (!cmd_valid(cmd)) return;
     if (param_count[cmd] == 0) { exec(cmd, port_params); return; }
     if (port_cmd != cmd) { port_cmd = cmd; port_np = 0; }
@@ -462,460 +612,876 @@ static void port_write(uint8_t cmd, uint32_t v) {
     if (port_np >= param_count[cmd]) { exec(cmd, port_params); port_np = 0; port_cmd = 0; }
 }
 
-static int gxstat_irq_mode;
-
 void gpu3d_init(void);
 /* The GXFIFO interrupt is level-triggered: with our always-empty FIFO it is
  * asserted whenever an interrupt condition (less than half full / empty) is selected. */
-int gx_irq_line(void) { return gxstat_irq_mode == 1 || gxstat_irq_mode == 2; }
+int gx_irq_line(void) { u32 m = gxstat >> 30; return m == 1 || m == 2; }
 
-void gx_write(uint32_t off, uint32_t v) {
+void gx_write(u32 off, u32 v) {
     static int inited;
     if (!inited) { inited = 1; gpu3d_init(); }
     if (off >= 0x400 && off < 0x440) { fifo_write(v); return; }
     if (off >= 0x440 && off < 0x600) { port_write((uint8_t)(0x10 + (off - 0x440) / 4), v); return; }
     if (off == 0x600) {
-        if (v & 0x8000) stack_overflow = 0;
-        gxstat_irq_mode = (v >> 30) & 3;
-        if (gxstat_irq_mode) irq_raise(&g_c9, IRQ_GXFIFO);          /* the FIFO is always empty */
+        if (v & 0x8000) { gxstat &= ~0x8000u; sp_proj = 0; sp_tex = 0; }
+        gxstat = (gxstat & 0x3FFFFFFFu) | (v & 0xC0000000u);
+        if (gx_irq_line()) irq_raise(&g_c9, IRQ_GXFIFO);
     }
 }
 
-uint32_t gx_read(uint32_t off) {
+u32 gx_read(u32 off) {
     off &= ~3u;
     if (off == 0x600) {
-        uint32_t v = 0;
-        v |= (uint32_t)box_result << 1;
-        v |= (uint32_t)(sp_pos & 31) << 8;
-        v |= (uint32_t)(sp_proj & 1) << 13;
-        v |= (uint32_t)stack_overflow << 15;
+        u32 v = gxstat & 0xC0008002u;
+        v |= (u32)(sp_pos & 31) << 8;
+        v |= (u32)(sp_proj & 1) << 13;
         v |= 1u << 25 | 1u << 26;                                    /* FIFO less than half full, empty */
-        v |= (uint32_t)gxstat_irq_mode << 30;
         return v;
     }
-    if (off == 0x604) return (uint32_t)g_npoly[g_geo] | ((uint32_t)g_nvert[g_geo] << 16);
-    if (off >= 0x640 && off < 0x680) { update_clip(); return (uint32_t)m_clip[(off - 0x640) / 4]; }
-    if (off >= 0x680 && off < 0x6A4) { int i = (off - 0x680) / 4; return (uint32_t)m_vec[(i / 3) * 4 + i % 3]; }
-    uint32_t v; memcpy(&v, &g_io[off], 4); return v;
+    if (off == 0x604) return n_poly | (n_vtx << 16);
+    if (off >= 0x620 && off < 0x630) return (u32)postest[(off - 0x620) / 4];
+    if (off == 0x630) return (u32)(u16)vectest[0] | ((u32)(u16)vectest[1] << 16);
+    if (off == 0x634) return (u32)(u16)vectest[2];
+    if (off >= 0x640 && off < 0x680) { update_clip(); return (u32)m_clip[(off - 0x640) / 4]; }
+    if (off >= 0x680 && off < 0x6A4) { int i = (off - 0x680) / 4; return (u32)m_vec[(i / 3) * 4 + i % 3]; }
+    u32 v; memcpy(&v, &g_io[off], 4); return v;
 }
 
-/* ---------------------------------------------------------------- rasterizer */
-static uint16_t fb_color[192][256];
-static uint8_t  fb_alpha[192][256];
-static float    fb_depth[192][256];
-static uint8_t  fb_id[192][256];        /* opaque polygon id */
-static uint8_t  fb_tid[192][256];       /* translucent polygon id + 1 (0 = none) */
-static uint8_t  fb_fog[192][256];
-static uint8_t  fb_edge[192][256];      /* opaque pixel on its polygon's boundary (for edge marking) */
+/* ================================================================ rasterizer */
+/* Interpolation along an edge (dir 1, 9-bit factor) or a span (dir 0, 8-bit):
+ * a perspective-correct factor between 0 and 1, then a linear blend of the
+ * attribute with it. Equal, round W values interpolate exactly linearly. */
+typedef struct {
+    s32 x0, x1, xdiff, x;
+    int shift, linear, wbuffer, dir;
+    s32 xrecip_z, w0n, w0d, w1d;
+    u32 yfactor;
+} Interp;
 
-/* Edge lines of the polygon being drawn, normalised so the value is the
- * distance in pixels to that edge (positive inside). */
-static float g_pe_a[MAX_PV], g_pe_b[MAX_PV], g_pe_c[MAX_PV];
-static int g_pe_n;
-static void poly_edges(const Poly* p) {
-    float area = 0;
-    for (int k = 0; k < p->n; k++) { const SVtx* u = &p->v[k]; const SVtx* v = &p->v[(k + 1) % p->n]; area += u->x * v->y - v->x * u->y; }
-    float sg = area < 0 ? -1.0f : 1.0f;
-    g_pe_n = 0;
-    for (int k = 0; k < p->n; k++) {
-        const SVtx* u = &p->v[k]; const SVtx* v = &p->v[(k + 1) % p->n];
-        float a = (u->y - v->y) * -sg, b = (v->x - u->x) * -sg, len = sqrtf(a * a + b * b);
-        if (len < 1e-6f) continue;
-        g_pe_a[g_pe_n] = a / len; g_pe_b[g_pe_n] = b / len; g_pe_c[g_pe_n] = -(g_pe_a[g_pe_n] * u->x + g_pe_b[g_pe_n] * u->y);
-        g_pe_n++;
+static void interp_setup(Interp* it, int dir, s32 x0, s32 x1, s32 w0, s32 w1, int wbuffer) {
+    it->dir = dir;
+    it->x0 = x0; it->x1 = x1; it->xdiff = x1 - x0; it->wbuffer = wbuffer; it->x = 0; it->yfactor = 0;
+    it->xrecip_z = it->xdiff != 0 ? (1 << 22) / it->xdiff : 0;
+    u32 mask = dir ? 0x7E : 0x7F;
+    it->linear = (w0 == w1) && !((u32)w0 & mask) && !((u32)w1 & mask);
+    if (dir) { it->w0n = w0 >> 1; it->w0d = (w0 + ((w0 & ~w1) & 1)) >> 1; it->w1d = w1 >> 1; it->shift = 9; }
+    else { it->w0n = w0; it->w0d = w0; it->w1d = w1; it->shift = 8; }
+}
+static inline void interp_setx(Interp* it, s32 x) {
+    x -= it->x0;
+    it->x = x;
+    if (it->xdiff != 0 && (!it->linear || it->wbuffer)) {
+        u32 num = ((u32)x * (u32)it->w0n) << it->shift;
+        u32 den = (u32)x * (u32)it->w0d + (u32)(it->xdiff - x) * (u32)it->w1d;
+        it->yfactor = den == 0 ? 0 : num / den;
     }
 }
-static int on_poly_edge(float px, float py) {
-    for (int k = 0; k < g_pe_n; k++) {
-        float d = g_pe_a[k] * px + g_pe_b[k] * py + g_pe_c[k];
-        if (d < 1.0f && d > -1.0f) return 1;
+static inline s32 interp_value(const Interp* it, s32 y0, s32 y1) {
+    if (it->xdiff == 0 || y0 == y1) return y0;
+    if (!it->linear) {
+        if (y0 < y1) return y0 + (s32)(((u32)(y1 - y0) * it->yfactor) >> it->shift);
+        return y1 + (s32)(((u32)(y0 - y1) * ((1u << it->shift) - it->yfactor)) >> it->shift);
     }
+    if (y0 < y1) return y0 + (s32)((s64)(y1 - y0) * it->x / it->xdiff);
+    return y1 + (s32)((s64)(y0 - y1) * (it->xdiff - it->x) / it->xdiff);
+}
+static inline s32 interp_z(const Interp* it, s32 z0, s32 z1) {
+    if (it->xdiff == 0 || z0 == z1) return z0;
+    if (it->wbuffer) {
+        if (z0 < z1) return z0 + (s32)(((s64)(z1 - z0) * it->yfactor) >> it->shift);
+        return z1 + (s32)(((s64)(z0 - z1) * ((1 << it->shift) - (s64)it->yfactor)) >> it->shift);
+    }
+    s32 base, disp, factor;
+    if (z0 < z1) { base = z0; disp = z1 - z0; factor = it->x; }
+    else { base = z1; disp = z0 - z1; factor = it->xdiff - it->x; }
+    if (it->dir) {
+        int sh = 0;
+        while (disp > 0x3FF) { disp >>= 1; sh++; }
+        return base + (s32)((((s64)disp * factor * it->xrecip_z) >> 22) << sh);
+    }
+    disp >>= 9;
+    return base + (s32)(((s64)disp * factor * it->xrecip_z) >> 13);
+}
+
+/* One polygon edge, stepped one scanline at a time (18-bit fractional X). */
+typedef struct {
+    s32 increment; int negative, xmajor;
+    Interp interp;
+    s32 x0, xmin, xmax, xlen, ylen, dx, y, xcov_incr;
+    int side;                                       /* 0 left, 1 right */
+} Slope;
+
+static inline s32 slope_xval(const Slope* s) {
+    s32 r = s->negative ? s->x0 - (s->dx >> 18) : s->x0 + (s->dx >> 18);
+    if (r < s->xmin) r = s->xmin; else if (r > s->xmax) r = s->xmax;
+    return r;
+}
+static s32 slope_setup_dummy(Slope* s, int side, s32 x0, int wbuffer) {
+    memset(s, 0, sizeof *s);
+    s->side = side; s->x0 = x0; s->xmin = x0; s->xmax = x0;
+    interp_setup(&s->interp, 1, 0, 0, 0, 0, wbuffer);
+    interp_setx(&s->interp, 0);
+    return x0;
+}
+static s32 slope_setup(Slope* s, int side, s32 x0, s32 x1, s32 y0, s32 y1, s32 w0, s32 w1, s32 y, int wbuffer) {
+    s->side = side; s->x0 = x0; s->y = y;
+    if (x1 > x0) { s->xmin = x0; s->xmax = x1 - 1; s->negative = 0; }
+    else if (x1 < x0) { s->xmin = x1; s->xmax = x0 - 1; s->negative = 1; }
+    else { s->xmin = x0; s->xmax = x0; s->negative = 0; }
+    s->xlen = s->xmax + 1 - s->xmin;
+    s->ylen = y1 - y0;
+    if (s->ylen == 0) s->increment = 0;
+    else if (s->ylen == s->xlen && s->xlen != 1) s->increment = 0x40000;
+    else {
+        s32 yrecip = (1 << 18) / s->ylen;
+        s->increment = (x1 - x0) * yrecip;
+        if (s->increment < 0) s->increment = -s->increment;
+    }
+    s->xmajor = s->increment > 0x40000;
+    if (side) {
+        if (s->xmajor) s->dx = s->negative ? (0x20000 + 0x40000) : (s->increment - 0x20000);
+        else if (s->increment != 0) s->dx = s->negative ? 0x40000 : 0;
+        else s->dx = 0;
+    } else {
+        if (s->xmajor) s->dx = s->negative ? ((s->increment - 0x20000) + 0x40000) : 0x20000;
+        else if (s->increment != 0) s->dx = s->negative ? 0x40000 : 0;
+        else s->dx = 0;
+    }
+    s->dx += (y - y0) * s->increment;
+    s32 x = slope_xval(s);
+    int interpoffset = (s->increment >= 0x40000) && (side ^ s->negative);
+    interp_setup(&s->interp, 1, y0 - interpoffset, y1 - interpoffset, w0, w1, wbuffer);
+    interp_setx(&s->interp, y);
+    if (s->xmajor) s->xcov_incr = (s->ylen << 10) / s->xlen;
+    return x;
+}
+static inline s32 slope_step(Slope* s) {
+    s->dx += s->increment;
+    s->y++;
+    s32 x = slope_xval(s);
+    interp_setx(&s->interp, s->y);
+    return x;
+}
+/* edge span length and anti-aliasing coverage for the current scanline */
+static void slope_edge_params(const Slope* s, int swapped, s32* length, s32* coverage) {
+    if (s->xmajor) {
+        if (!swapped || s->side) {
+            if (s->side ^ s->negative) *length = (s->dx >> 18) - ((s->dx - s->increment) >> 18);
+            else *length = ((s->dx + s->increment) >> 18) - (s->dx >> 18);
+        }
+        s32 startx = s->dx >> 18;
+        if (s->negative) startx = s->xlen - startx;
+        if (s->side) startx = startx - *length + 1;
+        s32 startcov = (s32)((((s64)(startx << 10) + 0x1FF) * s->ylen) / s->xlen);
+        *coverage = (s32)((1u << 31) | ((u32)(startcov & 0x3FF) << 12) | (u32)(s->xcov_incr & 0x3FF));
+        if (swapped) *length = 1;
+    } else {
+        *length = 1;
+        if (s->increment == 0) *coverage = swapped ? 0 : 31;
+        else {
+            s32 cov = ((s->dx >> 9) + (s->increment >> 10)) >> 4;
+            if ((cov >> 5) != (s->dx >> 18)) cov = 31;
+            cov &= 0x1F;
+            if (swapped) { if (s->side ^ s->negative) cov = 0x1F - cov; }
+            else { if (!(s->side ^ s->negative)) cov = 0x1F - cov; }
+            *coverage = cov;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- buffers
+ * 258x194 with a 1-pixel border (simplifies edge marking); each buffer is
+ * doubled to keep the two topmost pixels (anti-aliasing, shadows).
+ * attr: bit0-3 edge flags (left/right/top/bottom), bit4 back-facing,
+ * bit8-12 AA coverage, bit15 fog, bit16-21 translucent polygon ID,
+ * bit22 translucent, bit24-29 opaque polygon ID. Colours are 6-bit, alpha 5-bit. */
+#define SW 258
+#define SH 194
+#define BUFSZ (SW * SH)
+#define FIRSTPX (SW + 1)
+static u32 cbuf[BUFSZ * 2], zbuf[BUFSZ * 2], abuf[BUFSZ * 2];
+static u8 stencil[256 * 2];
+static int prev_shadowmask;
+
+typedef struct {
+    HPoly* p;
+    Slope sl, sr;
+    s32 xl, xr;
+    u32 curvl, curvr, nextvl, nextvr;
+} RPoly;
+static RPoly rpolys[POLY_MAX];
+
+/* ---------------------------------------------------------------- textures */
+static inline u8 tex8(u32 a) { uint8_t* p = g_tex_slot[(a >> 17) & 3]; return p ? p[a & 0x1FFFF] : 0; }
+static inline u16 tex16(u32 a) { return (u16)(tex8(a) | (tex8(a + 1) << 8)); }
+static inline u16 pal16(u32 a) {
+    u32 slot = a >> 14;
+    uint8_t* p = slot < 6 ? g_texpal_slot[slot] : NULL;
+    if (!p) return 0;
+    u16 v; memcpy(&v, p + (a & 0x3FFE), 2); return v;
+}
+
+static void texture_lookup(u32 texparam, u32 texpal, s32 s, s32 t, u16* color, u8* alpha) {
+    u32 vramaddr = (texparam & 0xFFFF) << 3;
+    s32 width = 8 << ((texparam >> 20) & 7), height = 8 << ((texparam >> 23) & 7);
+    s >>= 4; t >>= 4;
+    if (texparam & (1 << 16)) {
+        if (texparam & (1 << 18)) s = (s & width) ? (width - 1) - (s & (width - 1)) : (s & (width - 1));
+        else s &= width - 1;
+    } else { if (s < 0) s = 0; else if (s >= width) s = width - 1; }
+    if (texparam & (1 << 17)) {
+        if (texparam & (1 << 19)) t = (t & height) ? (height - 1) - (t & (height - 1)) : (t & (height - 1));
+        else t &= height - 1;
+    } else { if (t < 0) t = 0; else if (t >= height) t = height - 1; }
+    u8 alpha0 = (texparam & (1 << 29)) ? 0 : 31;
+    switch ((texparam >> 26) & 7) {
+    case 1: {                                                       /* A3I5 */
+        u8 px = tex8(vramaddr + (u32)(t * width + s));
+        *color = pal16((texpal << 4) + ((px & 0x1F) << 1));
+        *alpha = (u8)(((px >> 3) & 0x1C) + (px >> 6));
+        break;
+    }
+    case 2: {                                                       /* 4 colours */
+        u8 px = tex8(vramaddr + ((u32)(t * width + s) >> 2));
+        px = (px >> ((s & 3) << 1)) & 3;
+        *color = pal16((texpal << 3) + (px << 1));
+        *alpha = px == 0 ? alpha0 : 31;
+        break;
+    }
+    case 3: {                                                       /* 16 colours */
+        u8 px = tex8(vramaddr + ((u32)(t * width + s) >> 1));
+        px = (s & 1) ? px >> 4 : px & 0xF;
+        *color = pal16((texpal << 4) + (px << 1));
+        *alpha = px == 0 ? alpha0 : 31;
+        break;
+    }
+    case 4: {                                                       /* 256 colours */
+        u8 px = tex8(vramaddr + (u32)(t * width + s));
+        *color = pal16((texpal << 4) + (px << 1));
+        *alpha = px == 0 ? alpha0 : 31;
+        break;
+    }
+    case 5: {                                                       /* 4x4 compressed */
+        vramaddr += (u32)((t & 0x3FC) * (width >> 2)) + (u32)(s & 0x3FC);
+        vramaddr += (u32)(t & 3);
+        vramaddr &= 0x7FFFF;
+        u32 slot1 = 0x20000 + ((vramaddr & 0x1FFFC) >> 1);
+        if (vramaddr >= 0x40000) slot1 += 0x10000;
+        u8 val;
+        if (vramaddr >= 0x20000 && vramaddr < 0x40000) val = 0;
+        else val = (u8)(tex8(vramaddr) >> (2 * (s & 3)));
+        u16 palinfo = tex16(slot1);
+        u32 po = (u32)(palinfo & 0x3FFF) << 2, pb = texpal << 4;
+        u32 mode = palinfo >> 14;
+        u16 c0 = pal16(pb + po), c1 = pal16(pb + po + 2);
+        *alpha = 31;
+        switch (val & 3) {
+        case 0: *color = c0; break;
+        case 1: *color = c1; break;
+        case 2:
+            if (mode == 1) *color = (u16)((((c0 & 0x1F) + (c1 & 0x1F)) >> 1) | ((((c0 & 0x3E0) + (c1 & 0x3E0)) >> 1) & 0x3E0) | ((((c0 & 0x7C00) + (c1 & 0x7C00)) >> 1) & 0x7C00));
+            else if (mode == 3) *color = (u16)((((c0 & 0x1F) * 5 + (c1 & 0x1F) * 3) >> 3) | ((((c0 & 0x3E0) * 5 + (c1 & 0x3E0) * 3) >> 3) & 0x3E0) | ((((c0 & 0x7C00) * 5 + (c1 & 0x7C00) * 3) >> 3) & 0x7C00));
+            else *color = pal16(pb + po + 4);
+            break;
+        case 3:
+            if (mode == 2) *color = pal16(pb + po + 6);
+            else if (mode == 3) *color = (u16)((((c0 & 0x1F) * 3 + (c1 & 0x1F) * 5) >> 3) | ((((c0 & 0x3E0) * 3 + (c1 & 0x3E0) * 5) >> 3) & 0x3E0) | ((((c0 & 0x7C00) * 3 + (c1 & 0x7C00) * 5) >> 3) & 0x7C00));
+            else { *color = 0; *alpha = 0; }
+            break;
+        }
+        break;
+    }
+    case 6: {                                                       /* A5I3 */
+        u8 px = tex8(vramaddr + (u32)(t * width + s));
+        *color = pal16((texpal << 4) + ((px & 7) << 1));
+        *alpha = px >> 3;
+        break;
+    }
+    case 7: {                                                       /* direct colour */
+        *color = tex16(vramaddr + ((u32)(t * width + s) << 1));
+        *alpha = (*color & 0x8000) ? 31 : 0;
+        break;
+    }
+    default: *color = 0; *alpha = 0; break;
+    }
+}
+
+/* ---------------------------------------------------------------- pixels */
+static inline int depth_test(int mode, s32 dstz, s32 z, u32 dstattr) {
+    switch (mode) {
+    case 0: return z < dstz;                                        /* less */
+    case 1: if ((dstattr & 0x00400010) == 0x00000010) return z <= dstz; return z < dstz;   /* front over opaque back-facing */
+    case 2: return (u32)((dstz - z) + 0x200) <= 0x400;              /* equal (Z) */
+    default: return (u32)((dstz - z) + 0xFF) <= 0x1FE;              /* equal (W) */
+    }
+}
+
+static inline u32 alpha_blend(u32 src, u32 dst, u32 alpha) {
+    u32 dsta = dst >> 24;
+    if (dsta == 0) return src;
+    u32 r = src & 0x3F, g = (src >> 8) & 0x3F, b = (src >> 16) & 0x3F;
+    if (r_disp & (1 << 3)) {
+        alpha++;
+        r = (r * alpha + (dst & 0x3F) * (32 - alpha)) >> 5;
+        g = (g * alpha + ((dst >> 8) & 0x3F) * (32 - alpha)) >> 5;
+        b = (b * alpha + ((dst >> 16) & 0x3F) * (32 - alpha)) >> 5;
+        alpha--;
+    }
+    if (alpha > dsta) dsta = alpha;
+    return r | (g << 8) | (b << 16) | (dsta << 24);
+}
+
+static inline u32 expand5(u32 c, u32* r, u32* g, u32* b) {        /* 15-bit -> 6-bit channels (+1 if non-zero) */
+    *r = (c << 1) & 0x3E; if (*r) (*r)++;
+    *g = (c >> 4) & 0x3E; if (*g) (*g)++;
+    *b = (c >> 9) & 0x3E; if (*b) (*b)++;
     return 0;
 }
-static int g_3d_have_frame;
 
-static inline uint8_t tex8(uint32_t a) { uint8_t* p = g_tex_slot[(a >> 17) & 3]; return p ? p[a & 0x1FFFF] : 0; }
-static inline uint16_t tex16(uint32_t a) { return (uint16_t)(tex8(a) | (tex8(a + 1) << 8)); }
-static inline uint16_t pal16(uint32_t a) {
-    uint32_t s = a >> 14;
-    if (s >= 6) return 0;
-    uint8_t* p = g_texpal_slot[s];
-    return p ? (uint16_t)(p[a & 0x3FFF] | (p[(a & 0x3FFF) + 1] << 8)) : 0;
+static u32 render_pixel(const HPoly* p, u8 vr, u8 vg, u8 vb, s16 s, s16 t) {
+    u32 r, g, b, a;
+    u32 blendmode = (p->attr >> 4) & 3, polyalpha = (p->attr >> 16) & 0x1F;
+    int wire = polyalpha == 0;
+    if (blendmode == 2) {
+        if (r_disp & (1 << 1)) { vg = vr; vb = vr; }                /* highlight */
+        else { u32 tr, tg, tb; expand5(r_toon[vr >> 1], &tr, &tg, &tb); vr = (u8)tr; vg = (u8)tg; vb = (u8)tb; }   /* toon */
+    }
+    if ((r_disp & 1) && ((p->texparam >> 26) & 7) != 0) {
+        u16 tc; u8 ta;
+        texture_lookup(p->texparam, p->texpal, s, t, &tc, &ta);
+        u32 tr, tg, tb; expand5(tc, &tr, &tg, &tb);
+        if (blendmode & 1) {                                        /* decal */
+            if (ta == 0) { r = vr; g = vg; b = vb; }
+            else if (ta == 31) { r = tr; g = tg; b = tb; }
+            else { r = (tr * ta + vr * (31u - ta)) >> 5; g = (tg * ta + vg * (31u - ta)) >> 5; b = (tb * ta + vb * (31u - ta)) >> 5; }
+            a = polyalpha;
+        } else {                                                    /* modulate */
+            r = ((tr + 1) * (vr + 1u) - 1) >> 6;
+            g = ((tg + 1) * (vg + 1u) - 1) >> 6;
+            b = ((tb + 1) * (vb + 1u) - 1) >> 6;
+            a = ((ta + 1u) * (polyalpha + 1) - 1) >> 5;
+        }
+    } else { r = vr; g = vg; b = vb; a = polyalpha; }
+    if (blendmode == 2 && (r_disp & (1 << 1))) {
+        u32 hr, hg, hb; expand5(r_toon[vr >> 1], &hr, &hg, &hb);
+        r += hr; g += hg; b += hb;
+        if (r > 63) r = 63; if (g > 63) g = 63; if (b > 63) b = 63;
+    }
+    if (wire) a = 31;
+    return (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16) | (a << 24);
 }
 
-/* Fetch a texel: returns 15-bit color, alpha 0..31 in *a. */
-static uint16_t texel(const Poly* p, int si, int ti, int* a) {
-    uint32_t ti_ = p->teximg;
-    int w = 8 << ((ti_ >> 20) & 7), h = 8 << ((ti_ >> 23) & 7);
-    if (ti_ & (1 << 16)) {
-        if (ti_ & (1 << 18)) { si &= 2 * w - 1; if (si >= w) si = 2 * w - 1 - si; } else si &= w - 1;
-    } else si = si < 0 ? 0 : si >= w ? w - 1 : si;
-    if (ti_ & (1 << 17)) {
-        if (ti_ & (1 << 19)) { ti &= 2 * h - 1; if (ti >= h) ti = 2 * h - 1 - ti; } else ti &= h - 1;
-    } else ti = ti < 0 ? 0 : ti >= h ? h - 1 : ti;
-    uint32_t base = (ti_ & 0xFFFF) * 8;
-    uint32_t pb = p->pltt * 16;
-    int fmt = (ti_ >> 26) & 7;
-    int c0t = (ti_ >> 29) & 1;
-    uint32_t idx = (uint32_t)(ti * w + si);
-    *a = 31;
-    switch (fmt) {
-    case 1: { uint8_t b = tex8(base + idx); int al = b >> 5; *a = al * 4 + al / 2; return pal16(pb + (b & 31) * 2); }
-    case 2: { int i = (tex8(base + idx / 4) >> (2 * (idx & 3))) & 3; if (c0t && !i) *a = 0; return pal16(p->pltt * 8 + i * 2); }
-    case 3: { int i = (tex8(base + idx / 2) >> (4 * (idx & 1))) & 15; if (c0t && !i) *a = 0; return pal16(pb + i * 2); }
-    case 4: { int i = tex8(base + idx); if (c0t && !i) *a = 0; return pal16(pb + i * 2); }
-    case 5: {
-        uint32_t blk = (uint32_t)((ti / 4) * (w / 4) + si / 4);
-        uint32_t ba = base + blk * 4;
-        int i = (tex8(ba + (ti & 3)) >> (2 * (si & 3))) & 3;
-        uint32_t ia = 0x20000 + ((ba & 0x1FFFF) >> 1) + (ba >= 0x40000 ? 0x10000 : 0);
-        uint16_t info = tex16(ia);
-        uint32_t pa = pb + (info & 0x3FFF) * 4;
-        int mode = info >> 14;
-        uint16_t c0 = pal16(pa), c1 = pal16(pa + 2);
-        switch (i) {
-        case 0: return c0;
-        case 1: return c1;
-        case 2:
-            if (mode == 0 || mode == 2) return pal16(pa + 4);
-            if (mode == 1) {
-                int r = ((c0 & 31) + (c1 & 31)) / 2, g = (((c0 >> 5) & 31) + ((c1 >> 5) & 31)) / 2, b = (((c0 >> 10) & 31) + ((c1 >> 10) & 31)) / 2;
-                return (uint16_t)(r | g << 5 | b << 10);
-            } else {
-                int r = ((c0 & 31) * 5 + (c1 & 31) * 3) / 8, g = (((c0 >> 5) & 31) * 5 + ((c1 >> 5) & 31) * 3) / 8, b = (((c0 >> 10) & 31) * 5 + ((c1 >> 10) & 31) * 3) / 8;
-                return (uint16_t)(r | g << 5 | b << 10);
-            }
-        default:
-            if (mode == 2) return pal16(pa + 6);
-            if (mode == 3) {
-                int r = ((c0 & 31) * 3 + (c1 & 31) * 5) / 8, g = (((c0 >> 5) & 31) * 3 + ((c1 >> 5) & 31) * 5) / 8, b = (((c0 >> 10) & 31) * 3 + ((c1 >> 10) & 31) * 5) / 8;
-                return (uint16_t)(r | g << 5 | b << 10);
-            }
-            *a = 0; return 0;
-        }
+static void plot_translucent(u32 pa, u32 color, u32 z, u32 polyattr, int shadow) {
+    u32 dstattr = abuf[pa];
+    u32 attr = (polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22) | (dstattr & 0xFF001F0F);
+    if (shadow) {
+        if (dstattr & (1u << 22)) { if ((dstattr & 0x007F0000) == (attr & 0x007F0000)) return; }
+        else if ((dstattr & 0x3F000000) == (polyattr & 0x3F000000)) return;
+    } else if ((dstattr & 0x007F0000) == (attr & 0x007F0000)) return;
+    if (!(dstattr & (1u << 15))) attr &= ~(1u << 15);
+    color = alpha_blend(color, cbuf[pa], color >> 24);
+    if (z != 0xFFFFFFFFu) zbuf[pa] = z;
+    cbuf[pa] = color;
+    abuf[pa] = attr;
+}
+
+/* ---------------------------------------------------------------- polygon edges */
+static void setup_left_edge(RPoly* rp, s32 y) {
+    HPoly* p = rp->p;
+    while (y >= p->v[rp->nextvl]->fpos[1] && rp->curvl != p->vbot) {
+        rp->curvl = rp->nextvl;
+        if (p->facing) { rp->nextvl = rp->curvl + 1; if (rp->nextvl >= p->n) rp->nextvl = 0; }
+        else { rp->nextvl = rp->curvl - 1; if ((s32)rp->nextvl < 0) rp->nextvl = p->n - 1; }
     }
-    case 6: { uint8_t b = tex8(base + idx); *a = b >> 3; return pal16(pb + (b & 7) * 2); }
-    case 7: { uint16_t c = tex16(base + idx * 2); *a = (c & 0x8000) ? 31 : 0; return c & 0x7FFF; }
-    default: return 0x7FFF;
+    rp->xl = slope_setup(&rp->sl, 0, p->v[rp->curvl]->fpos[0], p->v[rp->nextvl]->fpos[0], p->v[rp->curvl]->fpos[1], p->v[rp->nextvl]->fpos[1],
+                         p->w[rp->curvl], p->w[rp->nextvl], y, p->wbuf);
+}
+static void setup_right_edge(RPoly* rp, s32 y) {
+    HPoly* p = rp->p;
+    while (y >= p->v[rp->nextvr]->fpos[1] && rp->curvr != p->vbot) {
+        rp->curvr = rp->nextvr;
+        if (p->facing) { rp->nextvr = rp->curvr - 1; if ((s32)rp->nextvr < 0) rp->nextvr = p->n - 1; }
+        else { rp->nextvr = rp->curvr + 1; if (rp->nextvr >= p->n) rp->nextvr = 0; }
+    }
+    rp->xr = slope_setup(&rp->sr, 1, p->v[rp->curvr]->fpos[0], p->v[rp->nextvr]->fpos[0], p->v[rp->curvr]->fpos[1], p->v[rp->nextvr]->fpos[1],
+                         p->w[rp->curvr], p->w[rp->nextvr], y, p->wbuf);
+}
+static void setup_polygon(RPoly* rp, HPoly* p) {
+    u32 n = p->n, vtop = p->vtop, vbot = p->vbot;
+    rp->p = p;
+    rp->curvl = vtop; rp->curvr = vtop;
+    if (p->facing) {
+        rp->nextvl = rp->curvl + 1; if (rp->nextvl >= n) rp->nextvl = 0;
+        rp->nextvr = rp->curvr - 1; if ((s32)rp->nextvr < 0) rp->nextvr = n - 1;
+    } else {
+        rp->nextvl = rp->curvl - 1; if ((s32)rp->nextvl < 0) rp->nextvl = n - 1;
+        rp->nextvr = rp->curvr + 1; if (rp->nextvr >= n) rp->nextvr = 0;
+    }
+    if (p->ybot == p->ytop) {
+        vtop = 0; vbot = 0;
+        u32 i = 1;
+        if (p->v[i]->fpos[0] < p->v[vtop]->fpos[0]) vtop = i;
+        if (p->v[i]->fpos[0] > p->v[vbot]->fpos[0]) vbot = i;
+        i = n - 1;
+        if (p->v[i]->fpos[0] < p->v[vtop]->fpos[0]) vtop = i;
+        if (p->v[i]->fpos[0] > p->v[vbot]->fpos[0]) vbot = i;
+        rp->curvl = vtop; rp->nextvl = vtop; rp->curvr = vbot; rp->nextvr = vbot;
+        rp->xl = slope_setup_dummy(&rp->sl, 0, p->v[rp->curvl]->fpos[0], p->wbuf);
+        rp->xr = slope_setup_dummy(&rp->sr, 1, p->v[rp->curvr]->fpos[0], p->wbuf);
+    } else {
+        setup_left_edge(rp, p->ytop);
+        setup_right_edge(rp, p->ytop);
     }
 }
 
-static int clamp31(int v) { return v < 0 ? 0 : v > 31 ? 31 : v; }
+/* Common per-scanline setup: span ends, swapped edges, fill rules. */
+typedef struct {
+    s32 xstart, xend, wl, wr, zl, zr;
+    int l_fill, r_fill;
+    s32 l_len, r_len, l_cov, r_cov;
+    Interp *istart, *iend;
+    Vtx *vlcur, *vlnext, *vrcur, *vrnext;
+    int yedge;
+} Span;
 
-static void draw_triangle(const Poly* p, const SVtx* a, const SVtx* b, const SVtx* c, int wbuf, uint16_t disp3d) {
-    float area = (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
-    if (area == 0) return;
-    if (area < 0) { const SVtx* t = b; b = c; c = t; area = -area; }
-    int miny = (int)floorf(fminf(a->y, fminf(b->y, c->y)));
-    int maxy = (int)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
-    int minx = (int)floorf(fminf(a->x, fminf(b->x, c->x)));
-    int maxx = (int)ceilf(fmaxf(a->x, fmaxf(b->x, c->x)));
-    if (miny < 0) miny = 0; if (maxy > 191) maxy = 191;
-    if (minx < 0) minx = 0; if (maxx > 255) maxx = 255;
-    const SVtx* V[3] = { a, b, c };
-    /* edge k is opposite vertex k: from V[k+1] to V[k+2] */
-    float A[3], B[3], C[3]; int tl[3];
-    for (int k = 0; k < 3; k++) {
-        const SVtx* u = V[(k + 1) % 3]; const SVtx* v = V[(k + 2) % 3];
-        A[k] = u->y - v->y; B[k] = v->x - u->x; C[k] = u->x * v->y - v->x * u->y;
-        tl[k] = (A[k] > 0) || (A[k] == 0 && B[k] < 0);
+static void span_setup(RPoly* rp, s32 y, Span* sp, int wire, u32 polyalpha) {
+    HPoly* p = rp->p;
+    if (p->ytop != p->ybot) {
+        if (y >= p->v[rp->nextvl]->fpos[1] && rp->curvl != p->vbot) setup_left_edge(rp, y);
+        if (y >= p->v[rp->nextvr]->fpos[1] && rp->curvr != p->vbot) setup_right_edge(rp, y);
     }
-    float inv = 1.0f / area;
-    uint32_t attr = p->attr;
-    int alpha_poly = (attr >> 16) & 31;
-    int wire = alpha_poly == 0;
-    if (wire) alpha_poly = 31;
-    int mode = (attr >> 4) & 3;
-    int fmt = (p->teximg >> 26) & 7;
-    int textured = fmt != 0 && (disp3d & 1);
-    int depth_eq = (attr >> 14) & 1;
-    int id = (attr >> 24) & 63;
-    int alpha_test = (disp3d >> 2) & 1, aref = IO16_(0x340) & 31;
-    int blend = (disp3d >> 3) & 1;
-    int highlight = (disp3d >> 1) & 1;
-    int edge_mark = (disp3d >> 5) & 1;
-    float elen[3];
-    if (wire) for (int k = 0; k < 3; k++) elen[k] = sqrtf(A[k] * A[k] + B[k] * B[k]);
-    for (int y = miny; y <= maxy; y++) {
-        float py = y + 0.5f;
-        /* this row's span from the three edges (one pixel of margin; the exact
-         * test below still decides every pixel) */
-        float lo = (float)minx, hi = (float)maxx;
-        int empty = 0;
-        for (int k = 0; k < 3; k++) {
-            float r = B[k] * py + C[k];
-            if (A[k] > 0) { float b = -r / A[k] - 0.5f; if (b > lo) lo = b; }
-            else if (A[k] < 0) { float b = -r / A[k] - 0.5f; if (b < hi) hi = b; }
-            else if (r < 0) { empty = 1; break; }
+    sp->xstart = rp->xl; sp->xend = rp->xr;
+    sp->wl = interp_value(&rp->sl.interp, p->w[rp->curvl], p->w[rp->nextvl]);
+    sp->wr = interp_value(&rp->sr.interp, p->w[rp->curvr], p->w[rp->nextvr]);
+    sp->zl = interp_z(&rp->sl.interp, p->z[rp->curvl], p->z[rp->nextvl]);
+    sp->zr = interp_z(&rp->sr.interp, p->z[rp->curvr], p->z[rp->nextvr]);
+    /* right vertical edges are pushed 1px left (unless the span is a single pixel at x 0) */
+    if (rp->sr.increment == 0 && (rp->sl.increment != 0 || sp->xstart != sp->xend) && sp->xend != 0) sp->xend--;
+    int always = (r_disp & ((1 << 4) | (1 << 5))) || (polyalpha < 31 && (r_disp & (1 << 3))) || wire;
+    if (sp->xstart > sp->xend) {                                    /* swapped: draw from the right edge */
+        sp->vlcur = p->v[rp->curvr]; sp->vlnext = p->v[rp->nextvr];
+        sp->vrcur = p->v[rp->curvl]; sp->vrnext = p->v[rp->nextvl];
+        sp->istart = &rp->sr.interp; sp->iend = &rp->sl.interp;
+        slope_edge_params(&rp->sr, 1, &sp->l_len, &sp->l_cov);
+        slope_edge_params(&rp->sl, 1, &sp->r_len, &sp->r_cov);
+        s32 t;
+        t = sp->xstart; sp->xstart = sp->xend; sp->xend = t;
+        t = sp->wl; sp->wl = sp->wr; sp->wr = t;
+        t = sp->zl; sp->zl = sp->zr; sp->zr = t;
+        if (always) { sp->l_fill = 1; sp->r_fill = 1; }
+        else {
+            sp->l_fill = (rp->sr.negative || !rp->sr.xmajor)
+                || (y == p->ybot - 1 && rp->sr.xmajor && sp->vlnext->fpos[0] != sp->vrnext->fpos[0]);
+            sp->r_fill = (!rp->sl.negative && rp->sl.xmajor)
+                || (!(rp->sl.negative && rp->sl.xmajor) && rp->sr.increment == 0)
+                || (y == p->ybot - 1 && rp->sl.xmajor && sp->vlnext->fpos[0] != sp->vrnext->fpos[0]);
         }
-        if (empty || lo > hi + 2) continue;
-        int x0 = (int)floorf(lo) - 1, x1 = (int)ceilf(hi) + 1;
-        if (x0 < minx) x0 = minx;
-        if (x1 > maxx) x1 = maxx;
-        for (int x = x0; x <= x1; x++) {
-            float px = x + 0.5f;
-            float e[3]; int in = 1;
-            for (int k = 0; k < 3; k++) {
-                e[k] = A[k] * px + B[k] * py + C[k];
-                if (e[k] < 0 || (e[k] == 0 && !tl[k])) { in = 0; break; }
-            }
-            if (!in) continue;
-            if (wire) {
-                int near_edge = 0;
-                for (int k = 0; k < 3; k++) if (elen[k] > 0 && e[k] / elen[k] < 1.0f) near_edge = 1;
-                if (!near_edge) continue;
-            }
-            float l0 = e[0] * inv, l1 = e[1] * inv, l2 = e[2] * inv;
-            float iw = l0 * a->iw + l1 * b->iw + l2 * c->iw;
-            float depth = wbuf ? 1.0f / iw : (l0 * a->zn + l1 * b->zn + l2 * c->zn);
-            float dst = fb_depth[y][x];
-            if (depth_eq) { if (fabsf(depth - dst) > (wbuf ? 0.01f : 0x200 / 16777215.0f)) continue; }
-            else if (!(depth < dst)) continue;
-            float k0 = l0 * a->iw / iw, k1 = l1 * b->iw / iw, k2 = l2 * c->iw / iw;
-            int vr = clamp31((int)(k0 * a->r + k1 * b->r + k2 * c->r + 0.5f));
-            int vg = clamp31((int)(k0 * a->g + k1 * b->g + k2 * c->g + 0.5f));
-            int vb = clamp31((int)(k0 * a->b + k1 * b->b + k2 * c->b + 0.5f));
-            int r, g, bl, al;
-            if (mode == 2) {                                           /* toon / highlight */
-                uint16_t tc = IO16_(0x380 + (vr & 31) * 2);
-                if (!highlight) { vr = tc & 31; vg = (tc >> 5) & 31; vb = (tc >> 10) & 31; }
-                else { vg = vb = vr; }
-                if (textured) { (void)0; }
-                (void)tc;
-            }
-            if (textured) {
-                float s = k0 * a->s + k1 * b->s + k2 * c->s;
-                float t = k0 * a->t + k1 * b->t + k2 * c->t;
-                int ta;
-                uint16_t tcol = texel(p, (int)floorf(s), (int)floorf(t), &ta);
-                int tr = tcol & 31, tg = (tcol >> 5) & 31, tb = (tcol >> 10) & 31;
-                if (mode == 1) {                                       /* decal */
-                    r = (tr * ta + vr * (31 - ta)) / 31; g = (tg * ta + vg * (31 - ta)) / 31; bl = (tb * ta + vb * (31 - ta)) / 31;
-                    al = alpha_poly;
-                } else {                                               /* modulate (also toon/highlight) */
-                    r = ((tr + 1) * (vr + 1) - 1) >> 5; g = ((tg + 1) * (vg + 1) - 1) >> 5; bl = ((tb + 1) * (vb + 1) - 1) >> 5;
-                    al = ((ta + 1) * (alpha_poly + 1) - 1) >> 5;
-                }
-            } else { r = vr; g = vg; bl = vb; al = alpha_poly; }
-            if (mode == 2 && highlight) {
-                uint16_t tc = IO16_(0x380 + (vr & 31) * 2);
-                r = clamp31(r + (tc & 31)); g = clamp31(g + ((tc >> 5) & 31)); bl = clamp31(bl + ((tc >> 10) & 31));
-            }
-            if (al == 0) continue;
-            if (alpha_test && al <= aref) continue;
-            uint16_t col = (uint16_t)(r | g << 5 | bl << 10);
-            if (al >= 31) {
-                fb_color[y][x] = col; fb_alpha[y][x] = 31; fb_depth[y][x] = depth;
-                fb_id[y][x] = (uint8_t)id; fb_tid[y][x] = 0; fb_fog[y][x] = (attr >> 15) & 1;
-                fb_edge[y][x] = edge_mark ? (uint8_t)on_poly_edge(px, py) : 0;
-            } else {
-                if (fb_tid[y][x] == id + 1) continue;                  /* same translucent polygon id */
-                int da = fb_alpha[y][x];
-                if (blend && da) {
-                    uint16_t d = fb_color[y][x];
-                    int dr = d & 31, dg = (d >> 5) & 31, db = (d >> 10) & 31;
-                    r = (r * (al + 1) + dr * (31 - al)) / 32; g = (g * (al + 1) + dg * (31 - al)) / 32; bl = (bl * (al + 1) + db * (31 - al)) / 32;
-                    col = (uint16_t)(r | g << 5 | bl << 10);
-                    fb_alpha[y][x] = (uint8_t)(al > da ? al : da);
-                } else fb_alpha[y][x] = (uint8_t)al;
-                fb_color[y][x] = col;
-                fb_tid[y][x] = (uint8_t)(id + 1);
-                fb_fog[y][x] &= (attr >> 15) & 1;
-                if (attr & 0x800) fb_depth[y][x] = depth;
+    } else {
+        sp->vlcur = p->v[rp->curvl]; sp->vlnext = p->v[rp->nextvl];
+        sp->vrcur = p->v[rp->curvr]; sp->vrnext = p->v[rp->nextvr];
+        sp->istart = &rp->sl.interp; sp->iend = &rp->sr.interp;
+        slope_edge_params(&rp->sl, 0, &sp->l_len, &sp->l_cov);
+        slope_edge_params(&rp->sr, 0, &sp->r_len, &sp->r_cov);
+        if (always) { sp->l_fill = 1; sp->r_fill = 1; }
+        else {
+            sp->l_fill = ((rp->sl.negative || !rp->sl.xmajor)
+                || (y == p->ybot - 1 && rp->sl.xmajor && sp->vlnext->fpos[0] != sp->vrnext->fpos[0]))
+                || (rp->sl.increment == rp->sr.increment && sp->xstart + sp->l_len == sp->xend + 1);
+            sp->r_fill = (!rp->sr.negative && rp->sr.xmajor) || rp->sr.increment == 0
+                || (y == p->ybot - 1 && rp->sr.xmajor && sp->vlnext->fpos[0] != sp->vrnext->fpos[0]);
+        }
+    }
+    sp->yedge = y == p->ytop ? 0x4 : y == p->ybot - 1 ? 0x8 : 0;
+}
+
+static int depth_mode(const HPoly* p) {
+    if (p->attr & (1 << 14)) return p->wbuf ? 3 : 2;
+    return p->facing ? 1 : 0;
+}
+
+static void render_shadowmask_scanline(RPoly* rp, s32 y) {
+    HPoly* p = rp->p;
+    u32 polyalpha = (p->attr >> 16) & 0x1F;
+    int wire = polyalpha == 0, dm = depth_mode(p);
+    if (!prev_shadowmask) memset(&stencil[256 * (y & 1)], 0, 256);
+    prev_shadowmask = 1;
+    Span sp; span_setup(rp, y, &sp, wire, polyalpha);
+    if (wire) polyalpha = 31;
+    if (polyalpha <= r_alpharef) return;                            /* (the edges are not stepped either) */
+    Interp ix; interp_setup(&ix, 0, sp.xstart, sp.xend + 1, sp.wl, sp.wr, p->wbuf);
+    s32 x = sp.xstart; if (x < 0) x = 0;
+    for (int part = 0; part < 3; part++) {
+        s32 xlimit;
+        if (part == 0) { xlimit = sp.xstart + sp.l_len; if (xlimit > sp.xend + 1) xlimit = sp.xend + 1; if (xlimit > 256) xlimit = 256; if (!sp.l_fill) { x = xlimit; continue; } }
+        else if (part == 1) { xlimit = sp.xend - sp.r_len + 1; if (xlimit > sp.xend + 1) xlimit = sp.xend + 1; if (xlimit > 256) xlimit = 256; if (wire && !sp.yedge) { if (x < xlimit) x = xlimit; continue; } }
+        else { xlimit = sp.xend + 1; if (xlimit > 256) xlimit = 256; if (!sp.r_fill) continue; }
+        for (; x < xlimit; x++) {
+            u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+            interp_setx(&ix, x);
+            s32 z = interp_z(&ix, sp.zl, sp.zr);
+            u32 dstattr = abuf[pa];
+            if (!depth_test(dm, (s32)zbuf[pa], z, dstattr)) stencil[256 * (y & 1) + x] = 1;
+            if (dstattr & 0xF) {
+                if (!depth_test(dm, (s32)zbuf[pa + BUFSZ], z, abuf[pa + BUFSZ])) stencil[256 * (y & 1) + x] |= 2;
             }
         }
     }
+    rp->xl = slope_step(&rp->sl);
+    rp->xr = slope_step(&rp->sr);
 }
 
-static int poly_cmp_y(const void* x, const void* y) {
-    const Poly* a = *(const Poly* const*)x; const Poly* b = *(const Poly* const*)y;
-    if (a->ymax != b->ymax) return a->ymax < b->ymax ? -1 : 1;
-    if (a->ymin != b->ymin) return a->ymin < b->ymin ? -1 : 1;
-    return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/* Hardware drawing order: opaque polygons sorted by Y, then translucent ones
- * (sorted by Y unless SWAP_BUFFERS asked for manual order). */
-static int build_order(int buf, const Poly** order, int* n_opaque) {
-    int n = g_npoly[buf], no = 0;
-    for (int i = 0; i < n; i++) if (!g_polybuf[buf][i].translucent) order[no++] = &g_polybuf[buf][i];
-    qsort(order, no, sizeof order[0], poly_cmp_y);
-    int nt = no;
-    for (int i = 0; i < n; i++) if (g_polybuf[buf][i].translucent) order[nt++] = &g_polybuf[buf][i];
-    if (!(g_render_flags & 1)) qsort(order + no, nt - no, sizeof order[0], poly_cmp_y);
-    *n_opaque = no;
-    return nt;
-}
-
-double g_t3d_part[4];
-static void render_frame(int buf) {
-    double tA = ms_now();
-    uint16_t disp3d = IO16_(0x060);
-    uint32_t clear = IO32_(0x350);
-    uint16_t cdepth = IO16_(0x354) & 0x7FFF;
-    int wbuf = (g_render_flags >> 1) & 1;
-    float clear_d;
-    uint32_t d24 = (uint32_t)cdepth * 0x200 + ((cdepth + 1) / 0x8000) * 0x1FF;
-    if (cdepth == 0x7FFF) clear_d = INFINITY;
-    else clear_d = wbuf ? d24 / 4096.0f : d24 / 16777215.0f;
-    uint16_t ccol = clear & 0x7FFF;
-    uint8_t calpha = (clear >> 16) & 31, cid = (clear >> 24) & 63, cfog = (clear >> 15) & 1;
-    for (int y = 0; y < 192; y++)
-        for (int x = 0; x < 256; x++) {
-            fb_color[y][x] = ccol; fb_alpha[y][x] = calpha; fb_depth[y][x] = clear_d;
-            fb_id[y][x] = cid; fb_tid[y][x] = 0; fb_fog[y][x] = cfog; fb_edge[y][x] = 0;
+static void render_polygon_scanline(RPoly* rp, s32 y) {
+    HPoly* p = rp->p;
+    u32 polyattr = p->attr & 0x3F008000;
+    if (!p->facing) polyattr |= 1u << 4;
+    u32 polyalpha = (p->attr >> 16) & 0x1F;
+    int wire = polyalpha == 0, dm = depth_mode(p);
+    prev_shadowmask = 0;
+    Span sp; span_setup(rp, y, &sp, wire, polyalpha);
+    s32 rl = interp_value(sp.istart, sp.vlcur->fcol[0], sp.vlnext->fcol[0]);
+    s32 gl = interp_value(sp.istart, sp.vlcur->fcol[1], sp.vlnext->fcol[1]);
+    s32 bl = interp_value(sp.istart, sp.vlcur->fcol[2], sp.vlnext->fcol[2]);
+    s32 sl = interp_value(sp.istart, sp.vlcur->tex[0], sp.vlnext->tex[0]);
+    s32 tl = interp_value(sp.istart, sp.vlcur->tex[1], sp.vlnext->tex[1]);
+    s32 rr = interp_value(sp.iend, sp.vrcur->fcol[0], sp.vrnext->fcol[0]);
+    s32 gr = interp_value(sp.iend, sp.vrcur->fcol[1], sp.vrnext->fcol[1]);
+    s32 br = interp_value(sp.iend, sp.vrcur->fcol[2], sp.vrnext->fcol[2]);
+    s32 sr = interp_value(sp.iend, sp.vrcur->tex[0], sp.vrnext->tex[0]);
+    s32 tr = interp_value(sp.iend, sp.vrcur->tex[1], sp.vrnext->tex[1]);
+    Interp ix; interp_setup(&ix, 0, sp.xstart, sp.xend + 1, sp.wl, sp.wr, p->wbuf);
+    s32 x = sp.xstart; if (x < 0) x = 0;
+    s32 xcov = 0;
+    int aa = (r_disp & (1 << 4)) != 0;
+    for (int part = 0; part < 3; part++) {
+        s32 xlimit, edge, ecov = 0;
+        if (part == 0) {
+            edge = sp.yedge | 1;
+            xlimit = sp.xstart + sp.l_len; if (xlimit > sp.xend + 1) xlimit = sp.xend + 1; if (xlimit > 256) xlimit = 256;
+            ecov = sp.l_cov;
+            if (ecov & (1 << 31)) { xcov = (ecov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
+            if (!sp.l_fill) { x = xlimit; continue; }
+        } else if (part == 1) {
+            edge = sp.yedge;
+            xlimit = sp.xend - sp.r_len + 1; if (xlimit > sp.xend + 1) xlimit = sp.xend + 1; if (xlimit > 256) xlimit = 256;
+            if (wire && !edge) { if (x < xlimit) x = xlimit; continue; }
+        } else {
+            edge = sp.yedge | 2;
+            xlimit = sp.xend + 1; if (xlimit > 256) xlimit = 256;
+            ecov = sp.r_cov;
+            if (ecov & (1 << 31)) { xcov = (ecov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
+            if (!sp.r_fill) continue;
         }
-    double tB = ms_now(); g_t3d_part[0] += tB - tA;
-    int n = g_npoly[buf];
-    static const Poly* order[MAX_POLY];
-    int no;
-    int nt = build_order(buf, order, &no);
-    for (int i = 0; i < nt; i++) {
-        const Poly* p = order[i];
-        poly_edges(p);
-        for (int k = 1; k + 1 < p->n; k++) draw_triangle(p, &p->v[0], &p->v[k], &p->v[k + 1], wbuf, disp3d);
-    }
-    double tC = ms_now(); g_t3d_part[1] += tC - tB;
-    /* edge marking */
-    if (disp3d & 0x20) {
-        static uint16_t out[192][256];
-        for (int y = 0; y < 192; y++)
-            for (int x = 0; x < 256; x++) {
-                out[y][x] = fb_color[y][x];
-                if (fb_alpha[y][x] == 0 || !fb_edge[y][x]) continue;
-                uint8_t id = fb_id[y][x]; float d = fb_depth[y][x];
-                static const int dx[4] = { -1, 1, 0, 0 }, dy[4] = { 0, 0, -1, 1 };
-                for (int k = 0; k < 4; k++) {
-                    int nx = x + dx[k], ny = y + dy[k];
-                    if (nx < 0 || nx > 255 || ny < 0 || ny > 191) continue;
-                    if (fb_id[ny][nx] != id && d < fb_depth[ny][nx]) { out[y][x] = IO16_(0x330 + (id >> 3) * 2) & 0x7FFF; break; }
-                }
+        for (; x < xlimit; x++) {
+            u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+            u32 dstattr = abuf[pa];
+            if (p->shadow) {
+                u8 st = stencil[256 * (y & 1) + x];
+                if (!st) continue;
+                if (!(st & 1)) pa += BUFSZ;
+                if (!(st & 2)) dstattr &= ~0xFu;
             }
-        for (int y = 0; y < 192; y++) memcpy(fb_color[y], out[y], sizeof out[y]);
-    }
-    double tD = ms_now(); g_t3d_part[2] += tD - tC;
-    /* fog */
-    if (disp3d & 0x80) {
-        uint16_t fcol = IO16_(0x358) & 0x7FFF;
-        int falpha = g_io[0x35A] & 31;
-        int foff = IO16_(0x35C) & 0x7FFF;
-        int shift = (disp3d >> 8) & 15;
-        int alpha_only = (disp3d >> 6) & 1;
-        int step = 0x400 >> shift;
-        for (int y = 0; y < 192; y++)
-            for (int x = 0; x < 256; x++) {
-                if (!fb_fog[y][x]) continue;
-                float d = fb_depth[y][x];
-                if (isinf(d)) d = 1.0f;
-                int z15 = wbuf ? (int)(d * 4096.0f) >> 9 : (int)(d * 16777215.0f) >> 9;
-                int density;
-                if (step <= 0) density = (g_io[0x360 + 31] & 127);
-                else {
-                    int i = (z15 - foff) / step;
-                    if (i < 0) density = g_io[0x360] & 127;
-                    else if (i >= 31) density = g_io[0x360 + 31] & 127;
+            interp_setx(&ix, x);
+            s32 z = interp_z(&ix, sp.zl, sp.zr);
+            if (!depth_test(dm, (s32)zbuf[pa], z, dstattr)) {          /* failing the top pixel: try the one under it */
+                if (!(dstattr & 0xF) || pa >= BUFSZ) continue;
+                pa += BUFSZ;
+                dstattr = abuf[pa];
+                if (!depth_test(dm, (s32)zbuf[pa], z, dstattr)) continue;
+            }
+            u32 vr = (u32)interp_value(&ix, rl, rr), vg = (u32)interp_value(&ix, gl, gr), vb = (u32)interp_value(&ix, bl, br);
+            s16 s = (s16)interp_value(&ix, sl, sr), t = (s16)interp_value(&ix, tl, tr);
+            u32 color = render_pixel(p, (u8)(vr >> 3), (u8)(vg >> 3), (u8)(vb >> 3), s, t);
+            u8 alpha = (u8)(color >> 24);
+            if (alpha <= r_alpharef) continue;
+            if (alpha == 31) {
+                u32 attr = polyattr | (u32)edge;
+                if (aa && (part != 1 || (attr & 0xF))) {
+                    s32 cov;
+                    if (part == 1) cov = 0x1F;
                     else {
-                        int d0 = g_io[0x360 + i] & 127, d1 = g_io[0x360 + i + 1] & 127;
-                        int frac = (z15 - foff) - i * step;
-                        density = d0 + (d1 - d0) * frac / step;
+                        cov = ecov;
+                        if (cov & (1 << 31)) {
+                            if (part == 0) { cov = xcov >> 5; if (cov > 31) cov = 31; }
+                            else { cov = 0x1F - (xcov >> 5); if (cov < 0) cov = 0; }
+                            xcov += ecov & 0x3FF;
+                        }
                     }
+                    attr |= (u32)cov << 8;
+                    if (pa < BUFSZ) { cbuf[pa + BUFSZ] = cbuf[pa]; zbuf[pa + BUFSZ] = zbuf[pa]; abuf[pa + BUFSZ] = abuf[pa]; }
                 }
-                if (density >= 127) density = 128;
-                uint16_t c = fb_color[y][x];
-                if (!alpha_only) {
-                    int r = ((fcol & 31) * density + (c & 31) * (128 - density)) >> 7;
-                    int g = (((fcol >> 5) & 31) * density + ((c >> 5) & 31) * (128 - density)) >> 7;
-                    int b = (((fcol >> 10) & 31) * density + ((c >> 10) & 31) * (128 - density)) >> 7;
-                    fb_color[y][x] = (uint16_t)(r | g << 5 | b << 10);
-                }
-                fb_alpha[y][x] = (uint8_t)((falpha * density + fb_alpha[y][x] * (128 - density)) >> 7);
+                zbuf[pa] = (u32)z; cbuf[pa] = color; abuf[pa] = attr;
+            } else {
+                u32 zz = (p->attr & (1 << 11)) ? (u32)z : 0xFFFFFFFFu;
+                plot_translucent(pa, color, zz, polyattr, p->shadow);
+                if ((dstattr & 0xF) && pa < BUFSZ) plot_translucent(pa + BUFSZ, color, zz, polyattr, p->shadow);
             }
+        }
     }
-    g_t3d_part[3] += ms_now() - tD;
-    g_3d_have_frame = 1;
-    /* DQIX_POLYDUMP="frame,x,y": list the polygons covering pixel (x,y) */
-    const char* pd = getenv("DQIX_POLYDUMP");
-    unsigned long long pf; int px, py;
-    if (pd && sscanf(pd, "%llu,%d,%d", &pf, &px, &py) == 3 && g_frame >= pf && g_frame < pf + 1) {
-        fprintf(stderr, "VRAMCNT A-G: %02x %02x %02x %02x %02x %02x %02x\n", g_io[0x240], g_io[0x241], g_io[0x242], g_io[0x243], g_io[0x244], g_io[0x245], g_io[0x246]);
-        fprintf(stderr, "3D frame %llu: %d polygons, disp3dcnt %04x, pixel (%d,%d) = %04x a%d\n", (unsigned long long)g_frame, n, disp3d, px, py,
-                fb_color[py][px], fb_alpha[py][px]);
-        for (int i = 0; i < nt; i++) {
-            const Poly* p = order[i];
-            int inside = 1; float sgn = 0;
-            for (int k = 0; k < p->n; k++) {
-                const SVtx* u = &p->v[k]; const SVtx* v = &p->v[(k + 1) % p->n];
-                float e = (v->x - u->x) * (py + 0.5f - u->y) - (v->y - u->y) * (px + 0.5f - u->x);
-                if (e != 0) { if (sgn == 0) sgn = e; else if ((e > 0) != (sgn > 0)) { inside = 0; break; } }
-            }
-            if (!inside) continue;
-            fprintf(stderr, "  poly %d: attr %08x teximg %08x (fmt %u, %ux%u, mode %u) pltt %04x, %d verts\n", (int)(p - g_polybuf[buf]), p->attr, p->teximg,
-                    (p->teximg >> 26) & 7, 8u << ((p->teximg >> 20) & 7), 8u << ((p->teximg >> 23) & 7), p->teximg >> 30, p->pltt, p->n);
-            if (((p->teximg >> 26) & 7) == 3 && ((p->teximg >> 20) & 7) <= 2 && ((p->teximg >> 23) & 7) <= 2) {
-                int w = 8 << ((p->teximg >> 20) & 7), h = 8 << ((p->teximg >> 23) & 7);
-                uint32_t base = (p->teximg & 0xFFFF) * 8;
-                for (int y = 0; y < h; y++) {
-                    fprintf(stderr, "     ");
-                    for (int x = 0; x < w; x++) { int i = y * w + x; fprintf(stderr, "%x", (tex8(base + i / 2) >> (4 * (i & 1))) & 15); }
-                    fprintf(stderr, "\n");
-                }
-            }
-            fprintf(stderr, "     palette:");
-            for (int k = 0; k < 16; k++) fprintf(stderr, " %04x", pal16(p->pltt * 16 + k * 2));
-            fprintf(stderr, "\n");
-            for (int k = 0; k < p->n; k++)
-                fprintf(stderr, "     v%d: (%.1f,%.1f) z %.4f rgb %.1f,%.1f,%.1f st %.2f,%.2f\n", k, p->v[k].x, p->v[k].y, p->v[k].zn, p->v[k].r, p->v[k].g, p->v[k].b, p->v[k].s, p->v[k].t);
+    rp->xl = slope_step(&rp->sl);
+    rp->xr = slope_step(&rp->sr);
+}
+
+static void render_scanline(s32 y, int n) {
+    for (int i = 0; i < n; i++) {
+        RPoly* rp = &rpolys[i];
+        HPoly* p = rp->p;
+        if (y >= p->ytop && (y < p->ybot || (y == p->ytop && p->ybot == p->ytop))) {
+            if (p->shadowmask) render_shadowmask_scanline(rp, y);
+            else render_polygon_scanline(rp, y);
         }
     }
 }
 
-/* VBlank: SWAP_BUFFERS takes effect, the new list is rendered. */
+/* ---------------------------------------------------------------- final pass: edges, fog, anti-aliasing */
+static u32 fog_density(u32 pa) {
+    u32 z = zbuf[pa], id, frac;
+    if (z < r_fogoffset) { id = 0; frac = 0; }
+    else {
+        z -= r_fogoffset;
+        z = (z >> 2) << r_fogshift;
+        id = z >> 17;
+        if (id >= 32) { id = 32; frac = 0; } else frac = z & 0x1FFFF;
+    }
+    u32 d = (r_fogtab[id] * (0x20000 - frac) + r_fogtab[id + 1] * frac) >> 17;
+    if (d >= 127) d = 128;
+    return d;
+}
+
+static void apply_fog(u32 pa, u32 fr, u32 fg, u32 fb, u32 fa, int fogcolor) {
+    u32 d = fog_density(pa), c = cbuf[pa];
+    u32 r = c & 0x3F, g = (c >> 8) & 0x3F, b = (c >> 16) & 0x3F, a = (c >> 24) & 0x1F;
+    if (fogcolor) { r = (fr * d + r * (128 - d)) >> 7; g = (fg * d + g * (128 - d)) >> 7; b = (fb * d + b * (128 - d)) >> 7; }
+    a = (fa * d + a * (128 - d)) >> 7;
+    cbuf[pa] = r | (g << 8) | (b << 16) | (a << 24);
+}
+
+static void final_pass(s32 y) {
+    if (r_disp & (1 << 5)) {                                        /* edge marking (topmost pixels) */
+        for (int x = 0; x < 256; x++) {
+            u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+            u32 attr = abuf[pa];
+            if (!(attr & 0xF)) continue;
+            u32 id = attr >> 24, z = zbuf[pa];
+            if ((id != (abuf[pa - 1] >> 24) && z < zbuf[pa - 1]) || (id != (abuf[pa + 1] >> 24) && z < zbuf[pa + 1]) ||
+                (id != (abuf[pa - SW] >> 24) && z < zbuf[pa - SW]) || (id != (abuf[pa + SW] >> 24) && z < zbuf[pa + SW])) {
+                u32 er, eg, eb; expand5(r_edge[id >> 3], &er, &eg, &eb);
+                cbuf[pa] = er | (eg << 8) | (eb << 16) | (cbuf[pa] & 0xFF000000);
+                abuf[pa] = (abuf[pa] & 0xFFFFE0FF) | 0x00001000;
+            }
+        }
+    }
+    if (r_disp & (1 << 7)) {                                        /* fog (top two pixels) */
+        int fogcolor = !(r_disp & (1 << 6));
+        u32 fr, fg, fb; expand5(r_fogcolor, &fr, &fg, &fb);
+        u32 fa = (r_fogcolor >> 16) & 0x1F;
+        for (int x = 0; x < 256; x++) {
+            u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+            u32 attr = abuf[pa];
+            if (attr & (1u << 15)) apply_fog(pa, fr, fg, fb, fa, fogcolor);
+            if (!(attr & 0xF)) continue;
+            if (abuf[pa + BUFSZ] & (1u << 15)) apply_fog(pa + BUFSZ, fr, fg, fb, fa, fogcolor);
+        }
+    }
+    if (r_disp & (1 << 4)) {                                        /* anti-aliasing: blend edge pixels with the one under */
+        for (int x = 0; x < 256; x++) {
+            u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+            u32 attr = abuf[pa];
+            if (!(attr & 0xF)) continue;
+            u32 cov = (attr >> 8) & 0x1F;
+            if (cov == 0x1F) continue;
+            if (cov == 0) { cbuf[pa] = cbuf[pa + BUFSZ]; continue; }
+            u32 top = cbuf[pa], bot = cbuf[pa + BUFSZ];
+            u32 tr = top & 0x3F, tg = (top >> 8) & 0x3F, tb = (top >> 16) & 0x3F, ta = (top >> 24) & 0x1F;
+            u32 br = bot & 0x3F, bg = (bot >> 8) & 0x3F, bb = (bot >> 16) & 0x3F, ba = (bot >> 24) & 0x1F;
+            cov++;
+            if (ba > 0) { tr = (tr * cov + br * (32 - cov)) >> 5; tg = (tg * cov + bg * (32 - cov)) >> 5; tb = (tb * cov + bb * (32 - cov)) >> 5; }
+            ta = (ta * cov + ba * (32 - cov)) >> 5;
+            cbuf[pa] = tr | (tg << 8) | (tb << 16) | (ta << 24);
+        }
+    }
+}
+
+static void clear_buffers(void) {
+    u32 clearz = ((r_clear2 & 0x7FFF) * 0x200) + 0x1FF;
+    u32 polyid = r_clear1 & 0x3F000000;
+    for (int x = 0; x < SW; x++) { cbuf[x] = 0; zbuf[x] = clearz; abuf[x] = polyid; }
+    for (int x = SW; x < SW * 193; x += SW) {
+        cbuf[x] = 0; zbuf[x] = clearz; abuf[x] = polyid;
+        cbuf[x + 257] = 0; zbuf[x + 257] = clearz; abuf[x + 257] = polyid;
+    }
+    for (int x = SW * 193; x < SW * 194; x++) { cbuf[x] = 0; zbuf[x] = clearz; abuf[x] = polyid; }
+    if (r_disp & (1 << 14)) {                                       /* clear image from texture slots 2 and 3 */
+        u8 xoff = (r_clear2 >> 16) & 0xFF, yoff = (r_clear2 >> 24) & 0xFF;
+        for (int y = 0; y < 192; y++, yoff++) {
+            u8 xo = xoff;
+            for (int x = 0; x < 256; x++, xo++) {
+                u16 v2 = tex16(0x40000 + ((u32)yoff << 9) + ((u32)xo << 1));
+                u16 v3 = tex16(0x60000 + ((u32)yoff << 9) + ((u32)xo << 1));
+                u32 r, g, b; expand5(v2, &r, &g, &b);
+                u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+                cbuf[pa] = r | (g << 8) | (b << 16) | ((v2 & 0x8000) ? 0x1F000000u : 0);
+                zbuf[pa] = ((u32)(v3 & 0x7FFF) * 0x200) + 0x1FF;
+                abuf[pa] = polyid | (v3 & 0x8000);
+            }
+        }
+    } else {
+        u32 r, g, b; expand5(r_clear1, &r, &g, &b);
+        u32 color = r | (g << 8) | (b << 16) | (((r_clear1 >> 16) & 0x1F) << 24);
+        polyid |= r_clear1 & 0x8000;
+        for (int y = 0; y < 192; y++)
+            for (int x = 0; x < 256; x++) {
+                u32 pa = FIRSTPX + (u32)y * SW + (u32)x;
+                cbuf[pa] = color; zbuf[pa] = clearz; abuf[pa] = polyid;
+            }
+    }
+}
+
 double g_t3d_ms;
+double g_t3d_part[4];
+static void render_frame(void) {
+    double t0 = ms_now();
+    clear_buffers();
+    int j = 0;
+    for (u32 i = 0; i < render_n; i++) {
+        if (render_list[i]->degenerate) continue;
+        setup_polygon(&rpolys[j++], render_list[i]);
+    }
+    prev_shadowmask = 0;
+    render_scanline(0, j);
+    for (s32 y = 1; y < 192; y++) { render_scanline(y, j); final_pass(y - 1); }
+    final_pass(191);
+    g_3d_have_frame = 1;
+    g_t3d_part[1] += ms_now() - t0;
+}
+
+/* ================================================================ frame flow */
 const Renderer3D* g_renderer3d;
 int g_renderer3d_verify;
+static int g_render_pending;                                        /* a render is due at line 215 */
 
-void gpu3d_vblank(void) {
-    if (gxstat_irq_mode) irq_raise(&g_c9, IRQ_GXFIFO);
-    if (g_renderer3d) g_renderer3d->vblank();
-    if (!g_swap_pending) return;
-    g_swap_pending = 0;
-    { static int lg = -1; if (lg < 0) lg = getenv("DQIX_SWAPLOG") != NULL; if (lg) fprintf(stderr, "swap %llu\n", (unsigned long long)g_frame); }
-    g_render_flags = g_swap_flags;
-    int buf = g_geo;
-    g_geo ^= 1;
-    g_npoly[g_geo] = 0; g_nvert[g_geo] = 0;
-    double t0 = ms_now();
-    if (g_renderer3d) {
-        static const Poly* order[MAX_POLY];
-        Frame3D f;
-        f.order = order;
-        f.n = build_order(buf, order, &f.n_opaque);
-        f.wbuf = (g_render_flags >> 1) & 1;
-        g_renderer3d->render(&f);
-        g_3d_have_frame = 1;
+static int ysort_cmp(const void* a, const void* b) {
+    const HPoly* x = *(HPoly* const*)a; const HPoly* y = *(HPoly* const*)b;
+    if (x->sortkey != y->sortkey) return x->sortkey < y->sortkey ? -1 : 1;
+    return x < y ? -1 : x > y ? 1 : 0;                              /* stable: keep submission order */
+}
+
+/* GPU renderer: the render list as screen-space polygons with float attributes. */
+static Poly g_gl_polys[POLY_MAX];
+static const Poly* g_gl_order[POLY_MAX];
+static void gl_frame(void) {
+    int n = 0, nop = 0;
+    for (u32 i = 0; i < render_n; i++) {
+        HPoly* h = render_list[i];
+        if (h->degenerate) continue;
+        Poly* q = &g_gl_polys[n];
+        q->n = (int)h->n; q->attr = h->attr; q->teximg = h->texparam; q->pltt = h->texpal; q->translucent = h->translucent;
+        q->ymin = 1e9f; q->ymax = -1e9f;
+        for (u32 k = 0; k < h->n; k++) {
+            const Vtx* v = h->v[k];
+            SVtx* o = &q->v[k];
+            o->x = v->hpos[0] / 16.0f; o->y = v->hpos[1] / 16.0f;
+            o->zn = h->wbuf ? (float)h->z[k] / 16777215.0f : (float)h->z[k] / 16777215.0f;
+            o->iw = v->pos[3] ? 4096.0f / (float)v->pos[3] : 1e6f;
+            o->r = v->fcol[0] / 16.0f; o->g = v->fcol[1] / 16.0f; o->b = v->fcol[2] / 16.0f;
+            o->s = v->tex[0] / 16.0f; o->t = v->tex[1] / 16.0f;
+            if (o->y < q->ymin) q->ymin = o->y;
+            if (o->y > q->ymax) q->ymax = o->y;
+        }
+        if (!h->translucent) nop++;
+        g_gl_order[n] = q;
+        n++;
     }
-    if (!g_renderer3d || g_renderer3d_verify) render_frame(buf);
+    Frame3D f;
+    f.order = g_gl_order; f.n = n; f.n_opaque = nop;
+    f.wbuf = render_n ? render_list[0]->wbuf : 0;
+    g_renderer3d->render(&f);
+    g_3d_have_frame = 1;
+}
+
+/* VBlank (scanline 192): latch the rendering registers; a pending FLUSH swaps
+ * the polygon RAM banks and makes the new list the one to render. */
+void gpu3d_vblank(void) {
+    if (gx_irq_line()) irq_raise(&g_c9, IRQ_GXFIFO);
+    if (g_renderer3d) g_renderer3d->vblank();
+    int new_list = 0;
+    if (flush_request) {
+        u32 io = 0, it = n_opaque;
+        for (u32 i = 0; i < n_poly; i++) { HPoly* p = &cur_pram[i]; if (p->translucent) render_list[it++] = p; else render_list[io++] = p; }
+        u32 nsort = (flush_attr & 1) ? n_opaque : n_poly;
+        qsort(render_list, nsort, sizeof render_list[0], ysort_cmp);
+        render_n = n_poly;
+        new_list = 1;
+        static int lg = -1; if (lg < 0) lg = getenv("DQIX_SWAPLOG") != NULL;
+        if (lg) fprintf(stderr, "swap %llu\n", (unsigned long long)g_frame);
+    }
+    r_disp = IO16_(0x060);
+    r_alpharef = (r_disp & (1 << 2)) ? (IO8_(0x340) & 0x1F) : 0;
+    memcpy(r_edge, &g_io[0x330], 16);
+    memcpy(r_toon, &g_io[0x380], 64);
+    r_fogcolor = IO32_(0x358);
+    r_fogoffset = (u32)(IO16_(0x35C) & 0x7FFF) * 0x200;
+    r_fogshift = (r_disp >> 8) & 0xF;
+    for (int i = 0; i < 32; i++) r_fogtab[i + 1] = g_io[0x360 + i] & 0x7F;
+    r_fogtab[0] = r_fogtab[1]; r_fogtab[33] = r_fogtab[32];
+    r_clear1 = IO32_(0x350); r_clear2 = IO32_(0x354);
+    if (flush_request) {
+        cur_bank ^= 1;
+        cur_vram = &vram_bank_v[cur_bank ? VTX_MAX : 0];
+        cur_pram = &pram[cur_bank ? POLY_MAX : 0];
+        n_vtx = 0; n_poly = 0; n_opaque = 0;
+        flush_request = 0;
+    }
+    if (g_renderer3d && new_list) gl_frame();
+    g_render_pending = 1;
+}
+
+/* Scanline 215: draw the frame (shown during the next frame). */
+void gpu3d_render_start(void) {
+    if (!g_render_pending) return;
+    g_render_pending = 0;
+    if (g_renderer3d && !g_renderer3d_verify) return;
+    double t0 = ms_now();
+    render_frame();
     g_t3d_ms += ms_now() - t0;
 }
 
-const uint16_t* gpu3d_soft_color(void) { return &fb_color[0][0]; }
-const uint8_t*  gpu3d_soft_alpha(void) { return &fb_alpha[0][0]; }
+/* ---------------------------------------------------------------- output to the 2D engine */
+extern u32 g_3d_line32[256];                                         /* 6-bit colour | alpha << 24 (0 = clear) */
+extern int g_3d_present;
 
-/* ---------------------------------------------------------------- texture helpers for renderers */
-int gpu3d_tex_size(uint32_t ti, int* w, int* h) {
+void gpu3d_render_line(int line) {
+    if (!g_3d_have_frame || g_renderer3d) { g_3d_present = 0; return; }
+    g_3d_present = 1;
+    const u32* raw = &cbuf[FIRSTPX + (u32)line * SW];
+    u32 xpos = IO16_(0x010) & 0x1FF;                                 /* BG0HOFS scrolls the 3D layer */
+    if (xpos == 0) { memcpy(g_3d_line32, raw, 256 * 4); return; }
+    if (xpos & 0x100) {
+        int i = 0, j = (int)xpos;
+        for (; j < 512; i++, j++) g_3d_line32[i] = 0;
+        for (j = 0; i < 256; i++, j++) g_3d_line32[i] = raw[j];
+    } else {
+        int i = 0, j = (int)xpos;
+        for (; j < 256; i++, j++) g_3d_line32[i] = raw[j];
+        for (; i < 256; i++) g_3d_line32[i] = 0;
+    }
+}
+
+/* Software renderer output (tests, GPU-renderer verification). */
+const u32* gpu3d_soft_line(int line) { return &cbuf[FIRSTPX + (u32)line * SW]; }
+
+/* ---------------------------------------------------------------- texture helpers for the GPU renderer */
+int gpu3d_tex_size(u32 ti, int* w, int* h) {
     *w = 8 << ((ti >> 20) & 7); *h = 8 << ((ti >> 23) & 7);
     return ((ti >> 26) & 7) != 0;
 }
 
-void gpu3d_decode_texture(uint32_t ti, uint32_t pl, uint8_t* rgba) {
-    Poly p;
-    p.teximg = ti & ~(0xFu << 16);              /* no repeat/flip: texels are inside anyway */
-    p.pltt = pl;
+void gpu3d_decode_texture(u32 ti, u32 pl, uint8_t* rgba) {
     int w, h; gpu3d_tex_size(ti, &w, &h);
+    u32 tp = ti & ~(0xFu << 16);                                    /* no repeat/flip: texels are inside anyway */
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            int a;
-            uint16_t c = texel(&p, x, y, &a);
+            u16 c; u8 a;
+            texture_lookup(tp, pl, x << 4, y << 4, &c, &a);
             uint8_t* o = rgba + (y * w + x) * 4;
             int r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
             o[0] = (uint8_t)(r << 3 | r >> 2); o[1] = (uint8_t)(g << 3 | g >> 2); o[2] = (uint8_t)(b << 3 | b >> 2);
@@ -925,16 +1491,16 @@ void gpu3d_decode_texture(uint32_t ti, uint32_t pl, uint8_t* rgba) {
 
 /* Hash of everything a texture is made from: its texels, the 4x4 format's
  * index data, and its palette (with the current VRAM slot mapping). */
-static uint64_t hash_range(uint64_t h, uint32_t addr, uint32_t len, int pal) {
+static u64 hash_range(u64 h, u32 addr, u32 len, int pal) {
     while (len) {
         uint8_t* base = pal ? g_texpal_slot[(addr >> 14) < 6 ? addr >> 14 : 0] : g_tex_slot[(addr >> 17) & 3];
-        uint32_t span = pal ? 0x4000 - (addr & 0x3FFF) : 0x20000 - (addr & 0x1FFFF);
+        u32 span = pal ? 0x4000 - (addr & 0x3FFF) : 0x20000 - (addr & 0x1FFFF);
         if (span > len) span = len;
-        h = (h ^ (uint64_t)(uintptr_t)base) * 0x100000001B3ull;
+        h = (h ^ (u64)(uintptr_t)base) * 0x100000001B3ull;
         if (base) {
             const uint8_t* q = base + (pal ? (addr & 0x3FFF) : (addr & 0x1FFFF));
-            uint32_t i = 0;
-            for (; i + 8 <= span; i += 8) { uint64_t v; memcpy(&v, q + i, 8); h = (h ^ v) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
+            u32 i = 0;
+            for (; i + 8 <= span; i += 8) { u64 v; memcpy(&v, q + i, 8); h = (h ^ v) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
             for (; i < span; i++) h = (h ^ q[i]) * 0x100000001B3ull;
         }
         addr += span; len -= span;
@@ -942,14 +1508,14 @@ static uint64_t hash_range(uint64_t h, uint32_t addr, uint32_t len, int pal) {
     return h;
 }
 
-uint64_t gpu3d_texture_hash(uint32_t ti, uint32_t pl) {
+u64 gpu3d_texture_hash(u32 ti, u32 pl) {
     int w, h; gpu3d_tex_size(ti, &w, &h);
     int fmt = (ti >> 26) & 7;
-    uint32_t base = (ti & 0xFFFF) * 8, n = (uint32_t)(w * h);
-    uint64_t hs = 0xCBF29CE484222325ull ^ ((uint64_t)(ti & 0x3FF0FFFFu) << 16) ^ pl;
-    static const uint32_t bits[8] = { 0, 8, 2, 4, 8, 2, 8, 16 };
+    u32 base = (ti & 0xFFFF) * 8, n = (u32)(w * h);
+    u64 hs = 0xCBF29CE484222325ull ^ ((u64)(ti & 0x3FF0FFFFu) << 16) ^ pl;
+    static const u32 bits[8] = { 0, 8, 2, 4, 8, 2, 8, 16 };
     hs = hash_range(hs, base, n * bits[fmt] / 8, 0);
-    uint32_t pb = pl * 16;
+    u32 pb = pl * 16;
     switch (fmt) {
     case 1: hs = hash_range(hs, pb, 64, 1); break;
     case 2: hs = hash_range(hs, pl * 8, 8, 1); break;
@@ -957,11 +1523,10 @@ uint64_t gpu3d_texture_hash(uint32_t ti, uint32_t pl) {
     case 4: hs = hash_range(hs, pb, 512, 1); break;
     case 6: hs = hash_range(hs, pb, 16, 1); break;
     case 5: {
-        uint32_t ia = 0x20000 + ((base & 0x1FFFF) >> 1) + (base >= 0x40000 ? 0x10000 : 0);
+        u32 ia = 0x20000 + ((base & 0x1FFFF) >> 1) + (base >= 0x40000 ? 0x10000 : 0);
         hs = hash_range(hs, ia, n / 8, 0);
-        /* palette: up to the largest offset the blocks use */
-        uint32_t maxoff = 0;
-        for (uint32_t i = 0; i < n / 16; i++) { uint32_t o = (tex16(ia + i * 2) & 0x3FFF) * 4; if (o > maxoff) maxoff = o; }
+        u32 maxoff = 0;
+        for (u32 i = 0; i < n / 16; i++) { u32 o = (u32)(tex16(ia + i * 2) & 0x3FFF) * 4; if (o > maxoff) maxoff = o; }
         hs = hash_range(hs, pb, maxoff + 8, 1);
         break;
     }
@@ -970,18 +1535,8 @@ uint64_t gpu3d_texture_hash(uint32_t ti, uint32_t pl) {
     return hs;
 }
 
-extern uint16_t g_3d_line[256];
-extern uint8_t g_3d_alpha[256];
-extern int g_3d_present;
-
-void gpu3d_render_line(int line) {
-    if (!g_3d_have_frame) { g_3d_present = 0; return; }
-    g_3d_present = 1;
-    memcpy(g_3d_line, fb_color[line], sizeof g_3d_line);
-    memcpy(g_3d_alpha, fb_alpha[line], sizeof g_3d_alpha);
-}
-
 void gpu3d_init(void) {
     mtx_identity(m_proj); mtx_identity(m_pos); mtx_identity(m_vec); mtx_identity(m_tex);
     clip_dirty = 1;
+    cur_bank = 0; cur_vram = vram_bank_v; cur_pram = pram;
 }

@@ -9,11 +9,37 @@ static uint8_t g_card_buf[0x4000];
 static uint32_t g_card_len, g_card_pos;
 static Core* g_card_owner;
 
+/* Transfer timing, like the hardware: the command and the gap-1 delay, then
+ * each data word takes 4 bus cycles, with the gap-2 delay before every
+ * 0x200-byte block. A bus cycle is 5 or 8 system cycles (ROMCTRL bit 27).
+ * The game reads words as they arrive, so reading early waits for them. */
+static uint64_t g_card_t0;            /* when the first data word is ready */
+static uint32_t g_card_xfer, g_card_gap2;
+static int g_card_timing = -1;        /* DQIX_CARD_INSTANT=1 turns timing off (tests) */
+
+static uint64_t word_ready_time(uint32_t pos) {
+    uint32_t i = pos / 4;
+    return g_card_t0 + (uint64_t)g_card_xfer * (4u * i + g_card_gap2 * (pos / 0x200));
+}
+/* Wait (emulated time passes) until the word at the read position has arrived. */
+void cpu_time_sync(void);
+static void wait_for_word(void) {
+    if (!g_card_timing || g_card_pos >= g_card_len) return;
+    cpu_time_sync();
+    uint64_t ready = word_ready_time(g_card_pos), now = time_cycles();
+    if (now < ready) time_spend((uint32_t)(ready - now));
+}
+
 static void rom_start(Core* k, uint32_t ctl) {
     const uint8_t* cmd = &g_io[0x1A8];
     uint32_t bs = (ctl >> 24) & 7;
     uint32_t len = bs == 0 ? 0 : bs == 7 ? 4 : 0x100u << bs;
     g_card_len = len; g_card_pos = 0; g_card_owner = k;
+    if (g_card_timing < 0) g_card_timing = getenv("DQIX_CARD_INSTANT") == NULL;
+    g_card_xfer = (ctl & (1u << 27)) ? 8 : 5;
+    g_card_gap2 = (ctl >> 16) & 0x3F;
+    uint32_t cmddelay = 8 + (ctl & 0x1FFF) + (len ? g_card_gap2 : 0);
+    g_card_t0 = time_cycles() + (uint64_t)g_card_xfer * (cmddelay + 4);
     if (cmd[0] == 0xB7) {
         uint32_t addr = ((uint32_t)cmd[1] << 24) | (cmd[2] << 16) | (cmd[3] << 8) | cmd[4];
         for (uint32_t i = 0; i < len; i++) {
@@ -27,6 +53,9 @@ static void rom_start(Core* k, uint32_t ctl) {
             LOG_DEBUG("card: dma%d ctl %08x src %08x dst %08x\n", ch, k->dma[ch].ctl, k->dma[ch].src, k->dma[ch].dst);
         }
         LOG_DEBUG("card: %s reads %x bytes at %08x (ctl %08x, spicnt %04x, card dma %x, lr %08x)\n", k->name, len, addr, ctl, IO16(0x1A0), dmas, k->cpu->r[14]);
+        { static int lg = -1; if (lg < 0) lg = getenv("DQIX_CARDLOG") != NULL;
+          if (lg) { uint32_t dctl = 0; for (int ch = 0; ch < 4; ch++) if (dmas & (1 << ch)) dctl = k->dma[ch].ctl;
+                    fprintf(stderr, "card f%llu %s len %x ctl %08x spicnt %04x dma %x dmactl %08x\n", (unsigned long long)g_frame, k->name, len, ctl, IO16(0x1A0), dmas, dctl); } }
     } else if (cmd[0] == 0xB8) {
         for (uint32_t i = 0; i < len; i += 4) { uint32_t id = 0x00003FC2; memcpy(&g_card_buf[i], &id, 4); }
     } else {
@@ -34,7 +63,7 @@ static void rom_start(Core* k, uint32_t ctl) {
         LOG_WARN("card: command %02x not emulated\n", cmd[0]);
     }
     if (len == 0) { ctl &= ~0x80000000u; memcpy(&g_io[0x1A4], &ctl, 4); return; }
-    ctl |= 0x00800000u;  /* data word ready */
+    ctl |= 0x00800000u;  /* data word ready (card_read reports it only once it has arrived) */
     memcpy(&g_io[0x1A4], &ctl, 4);
     /* A card DMA moves its word count per "word ready" event (usually 1, repeating):
      * keep signalling until the transfer is drained or no card DMA is armed. */
@@ -51,6 +80,7 @@ static void rom_start(Core* k, uint32_t ctl) {
 uint32_t card_read_data(Core* k) {
     (void)k;
     uint32_t v = 0xFFFFFFFF;
+    wait_for_word();
     if (g_card_pos < g_card_len) {
         memcpy(&v, &g_card_buf[g_card_pos], 4);
         g_card_pos += 4;
@@ -154,9 +184,13 @@ static uint8_t backup_xfer(uint8_t in, int hold) {
 
 /* ---------------------------------------------------------------- registers */
 uint32_t card_read(Core* k, uint32_t off, int size) {
-    (void)k;
     uint32_t v; memcpy(&v, &g_io[off & ~3u], 4);
     (void)size;
+    if ((off & ~3u) == 0x1A4 && g_card_timing > 0 && (v & 0x80000000u) && g_card_pos < g_card_len) {
+        /* the game polls "word ready": it is set once the next word has arrived */
+        if (k == &g_c9) cpu_time_sync();
+        if (time_cycles() < word_ready_time(g_card_pos)) { v &= ~0x00800000u; time_poll(k); }
+    }
     return v;
 }
 

@@ -35,10 +35,57 @@ static int g_headless;          /* DQIX_NOWINDOW: run without a window (still us
 static int g_gl;                /* OpenGL renderer active (else SDL_Renderer + software 3D) */
 static SDL_GLContext g_glctx;
 static int g_scale3d = 2;
-extern int g_comp_gl;
 extern void (*g_report_capture)(uint32_t out[2][256 * 192]);
 extern void (*g_report_perf)(FILE* f);
 static void perf_write(FILE* f);
+static int g_classic = 1;       /* Classic: the DS's own 3D renderer, exact; Enhanced: 3D on the GPU at 1-4x */
+extern int g_comp_gl;
+
+/* ---------------------------------------------------------------- settings.ini
+ * Remembers the player's choices between launches (next to the game). */
+static const char* SETTINGS = "settings.ini";
+static void settings_load(void) {
+    FILE* f = fopen(SETTINGS, "r");
+    if (!f) return;
+    char line[200];
+    while (fgets(line, sizeof line, f)) {
+        char key[64]; char val[64];
+        if (line[0] == '#' || sscanf(line, " %63[^= ] = %63s", key, val) != 2) continue;
+        if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
+        else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
+        else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
+        else if (!strcmp(key, "layout")) g_side_by_side = !strcmp(val, "side_by_side");
+        else if (!strcmp(key, "fullscreen")) g_fullscreen = atoi(val) != 0;
+    }
+    fclose(f);
+}
+static void settings_save(void) {
+    if (g_headless || getenv("DQIX_NO_SETTINGS")) return;
+    FILE* f = fopen(SETTINGS, "w");
+    if (!f) return;
+    fprintf(f, "# Dragon Quest IX (PC) settings. The game saves this when you change something.\n");
+    fprintf(f, "# mode: classic (exactly like the DS) or enhanced (sharper 3D on the graphics card). F5 switches.\n");
+    fprintf(f, "mode = %s\n", g_classic ? "classic" : "enhanced");
+    fprintf(f, "# 3D resolution in enhanced mode: 1 to 4 (F4)\n");
+    fprintf(f, "resolution_3d = %d\n", g_scale3d);
+    fprintf(f, "# window size: 1 to 8 times the DS screens (F3)\n");
+    fprintf(f, "window_scale = %d\n", g_scale);
+    fprintf(f, "# stacked or side_by_side (F2)\n");
+    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : "stacked");
+    fprintf(f, "# 0 or 1 (F11)\n");
+    fprintf(f, "fullscreen = %d\n", g_fullscreen);
+    fclose(f);
+}
+
+/* Classic or Enhanced: which 3D renderer runs. Without OpenGL 3.3 only Classic exists. */
+static void apply_mode(void) {
+    if (!g_gl) g_classic = 1;
+    if (g_classic) {
+        g_renderer3d = NULL; g_comp_gl = 0; g_report_capture = NULL;
+    } else {
+        g_renderer3d = gl_renderer3d(); g_comp_gl = 1; g_report_capture = gl_read_screens;
+    }
+}
 
 /* Audio drives the pacing: the game runs ~100 ms ahead of what is being
  * heard, so a slow frame only eats into that cushion instead of causing a
@@ -92,10 +139,7 @@ static int try_gl(void) {
         SDL_GL_DeleteContext(g_glctx); SDL_DestroyWindow(g_win); g_win = NULL; return 0;
     }
     g_gl = 1;
-    g_renderer3d = gl_renderer3d();
     g_renderer3d_verify = getenv("DQIX_GL_VERIFY") != NULL;
-    g_comp_gl = 1;
-    g_report_capture = gl_read_screens;
     return 1;
 }
 
@@ -104,6 +148,8 @@ void frontend_init(int argc, char** argv) {
     SDL_SetMainReady();
     g_report_perf = perf_write;
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
+    if (!getenv("DQIX_NO_SETTINGS")) settings_load();
+    if (getenv("DQIX_MODE")) g_classic = strcmp(getenv("DQIX_MODE"), "enhanced") != 0;   /* tests */
     if (SDL_Init((g_headless ? 0 : SDL_INIT_VIDEO) | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         exit(1);
@@ -121,7 +167,10 @@ void frontend_init(int argc, char** argv) {
             SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
             g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
         }
+        apply_mode();
         layout_window();
+        if (g_fullscreen) SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        atexit(settings_save);
     }
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -269,8 +318,9 @@ static uint64_t g_perf_end;                                  /* end of the previ
 static double ticks_ms(uint64_t t) { return (double)t * 1000.0 / (double)g_perf_freq; }
 
 static void perf_write(FILE* f) {
+    fprintf(f, "mode: %s\n", g_classic ? "classic (DS 3D renderer)" : "enhanced (3D on the GPU)");
     fprintf(f, "renderer: %s\n", g_gl ? gl_renderer_name() : "software (no OpenGL 3.3)");
-    if (g_gl) fprintf(f, "3D resolution: %dx\n", gl_render_scale());
+    if (g_gl && !g_classic) fprintf(f, "3D resolution: %dx\n", gl_render_scale());
     fprintf(f, "audio: %s\n\n", g_audio ? "on" : "off");
     fprintf(f, "Per frame, in ms. A frame must take under 16.7 ms in total (busy + present) to keep full speed.\n");
     fprintf(f, "busy = all work for the frame: game = game code, 2d = 2D layers, gl = 3D on the GPU, upload = new textures (inside gl),\n");
@@ -343,11 +393,13 @@ void frontend_frame(void) {
             if (e.key.keysym.scancode == SDL_SCANCODE_F11 && g_win) {
                 g_fullscreen = !g_fullscreen;
                 SDL_SetWindowFullscreen(g_win, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                settings_save();
             }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F2 && g_win) { g_side_by_side = !g_side_by_side; layout_window(); }
-            if (e.key.keysym.scancode == SDL_SCANCODE_F3 && g_win) { g_scale = g_scale % 4 + 1; layout_window(); }
+            if (e.key.keysym.scancode == SDL_SCANCODE_F2 && g_win) { g_side_by_side = !g_side_by_side; layout_window(); settings_save(); }
+            if (e.key.keysym.scancode == SDL_SCANCODE_F3 && g_win) { g_scale = g_scale % 4 + 1; layout_window(); settings_save(); }
             if (e.key.keysym.scancode == SDL_SCANCODE_F12) g_shot_req = 1;
-            if (e.key.keysym.scancode == SDL_SCANCODE_F4 && g_gl) { g_scale3d = g_scale3d % 4 + 1; gl_render_set_scale(g_scale3d); }
+            if (e.key.keysym.scancode == SDL_SCANCODE_F4 && g_gl && !g_classic) { g_scale3d = g_scale3d % 4 + 1; gl_render_set_scale(g_scale3d); settings_save(); }
+            if (e.key.keysym.scancode == SDL_SCANCODE_F5 && g_gl) { g_classic = !g_classic; apply_mode(); settings_save(); g_fps_t0 = 0; }
             if (e.key.keysym.scancode == SDL_SCANCODE_F10) {
                 report_write("F10 pressed");
                 if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
@@ -414,7 +466,8 @@ void frontend_frame(void) {
     g_fps_frames++;
     if (g_win && now - g_fps_t0 > g_perf_freq) {
         char title[96];
-        snprintf(title, sizeof title, "Dragon Quest IX - %.1f fps%s", g_fps_frames * (double)g_perf_freq / (double)(now - g_fps_t0), g_fast ? " (fast)" : "");
+        snprintf(title, sizeof title, "Dragon Quest IX - %s - %.1f fps%s", g_classic ? "Classic" : "Enhanced",
+                 g_fps_frames * (double)g_perf_freq / (double)(now - g_fps_t0), g_fast ? " (fast)" : "");
         SDL_SetWindowTitle(g_win, title);
         g_fps_frames = 0; g_fps_t0 = now;
     }

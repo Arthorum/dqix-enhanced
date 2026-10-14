@@ -10,9 +10,10 @@ natively, plus the runtime that stands in for the DS hardware.
   opening in Angel Falls and the first battle all render.
 * Milestone 4 (done): a playable PC build. Window, keyboard / mouse / gamepad,
   sound, frame pacing (SDL2). Built on Windows with `build-pc.bat`.
-* Milestone 5 (now): enhancements. 3D drawn on the graphics card (OpenGL 3.3)
-  at 1-4x resolution; the 2D layers are still drawn exactly like the DS and
-  combined with the 3D on the graphics card.
+* Milestone 5 (done): Classic mode, the game exactly as a DS shows and plays
+  it (see "Classic and Enhanced" below), and Enhanced mode, with 3D drawn on
+  the graphics card at 1-4x resolution.
+* Next: more Enhanced features (widescreen, top-screen map), always optional.
 
 ## Building the PC version (Windows)
 
@@ -29,21 +30,32 @@ the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
 | START / SELECT | Enter / Right Shift | Start / Back |
 | touch screen | left mouse button on the bottom screen | |
 
-Tab (hold) = fast forward, F2 = screens side by side, F3 = window size,
-F4 = 3D resolution (1x / 2x / 3x / 4x, starts at 2x), F11 = fullscreen,
-F12 = screenshot, F10 = bug report, Esc = quit.
+Tab (hold) = fast forward, F5 = Classic / Enhanced, F2 = screens side by side,
+F3 = window size, F4 = 3D resolution in Enhanced (1x / 2x / 3x / 4x),
+F11 = fullscreen, F12 = screenshot, F10 = bug report, Esc = quit.
 
-**Graphics.** 3D is drawn by the graphics card when it supports OpenGL 3.3
-(nearly every PC from the last 12 years). If it doesn't, the game falls back
-to the original software renderer by itself. To force the software renderer,
-start it with `set DQIX_SOFTWARE=1` in `play.bat`; `set DQIX_SCALE3D=4` picks
-the starting 3D resolution.
+**Classic and Enhanced.** The game starts in **Classic** mode: the two
+screens exactly as a DS draws them (256x192 each, 6-bit colour, the DS's
+blending, fading and 3D rasterizer, scaled up with sharp square pixels), with
+DS sound (the console's mixer, volume and pitch tables, 10-bit output) and
+DS timing (CPU speed, cartridge loading speed). Frames were checked against a
+reference DS emulator and match pixel for pixel. **Enhanced** (F5) draws the
+3D on the graphics card at 1-4x resolution (F4); the 2D is unchanged. The game
+itself runs the same in both modes, so you can switch at any time.
+
+**Settings.** The game remembers the mode, 3D resolution, window size,
+layout and fullscreen in `settings.ini` next to `dqix.exe` (delete it to go
+back to the defaults). Enhanced needs OpenGL 3.3 (nearly every PC from the
+last 12 years); without it, the game stays in Classic. `set DQIX_SOFTWARE=1`
+in `play.bat` forces Classic.
 
 **Bug reports.** F10 (or a crash) writes `reports/<date-time>/` next to the
 game: a screenshot, every input since launch, the save as it was at launch and
 now, the clock start, the log, and `perf.txt` (how long each of the last 30
-seconds of frames took, split into game code, 2D, 3D and display). The emulation is deterministic, so replaying
-a report reproduces the session exactly:
+seconds of frames took, split into game code, 2D, 3D and display). The
+emulation is deterministic, so replaying a report on the same build
+reproduces the session exactly (reports from older builds may play out
+differently, because timing changed):
 
 ```
 DQIX_RTC=<rtc_base from info.txt> DQIX_INPUT_FILE=input.txt ./dqix <rom> <extract> <frame+1> 1 <copy of boot.sav>
@@ -70,6 +82,7 @@ interpreter 48,000 checks, 0 failures.
 | Piece | State |
 |---|---|
 | Boot like the DS firmware, both CPUs (binaries, header, chip ID, user settings) | done |
+| Firmware flash: Wi-Fi calibration, 3 access-point slots, user settings (with CRCs); writes kept for the session | done |
 | ARM9 memory: main RAM, ITCM/DTCM, shared WRAM per WRAMCNT, palette, OAM, VRAM banks | done |
 | ARM7 memory: ARM7 WRAM, shared WRAM, VRAM C/D | done |
 | CPU modes with banked sp/lr, CP15 | done |
@@ -82,10 +95,10 @@ interpreter 48,000 checks, 0 failures.
 | Game threads on native coroutines, both CPUs (SaveContext / LoadContext / IRQ switch replaced) | done |
 | Two CPUs: the ARM7 runs as a coroutine whenever the ARM9 waits or time advances | done |
 | Interpreter for code that changes at run time (encrypted anti-piracy, mislabeled code) | done |
-| Forward progress: call + loop budgets so busy-waits see time pass and interrupts arrive | done |
-| Sound: 16 channels (PCM8/16, IMA-ADPCM, PSG, noise), mixer, busy timing | done (no capture) |
-| 2D graphics: both engines, all BG modes, sprites, windows, blending, brightness | done |
-| 3D: geometry engine (FIFO, matrices, lighting, clipping), rasterizer, textures (all formats), toon/highlight, alpha blending, fog, edge marking | done (no shadow volumes, no anti-aliasing) |
+| Timing: per-instruction cycle counts (recompiler), cartridge transfer speed, BIOS call cost | done |
+| Sound: 16 channels (PCM8/16, IMA-ADPCM, PSG, noise), FIFO timing, capture (reverb), mixer, BIOS volume/pitch tables | done |
+| 2D graphics: both engines, all BG modes, sprites, windows, 6-bit blending/brightness, mosaic, display capture | done |
+| 3D: geometry engine (FIFO, matrices, lighting, clipping), rasterizer with DS fixed-point rules, textures (all formats), toon/highlight, alpha blending, shadow volumes, anti-aliasing, fog, edge marking | done |
 | Input (keyboard, mouse as touch, gamepad) and scripted input for testing | done |
 
 ## Running it headless (Linux, for testing)
@@ -113,6 +126,9 @@ DQIX_TRACEFN=addr,count[,from]                 call trace when a function is ent
 DQIX_POLYDUMP=frame,x,y                        3D polygons covering a pixel
 DQIX_WAV=out.wav                               record the sound (headless build)
 DQIX_SNDLOG=1                                  log sound channel starts
+DQIX_CRC=out.txt                               a checksum of every frame (compare runs)
+DQIX_DUMP_AT=100,200                           with DQIX_DUMP=dir,1: only those frames
+DQIX_MODE=enhanced / DQIX_NO_SETTINGS=1        window build: force a mode / ignore settings.ini
 ```
 
 ## Layout
@@ -174,12 +190,14 @@ Generated C is derived from the game: keep it private. The tool contains no game
 * The SDK's thread switch is replaced by native coroutines, one per game
   thread, on both CPUs. The ARM7 runs as another coroutine: whenever the
   ARM9 waits or time moves on it runs until it waits, then hands back.
-* Time is counted in scanlines. It advances at waits, at status-register
-  polls, every 1,024 loop iterations and every ~1M calls.
+* Time follows the DS clock. The recompiler adds each straight run of
+  instructions' cycle cost; every 512 ARM9 cycles (2,048 ARM7) the runtime
+  turns them into bus time, runs the other CPU and delivers interrupts.
 
 ## Known limits
 
-* No graphics, sound or input yet.
+* Wireless (local play, Nintendo WFC) is not emulated; the game sees no
+  access points.
 * Anti-piracy and a few functions the decomp marks as data run in the
   interpreter (correct, but slower).
 * 528 `bx r12` long-call stubs go through the dispatcher (later optimisation).

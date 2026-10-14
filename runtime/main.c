@@ -39,17 +39,12 @@ static void boot_firmware(void) {
     ram16(0x027FF80A, (uint16_t)rom32(0x06C)); ram16(0x027FFC0A, (uint16_t)rom32(0x06C));
     ram16(0x027FFC10, 0x5835);
     ram16(0x027FFC40, 1);                    /* booted from a card */
-    /* firmware user settings (0x027FFC80), same as the firmware image in io7.c */
-    uint32_t us = 0x027FFC80;
-    ram16(us + 0x00, 5);
-    ram8(us + 0x02, 4); ram8(us + 0x03, 1); ram8(us + 0x04, 1);
-    const char* nick = "Player";
-    for (int i = 0; nick[i]; i++) ram16(us + 0x06 + 2 * i, (uint16_t)nick[i]);
-    ram16(us + 0x1A, (uint16_t)strlen(nick));
-    ram16(us + 0x64, 0x0001 | 0x0400);       /* English, backlight */
-    /* touch calibration, as in io7.c: ADC (0x200,0x200) -> pixel (0x20,0x20), (0xE00,0xE00) -> (0xE0,0xA0) */
-    ram16(us + 0x58, 0x200); ram16(us + 0x5A, 0x200); ram8(us + 0x5C, 0x20); ram8(us + 0x5D, 0x20);
-    ram16(us + 0x5E, 0xE00); ram16(us + 0x60, 0xE00); ram8(us + 0x62, 0xE0); ram8(us + 0x63, 0xA0);
+    /* what the firmware leaves in RAM: the user settings from the flash
+     * (io7.c builds the image) and where they live */
+    ram32(0x027FF864, 0);
+    ram32(0x027FF868, firmware_user_offset());
+    const uint8_t* us = firmware_user_settings();
+    for (int i = 0; i < 0x70; i++) ram8(0x027FFC80 + i, us[i]);
     g_io[0x247] = 3;                         /* WRAMCNT: all shared WRAM to the ARM7 */
     g_io[0x300] = 1; g_io7[0x300] = 1;       /* POSTFLG */
     /* ARM9: system mode, IRQs masked */

@@ -40,7 +40,8 @@ uint8_t* vram7_ptr(uint32_t addr);       /* ARM7 view (banks C/D) */
 uint8_t* vram_bank(int b);               /* bank A..I = 0..8 */
 extern uint8_t* g_tex_slot[4];           /* 3D texture image slots (128 KB each), NULL if unmapped */
 extern uint8_t* g_texpal_slot[6];        /* 3D texture palette slots (16 KB each) */
-void gpu3d_vblank(void);                 /* swap + render the 3D frame */
+void gpu3d_vblank(void);                 /* latch registers, swap the polygon list */
+void gpu3d_render_start(void);           /* scanline 215: draw the 3D frame */
 uint32_t gx_read(uint32_t off);
 int gx_irq_line(void);
 int64_t rtc_base(void);                  /* clock start (local time, seconds) */
@@ -205,6 +206,8 @@ void spi_write_cnt(uint16_t v);
 uint16_t spi_read_data(void);
 void spi_write_data(uint16_t v);
 void firmware_init(void);
+const uint8_t* firmware_user_settings(void);   /* 0x70 bytes, copied to 0x027FFC80 at boot */
+uint32_t firmware_user_offset(void);
 uint8_t rtc_io(uint8_t v, int write);
 void rtc_write_reg(uint16_t v);
 uint16_t rtc_read_reg(void);

@@ -1,5 +1,7 @@
 /* IPC between the two CPUs: the sync register and the two 16-word FIFOs. */
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "nds.h"
 
 typedef struct { uint32_t q[16]; int head, count; } Fifo;
@@ -51,6 +53,8 @@ void ipc_fifo_send(Core* k, uint32_t v) {
     if (tx->count == 16) { g_err[k->id] = 1; return; }
     tx->q[(tx->head + tx->count++) % 16] = v;
     LOG_DEBUG("pxi: %s sends tag %u data %07x\n", k->name, v & 0x1F, v >> 6);
+    { static int lg = -1; if (lg < 0) lg = getenv("DQIX_PXILOG") != NULL;
+      if (lg) fprintf(stderr, "pxi f%llu %s tag %2u err %u data %07x\n", (unsigned long long)g_frame, k->name, v & 0x1F, (v >> 5) & 1, v >> 6); }
     if (tx->count == 1 && (g_cnt[other(k)->id] & 0x0400)) irq_raise(other(k), IRQ_IPC_RECV_NOT_EMPTY);
 }
 

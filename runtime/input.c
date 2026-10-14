@@ -144,8 +144,12 @@ uint16_t input_extkeyin(void) {
  * ADC 0x200 -> pixel 0x20, ADC 0xE00 -> pixel 0xE0 (x) / 0xA0 (y). */
 uint16_t input_touch_adc(int channel) {
     if (!g_touch_down) return channel == 1 || channel == 5 ? 0 : 0x800;
-    if (channel == 5) return (uint16_t)(0x200 + (g_touch_x - 0x20) * (0xE00 - 0x200) / (0xE0 - 0x20));
-    if (channel == 1) return (uint16_t)(0x200 + (g_touch_y - 0x20) * (0xE00 - 0x200) / (0xA0 - 0x20));
+    /* invert the firmware's touch calibration (two ADC -> pixel points) */
+    const uint8_t* u = firmware_user_settings();
+    int ax1 = u[0x58] | u[0x59] << 8, ay1 = u[0x5A] | u[0x5B] << 8, px1 = u[0x5C], py1 = u[0x5D];
+    int ax2 = u[0x5E] | u[0x5F] << 8, ay2 = u[0x60] | u[0x61] << 8, px2 = u[0x62], py2 = u[0x63];
+    if (channel == 5) return (uint16_t)(ax1 + (g_touch_x - px1) * (ax2 - ax1) / (px2 - px1));
+    if (channel == 1) return (uint16_t)(ay1 + (g_touch_y - py1) * (ay2 - ay1) / (py2 - py1));
     if (channel == 3) return 0x100;                   /* Z1 pressure */
     if (channel == 4) return 0xF00;                   /* Z2 */
     return 0x800;

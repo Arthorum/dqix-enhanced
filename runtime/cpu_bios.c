@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include "bios_tables.h"
+#define LZ_COST_DEFAULT 0
+static void bios_cost(Core* k, uint32_t units, uint32_t per);
+static uint32_t lz_cost(void);
 #include "dispatch.h"
 
 Cpu g_arm9, g_arm7;
@@ -164,10 +168,9 @@ uint32_t cp15_read(Cpu* c, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op
 
 /* ---------------------------------------------------------------- BIOS functions */
 static uint16_t crc16(const Bus* b, uint16_t crc, uint32_t p, uint32_t len) {
-    static const uint16_t val[8] = { 0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001 };
     for (uint32_t i = 0; i < len; i++) {
         crc ^= b->r8(p + i);
-        for (int j = 0; j < 8; j++) { int carry = crc & 1; crc >>= 1; if (carry) crc ^= (uint16_t)(val[j] << (7 - j)); }
+        for (int j = 0; j < 8; j++) { int carry = crc & 1; crc >>= 1; if (carry) crc ^= 0xA001; }  /* CRC-16 (what the BIOS table method computes) */
     }
     return crc;
 }
@@ -213,6 +216,7 @@ static void lz77(Core* k, int cb, int write16) {
         }
     }
     if (write16 && (out & 1)) b->w16(dst + out - 1, pending);
+    bios_cost(k, len, lz_cost());
     if (cb && b->r32(c->r[3] + 4)) call_game(k, b->r32(c->r[3] + 4), 0, 0, 0, 0);
 }
 
@@ -250,6 +254,20 @@ static void bit_unpack(Core* k) {
     }
 }
 
+/* BIOS routines run natively here, but take time on the DS: charge their
+ * estimated ARM9 cycles per unit of work (calibrated against a reference DS
+ * emulator; DQIX_LZCOST overrides the decompression cost for tests). */
+static void bios_cost(Core* k, uint32_t units, uint32_t per) {
+    if (k->id != 0) return;
+    extern uint32_t g_cyc;
+    g_cyc += units * per;
+}
+static uint32_t lz_cost(void) {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("DQIX_LZCOST"); v = e ? atoi(e) : LZ_COST_DEFAULT; }
+    return (uint32_t)v;
+}
+
 /* Calls common to both BIOSes. Returns 0 if `n` isn't one of them. */
 static int bios_common(Core* k, uint32_t n) {
     Cpu* c = k->cpu; const Bus* b = k->bus;
@@ -277,6 +295,7 @@ static int bios_common(Core* k, uint32_t n) {
             if (w32) { b->w32(d, b->r32(s)); d += 4; if (!fill) s += 4; }
             else { b->w16(d, b->r16(s)); d += 2; if (!fill) s += 2; }
         }
+        bios_cost(k, cnt, 6);
         return 1;
     }
     case 0x0C: {                                                    /* CpuFastSet */
@@ -284,6 +303,7 @@ static int bios_common(Core* k, uint32_t n) {
         uint32_t cnt = ((ctl & 0x1FFFFF) + 7) & ~7u;
         int fill = (ctl >> 24) & 1;
         for (uint32_t i = 0; i < cnt; i++) { b->w32(d, b->r32(s)); d += 4; if (!fill) s += 4; }
+        bios_cost(k, cnt, 2);
         return 1;
     }
     case 0x0D: {                                                    /* Sqrt */
@@ -304,6 +324,9 @@ static int bios_common(Core* k, uint32_t n) {
 }
 
 void bios_swi(Cpu* c, uint32_t n) {
+    { static int lg = -1; static unsigned long long f0, f1;
+      if (lg < 0) { const char* e = getenv("DQIX_SWILOG"); lg = e && sscanf(e, "%llu,%llu", &f0, &f1) == 2; }
+      if (lg && g_frame >= f0 && g_frame <= f1 && n != 4 && n != 5 && n != 6) fprintf(stderr, "swi f%llu %02x r0 %08x r1 %08x r2 %08x\n", (unsigned long long)g_frame, n, c->r[0], c->r[1], c->r[2]); }
     if (!bios_common(&g_c9, n))
         rt_fatal("ARM9 BIOS call %02x not implemented (r0=%08x r1=%08x r2=%08x)\n", n, c->r[0], c->r[1], c->r[2]);
 }
@@ -315,22 +338,9 @@ void bios7_swi(Cpu* c, uint32_t n) {
     switch (n) {
     case 0x07: bios_halt(k); return;                                /* Sleep */
     case 0x08: return;                                              /* SoundBias */
-    case 0x1A: {                                                    /* GetSineTable */
-        uint32_t i = c->r[0] & 0x3F;
-        c->r[0] = (uint32_t)(int16_t)lround(sin(i * 3.14159265358979 / 128.0) * 32768.0);
-        return;
-    }
-    case 0x1B: {                                                    /* GetPitchTable */
-        uint32_t i = c->r[0] % 768;
-        c->r[0] = (uint16_t)lround((pow(2.0, i / 768.0) - 1.0) * 65536.0);
-        return;
-    }
-    case 0x1C: {                                                    /* GetVolumeTable */
-        uint32_t i = c->r[0] % 724;
-        double v = 127.0 * pow(10.0, ((double)i - 723.0) / 240.0);
-        c->r[0] = (uint32_t)(v > 127 ? 127 : lround(v));
-        return;
-    }
+    case 0x1A: c->r[0] = bios_sine_table[c->r[0] & 0x3F]; return;              /* GetSineTable */
+    case 0x1B: c->r[0] = bios_pitch_table[c->r[0] % 768]; return;              /* GetPitchTable */
+    case 0x1C: c->r[0] = bios_volume_table[c->r[0] % 724]; return;             /* GetVolumeTable */
     case 0x1F: bios_halt(k); return;                                /* CustomHalt */
     default:
         rt_fatal("ARM7 BIOS call %02x not implemented (r0=%08x r1=%08x r2=%08x)\n", n, c->r[0], c->r[1], c->r[2]);

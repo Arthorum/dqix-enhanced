@@ -11,7 +11,8 @@ static uint8_t g_wifi[0x10000];   /* 0x04800000: wireless registers, not emulate
 uint32_t dispstat_read(Core* k);
 
 /* ================================================================ SPI */
-static uint8_t g_fw[256 * 1024];          /* firmware flash image */
+static uint8_t g_fw[0x20000];             /* firmware flash image (128 KB) */
+static uint8_t g_fw_status;               /* flash status register (bit 1: write enabled) */
 static uint8_t g_pm_regs[8] = { 0x0D, 0x00, 0x01, 0x00, 0x03 };  /* power management */
 static int g_spi_dev = -1, g_spi_pos;
 static uint8_t g_spi_cmd, g_spi_out;
@@ -20,25 +21,97 @@ static uint8_t g_tsc_cmd;
 static uint16_t g_tsc_val;
 
 static uint16_t crc16_buf(uint16_t crc, const uint8_t* p, size_t n) {
-    static const uint16_t val[8] = { 0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001 };
     for (size_t i = 0; i < n; i++) {
         crc ^= p[i];
-        for (int j = 0; j < 8; j++) { int c = crc & 1; crc >>= 1; if (c) crc ^= (uint16_t)(val[j] << (7 - j)); }
+        for (int j = 0; j < 8; j++) { int c = crc & 1; crc >>= 1; if (c) crc ^= 0xA001; }  /* CRC-16, same as the BIOS */
     }
     return crc;
 }
 
-/* A minimal firmware image: header + two copies of the user settings
- * (the same values main.c places at 0x027FFC80). */
+/* The firmware flash image, laid out like the one melonDS generates when no
+ * dump is supplied (so the game sees the same bytes as on the reference):
+ * a 128 KB flash with the Wi-Fi calibration header (+CRC), three Wi-Fi
+ * access-point slots (+CRC each) and two copies of the user settings (+CRC).
+ * The user settings hold the same values main.c places at 0x027FFC80. */
+#define FW_SIZE 0x20000u
+#define FW_USER 0x1FE00u                     /* user settings: last 512 bytes */
+#define FW_AP   (FW_USER - 0x400)            /* three 256-byte access points */
+static const uint8_t fw_bbinit[0x69] = {
+    0x03,0x17,0x40,0x00,0x1B,0x6C,0x48,0x80,0x38,0x00,0x35,0x07,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0xB0,0x00,0x00,0x00,0x00,0x00,0x00,0xC7,0xBB,0x01,0x24,0x7F,
+    0x5A,0x01,0x3F,0x01,0x3F,0x36,0x1D,0x00,0x78,0x35,0x55,0x12,0x34,0x1C,0x00,0x01,
+    0x0E,0x38,0x03,0x70,0xC5,0x2A,0x0A,0x08,0x04,0x01,0x00,0x00,0x00,0xFF,0xFF,0xFE,
+    0xFE,0xFE,0xFE,0xFC,0xFC,0xFA,0xFA,0xFA,0xFA,0xFA,0xF8,0xF8,0xF6,0x00,0x12,0x14,
+    0x12,0x41,0x23,0x03,0x04,0x70,0x35,0x0E,0x2C,0x2C,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0E,0x00,0x00,0x12,0x28,0x1C };
+static const uint8_t fw_rfinit[0x29] = {
+    0x31,0x4C,0x4F,0x21,0x00,0x10,0xB0,0x08,0xFA,0x15,0x26,0xE6,0xC1,0x01,0x0E,0x50,
+    0x05,0x00,0x6D,0x12,0x00,0x00,0x01,0xFF,0x0E,0x00,0x02,0x00,0x00,0x00,0x00,0x06,
+    0x06,0x00,0x00,0x00,0x18,0x00,0x02,0x00,0x00 };
+static const uint8_t fw_chandata[0x3C] = {
+    0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0E,0x0E,0x0E,0x0E,0x0E,0x0E,0x0E,0x16,
+    0x26,0x1C,0x1C,0x1C,0x1D,0x1D,0x1D,0x1E,0x1E,0x1E,0x1E,0x1F,0x1E,0x1F,0x18,
+    0x01,0x4B,0x4B,0x4B,0x4B,0x4C,0x4C,0x4C,0x4C,0x4C,0x4C,0x4C,0x4D,0x4D,0x4D,
+    0x02,0x6C,0x71,0x76,0x5B,0x40,0x45,0x4A,0x2F,0x34,0x39,0x3E,0x03,0x08,0x14 };
+
+static void put16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+
 void firmware_init(void) {
     memset(g_fw, 0xFF, sizeof g_fw);
-    memset(g_fw, 0, 0x200);
-    uint16_t us_off8 = 0x3FE00 / 8;
-    memcpy(&g_fw[0x20], &us_off8, 2);
-    g_fw[0x1D] = 0xFF;                       /* console type: original DS */
+    /* header + Wi-Fi calibration (0x000-0x1FF) */
+    uint8_t* h = g_fw;
+    memset(h, 0, 0x200);
+    memcpy(&h[0x08], "MELN", 4);             /* identifier of a generated image */
+    h[0x1D] = 0x20;                          /* console type: DS Lite */
+    put16(&h[0x20], (uint16_t)(FW_USER >> 3));
+    put16(&h[0x2C], 0x138);                  /* Wi-Fi config length */
+    h[0x2F] = 6;                             /* Wi-Fi version W006 */
+    memset(&h[0x30], 0xFF, 5);               /* unused (0xFF x5, 0x00) */
+    static const uint8_t mac[6] = { 0x00, 0x09, 0xBF, 0x11, 0x22, 0x33 };
+    memcpy(&h[0x36], mac, 6);
+    put16(&h[0x3C], 0x3FFE);                 /* enabled channels 1-13 */
+    h[0x3E] = 0xFF; h[0x3F] = 0xFF;
+    h[0x40] = 3; h[0x41] = 0x94; h[0x42] = 0x29; h[0x43] = 0x02;  /* RF chip type 3 */
+    static const uint16_t iv[16] = { 0x0002, 0x0017, 0x0026, 0x1818, 0x0048, 0x4840, 0x0058, 0x0042,
+                                     0x0146, 0x8064, 0xE6E6, 0x2443, 0x000E, 0x0001, 0x0001, 0x0402 };
+    for (int i = 0; i < 16; i++) put16(&h[0x44 + 2 * i], iv[i]);
+    memcpy(&h[0x64], fw_bbinit, sizeof fw_bbinit);
+    memcpy(&h[0xCE], fw_rfinit, sizeof fw_rfinit);
+    h[0xF7] = 0x02;                          /* BB indices per channel */
+    memcpy(&h[0xF8], fw_chandata, sizeof fw_chandata);
+    memset(&h[0x134], 0xFF, 46);             /* type-3 config: unused */
+    put16(&h[0x2A], crc16_buf(0x0000, &h[0x2C], 0x138));
+    h[0x2FF] = 0x80;
+
+    /* Wi-Fi access points: all three empty, like a console that never went
+     * online (DQIX_FW_REFAP=1 configures slot 1 the way melonDS does, for
+     * comparisons with the reference emulator) */
+    int refap = getenv("DQIX_FW_REFAP") != NULL;
+    for (int k = 0; k < 3; k++) {
+        uint8_t* a = &g_fw[FW_AP + 0x100 * k];
+        memset(a, 0, 0x100);
+        if (k == 0 && refap) { memcpy(&a[0x40], "melonAP", 7); a[0xE7] = 0x00; }
+        else a[0xE7] = 0xFF;                 /* status: not configured */
+        a[0xEF] = 0x01;                      /* connection configured */
+        put16(&a[0xFE], crc16_buf(0x0000, a, 0xFE));
+    }
+
+    /* user settings, two copies (DQIX_FW_REF=1: melonDS's defaults instead,
+     * for exact comparisons with the reference emulator) */
+    int ref = getenv("DQIX_FW_REF") != NULL;
     for (int copy = 0; copy < 2; copy++) {
-        uint8_t* u = &g_fw[0x3FE00 + 0x100 * copy];
+        uint8_t* u = &g_fw[FW_USER + 0x100 * copy];
         memset(u, 0, 0x100);
+        if (ref) {
+            u[0x00] = 5; u[0x03] = 1; u[0x04] = 1;
+            const char* nick = "melonDS";
+            for (int i = 0; nick[i]; i++) u[0x06 + 2 * i] = (uint8_t)nick[i];
+            u[0x1A] = 7;
+            put16(&u[0x5E], 0xFF0); put16(&u[0x60], 0xBF0); u[0x62] = 0xFF; u[0x63] = 0xBF;
+            u[0x64] = 0x31;                  /* English, backlight max */
+            put16(&u[0x72], crc16_buf(0xFFFF, u, 0x70));
+            continue;
+        }
         u[0x00] = 5;                         /* version */
         u[0x02] = 4;                         /* favourite colour */
         u[0x03] = 1; u[0x04] = 1;            /* birthday */
@@ -58,6 +131,11 @@ void firmware_init(void) {
     }
 }
 
+/* What the firmware copies to RAM at boot: the user settings (newest valid
+ * copy; both are the same here) and the header values the SDK reads. */
+const uint8_t* firmware_user_settings(void) { return &g_fw[FW_USER + 0x100]; }
+uint32_t firmware_user_offset(void) { return FW_USER; }
+
 static uint8_t spi_xfer(int dev, uint8_t in, int first) {
     switch (dev) {
     case 0: {   /* power management: [r/w|index] [data] */
@@ -68,14 +146,24 @@ static uint8_t spi_xfer(int dev, uint8_t in, int first) {
         return 0;
     }
     case 1: {   /* firmware flash */
-        if (first) { g_spi_cmd = in; g_spi_pos = 0; g_fw_addr = 0; return 0; }
+        if (first) {
+            g_spi_cmd = in; g_spi_pos = 0; g_fw_addr = 0;
+            if (in == 0x04) g_fw_status &= (uint8_t)~2;           /* write disable */
+            if (in == 0x06) g_fw_status |= 2;                     /* write enable */
+            return 0;
+        }
         int n = g_spi_pos++;
         if (g_spi_cmd == 0x03 || g_spi_cmd == 0x0B) {
             if (n < 3) { g_fw_addr = (g_fw_addr << 8) | in; return 0; }
             if (g_spi_cmd == 0x0B && n == 3) return 0;
             return g_fw[g_fw_addr++ % sizeof g_fw];
         }
-        if (g_spi_cmd == 0x05) return 0;                          /* status: ready */
+        if (g_spi_cmd == 0x0A) {                                  /* page write (kept in memory) */
+            if (n < 3) { g_fw_addr = (g_fw_addr << 8) | in; return 0; }
+            g_fw[g_fw_addr++ % sizeof g_fw] = in;
+            return in;
+        }
+        if (g_spi_cmd == 0x05) return g_fw_status;                /* status: ready, write-enable latch */
         if (g_spi_cmd == 0x9F) return n == 0 ? 0x20 : n == 1 ? 0x40 : 0x12;
         return 0xFF;
     }
@@ -248,6 +336,8 @@ static uint32_t reg7_read32(uint32_t off) {
 
 uint32_t io7_read(uint32_t a, int size) {
     if (a >= 0x04800000 && a < 0x04810000) {
+        { static int lg = -1; if (lg < 0) lg = getenv("DQIX_WIFILOG") != NULL;
+          if (lg) { uint32_t w; memcpy(&w, &g_wifi[(a & 0xFFFF) & ~3u], 4); fprintf(stderr, "wifi rd f%llu %08x = %08x (%d)\n", (unsigned long long)g_frame, a, w, size); } }
         uint32_t v; memcpy(&v, &g_wifi[(a & 0xFFFF) & ~3u], 4);
         v >>= (a & 3) * 8;
         return size == 1 ? (v & 0xFF) : size == 2 ? (v & 0xFFFF) : v;
@@ -266,7 +356,10 @@ uint32_t io7_read(uint32_t a, int size) {
 
 void io7_write(uint32_t a, uint32_t v, int size) {
     Core* k = &g_c7;
-    if (a >= 0x04800000 && a < 0x04810000) { memcpy(&g_wifi[a & 0xFFFF], &v, size); return; }
+    if (a >= 0x04800000 && a < 0x04810000) {
+        { static int lg = -1; if (lg < 0) lg = getenv("DQIX_WIFILOG") != NULL;
+          if (lg) fprintf(stderr, "wifi wr f%llu %08x = %08x (%d)\n", (unsigned long long)g_frame, a, v, size); }
+        memcpy(&g_wifi[a & 0xFFFF], &v, size); return; }
     if (a >= 0x04100000) { LOG_WARN("io7 write %08x\n", a); return; }
     uint32_t off = a - 0x04000000u;
     if (off >= sizeof g_io7) { LOG_WARN("io7 write %08x = %x\n", a, v); return; }
@@ -296,6 +389,10 @@ void io7_write(uint32_t a, uint32_t v, int size) {
     uint32_t old_cnt = IO7_32(base);
     memcpy(&g_io7[off], &v, size);
     if (base >= 0x400 && base < 0x500 && (base & 0xF) == 0) sound_cnt_written((base - 0x400) / 16, old_cnt);
+    if (base == 0x508) {                                          /* SOUNDCAP0/1CNT */
+        void sound_capture_written(int i, uint8_t v);
+        for (int i = 0; i < 2; i++) if (off <= 0x508u + i && off + (uint32_t)size > 0x508u + i) sound_capture_written(i, g_io7[0x508 + i]);
+    }
     switch (base) {
     case 0x0B8: case 0x0C4: case 0x0D0: case 0x0DC: if ((off & 3) + size > 2) dma_write_ctl(k, (base - 0xB8) / 12); break;
     case 0x100: case 0x104: case 0x108: case 0x10C: timer_write(k, (base - 0x100) / 4, off - base, v, size); break;

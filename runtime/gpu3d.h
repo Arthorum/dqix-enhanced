@@ -42,6 +42,5 @@ int  gpu3d_tex_size(uint32_t teximg, int* w, int* h);          /* 0 if no textur
 void gpu3d_decode_texture(uint32_t teximg, uint32_t pltt, uint8_t* rgba);   /* w*h RGBA8 */
 uint64_t gpu3d_texture_hash(uint32_t teximg, uint32_t pltt);   /* changes when its data/palette change */
 
-/* Software renderer output (for tests): 256x192 BGR555 colors and 0..31 alpha. */
-const uint16_t* gpu3d_soft_color(void);
-const uint8_t*  gpu3d_soft_alpha(void);
+/* Software renderer output (tests): one line, 6-bit colour | 5-bit alpha << 24. */
+const uint32_t* gpu3d_soft_line(int line);

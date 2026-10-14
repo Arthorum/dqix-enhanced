@@ -28,6 +28,32 @@ REL_RE = re.compile(r"^from:0x([0-9a-f]+) kind:(\S+) to:0x([0-9a-f]+) module:(\S
 
 
 
+
+def insn_cycles(i, thumb):
+    """Estimated ARM9 cycles for one instruction (for emulated time; the runtime
+    scales it to bus cycles). Data-processing 1; loads 2; stores 1; load/store
+    multiple 1 + 1 per register; multiplies 3; taking a branch / call / return
+    refills the pipeline: +2."""
+    mn, w = i.mn, i.word
+    if thumb:
+        regs = bin(w & 0xFF).count("1") + ((w >> 8) & 1 if mn.startswith(("push", "pop")) else 0)
+    else:
+        regs = bin(w & 0xFFFF).count("1")
+    if mn.startswith(("ldm", "pop")):
+        c = 1 + regs
+    elif mn.startswith(("stm", "push")):
+        c = 1 + regs
+    elif mn.startswith("ldr"):
+        c = 2
+    elif mn.startswith(("mul", "mla", "umul", "umla", "smul", "smla")):
+        c = 3
+    else:
+        c = 1
+    if i.flow in (BRANCH, CALL, CALL_REG, JUMP_REG, RET, EXC_RET, JUMPTABLE):
+        c += 2
+    return c
+
+
 class write_if_changed:
     """Like open(path, "w"), but leaves the file (and its timestamp) alone when
     the new content is identical, so make only recompiles what changed."""
@@ -437,12 +463,22 @@ class Recompiler:
             return (f"switch (({expr}) & ~1u) {{ {cases} default: {{ uint32_t tl = c->r[14]; dispatch_call(c, {expr}, {h(from_addr)}); "
                     f"if (tl != entry_lr) dispatch_call(c, tl, {h(from_addr)}); return; }} }}")
 
+        # cycle cost of each straight-line run (from a label or the entry to the next label)
+        run_cost = {}
+        cur = None
+        for a in order:
+            if cur is None or a in labels:
+                cur = a
+                run_cost[cur] = 0
+            run_cost[cur] += insn_cycles(insns[a], func.thumb)
+        if order and order[0] not in labels:
+            out.append(f"    RECOMP_CYC({run_cost[order[0]]});")
         prev_sets_lr = False
         for idx, a in enumerate(order):
             i = insns[a]
             self.stats["insns"] += 1
             if a in labels:
-                out.append(f"L_{a:08x}:;")
+                out.append(f"L_{a:08x}:; RECOMP_CYC({run_cost[a]});")
             ret_addr = (a + i.size) | tbit
             if i.flow == SEQ:
                 s = i.body or ";"

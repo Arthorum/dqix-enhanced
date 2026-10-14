@@ -172,6 +172,7 @@ void time_advance_lines(uint32_t lines) {
         }
         if (g_vcount < 192) gpu_render_line((int)g_vcount);
         else if (g_vcount == 192) { gpu_frame_done(); gpu3d_vblank(); frontend_frame(); input_update(); }
+        else if (g_vcount == 215) gpu3d_render_start();
         line_events(&g_c9);
         line_events(&g_c7);
         timers_update(&g_c9);
@@ -191,14 +192,22 @@ void time_spend(uint32_t cycles) {
     }
 }
 
+/* A status register read. ARM9: charge the I/O access and bring emulated time
+ * up to date (the loop around it pays for its own instructions, see
+ * dispatch.c), so a wait ends when the awaited event is due. ARM7: hand over
+ * to the ARM9 now and then, so a CPU spinning on the other one makes progress. */
+void cpu_time_sync(void);
 void time_poll(Core* k) {
-    static uint32_t polls9, polls7;
-    if (k->id == 1) {            /* the ARM7 waiting on something: let the ARM9 run */
+    static uint32_t polls7;
+    if (k->id == 1) {
         if (++polls7 % 4 == 0) arm7_yield();
         return;
     }
-    if (++polls9 % 8 == 0) { time_advance_lines(1); irq_service(&g_arm9); }
-    else g_subline += 16;
+    static int old = -1; if (old < 0) old = getenv("DQIX_OLDPOLL") != NULL;   /* tests */
+    if (old) { static uint32_t polls9; if (++polls9 % 8 == 0) { time_advance_lines(1); irq_service(&g_arm9); } else g_subline += 16; return; }
+    extern uint32_t g_cyc;
+    g_cyc += 8;
+    cpu_time_sync();
 }
 
 /* ---------------------------------------------------------------- divider / sqrt */
@@ -322,6 +331,7 @@ void io9_write(uint32_t a, uint32_t v, int size) {
     case 0x1038: case 0x103C: gpu_affine_written(1, 3); break;
     case 0x280: case 0x290: case 0x294: case 0x298: case 0x29C: math_div(); break;
     case 0x2B0: case 0x2B8: case 0x2BC: math_sqrt(); break;
+    case 0x064: { static int lg = -1; if (lg < 0) lg = getenv("DQIX_CAPLOG") != NULL; if (lg && (IO32(0x64) & 0x80000000u)) fprintf(stderr, "capture f%llu %08x\n", (unsigned long long)g_frame, IO32(0x64)); } break;
     default: break;
     }
 }
