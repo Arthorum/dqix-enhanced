@@ -58,7 +58,7 @@ the screens** keeps the real gap without the console. **Console photos:** a
 picture in `skins/` (copied next to the game by the build) with a `.txt` of
 the same name saying where its screens are (`top x y w h`, `bottom x y w h`,
 `name ...`) appears under View > Console colour; the game draws its screens
-into the photo's. The photos themselves are not kept in the history. **View > Actual size
+into the photo's. **View > Actual size
 (F8)** shows everything as big as a real DS Lite (each screen 61 mm wide),
 using the size your monitor reports; if that is wrong, set
 `monitor_width_mm` in `settings.ini`. The drawn pixel grid needs about 3

@@ -23,5 +23,3 @@ __pycache__/
 *.bundle
 setup-history.bat
 
-# console photos are other people's pictures: kept out of the history
-skins/*.png
