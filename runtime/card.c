@@ -136,6 +136,61 @@ void backup_flush(void) {
     g_backup_dirty = 0;
 }
 
+/* ---------------------------------------------------------------- downloadable content
+ * DQIX's downloadable quests and special guests are on the cartridge; Nintendo
+ * Wi-Fi Connection only switched them on. The switches are in the save: one
+ * "unlocked" bit per downloadable quest in the quest status table (4 bits per
+ * quest, bit 3) and a bit per special guest. Each 32 KB save slot is
+ * protected by three CRC-32s (stored at 16, 36 and 132, covering 20-36,
+ * 40-132 and 136-28644). Layout from the open-source DQIX save editor
+ * (github.com/dqix/editor). */
+static uint32_t crc32_buf(const uint8_t* p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) { c ^= p[i]; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1))); }
+    return ~c;
+}
+static uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static void wr32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+static const uint8_t DLC_QUESTS[] = {     /* quest ids (not the numbers shown in the game) */
+    2, 122, 123, 127, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 143, 145, 146, 148, 149, 150, 151, 152,
+    153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 164, 165, 166, 168, 169, 170, 173, 174, 175, 176, 177, 178,
+    179, 180, 181, 182, 183, 184, 185, 186, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 202 };
+#define SLOT_SIZE 0x8000
+#define QUEST_STATUS 12300
+#define SPECIAL_GUESTS 11528
+#define N_SPECIAL_GUESTS 23
+
+static int slot_valid(const uint8_t* b) {
+    static const int ck[3][3] = { { 16, 20, 36 }, { 36, 40, 132 }, { 132, 136, 28644 } };
+    if (memcmp(b, "DRAGON QUEST IX", 15)) return 0;
+    for (int i = 0; i < 3; i++) if (rd32(b + ck[i][0]) != crc32_buf(b + ck[i][1], (size_t)(ck[i][2] - ck[i][1]))) return 0;
+    return 1;
+}
+static int unlock_image(uint8_t* img, uint32_t size) {
+    int n = 0;
+    for (uint32_t s = 0; s + SLOT_SIZE <= size && s < 2 * SLOT_SIZE; s += SLOT_SIZE) {
+        uint8_t* b = img + s;
+        if (!slot_valid(b)) continue;
+        for (size_t i = 0; i < sizeof DLC_QUESTS; i++) { int id = DLC_QUESTS[i]; b[QUEST_STATUS + id / 2] |= (uint8_t)((id & 1) ? 0x80 : 0x08); }
+        wr32(b + SPECIAL_GUESTS, rd32(b + SPECIAL_GUESTS) | (((1u << N_SPECIAL_GUESTS) - 1) << 1));
+        wr32(b + 16, crc32_buf(b + 20, 16));
+        wr32(b + 36, crc32_buf(b + 40, 92));
+        wr32(b + 132, crc32_buf(b + 136, 28644 - 136));
+        n++;
+    }
+    return n;
+}
+
+/* Switch the downloadable content on in the save as it is loaded (before
+ * the game reads it). Returns how many save slots were changed. */
+int backup_unlock_dlc(void) {
+    int n = unlock_image(g_backup, g_backup_size);
+    if (g_backup_at_boot) unlock_image(g_backup_at_boot, g_backup_size);   /* replays start from the same save */
+    if (n) LOG_INFO("save: downloadable quests and special guests unlocked in %d slot(s)\n", n);
+    return n;
+}
+
 static uint8_t backup_xfer(uint8_t in, int hold) {
     uint8_t out = 0xFF;
     if (g_bk_cmd == 0) {

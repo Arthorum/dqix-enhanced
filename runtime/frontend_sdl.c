@@ -60,7 +60,8 @@ static struct {
     int integer;                 /* whole-number scaling only */
     int actual;                  /* screens as big as a real DS Lite's */
     float monitor_width_mm;      /* settings.ini override for the monitor's width (0 = ask the monitor) */
-} g_opt = { 0, 1, 1, 1, 4, 0, 0, 0, 0, 0, 0 };
+    int dlc;                     /* switch on the downloadable quests and special guests when the save loads */
+} g_opt = { 0, 1, 1, 1, 4, 0, 0, 0, 0, 0, 0, 0 };
 
 /* Actual size: a DS Lite pixel is 0.238 mm (a 3-inch 4:3 screen, 256 pixels
  * across = 60.96 mm). Window pixels per DS pixel on the current monitor. */
@@ -234,6 +235,7 @@ static void settings_load(void) {
         else if (!strcmp(key, "integer_scaling")) g_opt.integer = atoi(val) != 0;
         else if (!strcmp(key, "actual_size")) g_opt.actual = atoi(val) != 0;
         else if (!strcmp(key, "monitor_width_mm")) g_opt.monitor_width_mm = (float)atof(val);
+        else if (!strcmp(key, "downloadable_content")) g_opt.dlc = atoi(val) != 0;
     }
     fclose(f);
 }
@@ -269,6 +271,8 @@ static void settings_save(void) {
     fprintf(f, "# monitor itself; if it comes out wrong, put its visible width in millimetres here (0 = automatic)\n");
     fprintf(f, "actual_size = %d\n", g_opt.actual);
     fprintf(f, "monitor_width_mm = %g\n", g_opt.monitor_width_mm);
+    fprintf(f, "# the downloadable quests and special guests (Nintendo Wi-Fi Connection is gone): 0 or 1\n");
+    fprintf(f, "downloadable_content = %d\n", g_opt.dlc);
     fclose(f);
 }
 
@@ -355,6 +359,7 @@ void frontend_init(int argc, char** argv) {
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
     skins_scan();
     if (!getenv("DQIX_NO_SETTINGS")) settings_load();
+    if (g_opt.dlc) backup_unlock_dlc();                        /* before the game reads the save */
     if (getenv("DQIX_MODE")) g_classic = strcmp(getenv("DQIX_MODE"), "enhanced") != 0;   /* tests */
     /* real pixels on high-DPI Windows setups (not stretched by the system), so
      * the pixel grid and actual size are drawn on the monitor's own pixels */
@@ -623,6 +628,7 @@ static void menu_sync(void) {
     int stacked = !g_side_by_side;
     menu_check(MI_PAUSE, g_paused);
     menu_check(MI_TURBO, g_turbo);
+    menu_check(MI_DLC, g_opt.dlc);
     menu_check(MI_CLASSIC, g_classic); menu_check(MI_ENHANCED, !g_classic);
     menu_enable(MI_ENHANCED, g_gl);
     for (int i = 0; i < 4; i++) { menu_check(MI_RES1 + i, g_scale3d == i + 1); menu_enable(MI_RES1 + i, g_gl && !g_classic); }
@@ -663,6 +669,16 @@ static void do_action(int id) {
     switch (id) {
     case MI_PAUSE: g_paused = !g_paused; break;
     case MI_TURBO: g_turbo = !g_turbo; break;
+    case MI_DLC:
+        g_opt.dlc = !g_opt.dlc;
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Downloadable content", g_opt.dlc ?
+            "The 64 downloadable quests and the 23 special guests will be switched on in your save the next "
+            "time the game starts (they come with the save, as if downloaded from Nintendo Wi-Fi Connection).\n\n"
+            "Close the game and start it again, load your adventure log, and save once in the game to keep them.\n\n"
+            "The quests are offered by their quest givers once you reach them in the story; the guests visit "
+            "Quester's Rest." :
+            "Off. A save that already has them keeps them; this only stops switching them on at start.", g_win);
+        break;
     case MI_SHOT: g_shot_req = 1; break;
     case MI_REPORT: {
         extern char g_report_last_dir[300];

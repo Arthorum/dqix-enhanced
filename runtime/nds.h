@@ -153,6 +153,7 @@ void card_write(Core* k, uint32_t off, uint32_t v, int size);
 uint32_t card_read_data(Core* k);
 void backup_init(const char* save_path);
 void backup_flush(void);
+int backup_unlock_dlc(void);              /* downloadable quests + special guests (see card.c) */
 void math_div(void);
 void math_sqrt(void);
 

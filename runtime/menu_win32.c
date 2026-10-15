@@ -35,6 +35,8 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(game, MI_SHOT, L"Save &screenshot\tF12");
     item(game, MI_REPORT, L"Save &bug report\tF10");
     sep(game);
+    item(game, MI_DLC, L"&Downloadable quests and special guests");
+    sep(game);
     item(game, MI_EXIT, L"E&xit\tEsc");
 
     HMENU gfx = sub(g_bar, L"G&raphics");

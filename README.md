@@ -67,6 +67,11 @@ monitor pixels per DS pixel; at actual size that takes a very dense screen
 own pixels are about as fine as the DS Lite's, so they provide the grid. The game underneath is
 still Classic or Enhanced; with the filter off, Classic is pixel-exact.
 
+**Downloadable content (Game menu).** The 64 downloadable quests and 23
+special guests are on the cartridge; Nintendo Wi-Fi Connection only switched
+them on in the save. With this option on, the game switches them on in the
+save each time it starts (save layout from the open-source DQIX save editor).
+
 **Settings.** The game remembers every menu choice in `settings.ini` next to `dqix.exe` (delete it to go
 back to the defaults). Enhanced needs OpenGL 3.3 (nearly every PC from the
 last 12 years); without it, the game stays in Classic. `set DQIX_SOFTWARE=1`
@@ -230,7 +235,6 @@ Generated C is derived from the game: keep it private. The tool contains no game
   DQIX (same frames rendered here): colours per backlight level, black glow,
   pixel grid from a macro shot, motion blur from slow-motion video; plus the
   same shots of the port on the monitor with identical camera settings.
-* Unlock the downloadable quests / special guests (Nintendo WFC is gone).
 * Save states (states are tied to one build; see notes in the chat history).
 * Enhanced extras: widescreen, top-screen map.
 
