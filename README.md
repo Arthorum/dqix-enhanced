@@ -34,8 +34,9 @@ Every setting is in the **menu bar** at the top of the window (Game,
 Graphics, Screen, View, Help); the keys are shortcuts: Tab (hold) = fast
 forward, P = pause, F5 = Classic / Enhanced, F4 = 3D resolution in Enhanced,
 F6 = DS Lite screen, F7 = DS Lite console, F8 = actual size, F2 = screens side by side,
-F3 = window size, F11 = fullscreen (hides the menu bar), F12 = screenshot,
-F10 = bug report, Esc = quit.
+F3 = window size, F11 or Alt+Enter = fullscreen (move the mouse to the top
+edge for the menu bar), F12 = screenshot, F10 = bug report, Esc = leave
+fullscreen, or quit.
 
 **Classic and Enhanced.** The game starts in **Classic** mode: the two
 screens exactly as a DS draws them (256x192 each, 6-bit colour, the DS's
@@ -67,8 +68,13 @@ back to the defaults). Enhanced needs OpenGL 3.3 (nearly every PC from the
 last 12 years); without it, the game stays in Classic. `set DQIX_SOFTWARE=1`
 in `play.bat` forces Classic.
 
-**Bug reports.** F10 (or a crash) writes `reports/<date-time>/` next to the
-game: a screenshot, every input since launch, the save as it was at launch and
+**Versions.** Every update has a version number (in the title bar, Help >
+About and `runtime/version.h`).
+
+**Bug reports.** F10 (or a crash) writes `reports/<version>-<date-time>/`
+next to the game, so you can see which update a report came from. After F10 a
+box opens to describe what went wrong (saved as `description.txt`). Each
+report has a screenshot, every input since launch, the save as it was at launch and
 now, the clock start, the log, and `perf.txt` (how long each of the last 30
 seconds of frames took, split into game code, 2D, 3D and display). The
 emulation is deterministic, so replaying a report on the same build

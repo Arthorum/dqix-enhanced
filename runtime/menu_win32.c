@@ -8,6 +8,7 @@
 #include <string.h>
 #include <wchar.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static HWND g_hwnd;
 static HMENU g_bar;
@@ -145,7 +146,79 @@ float display_mm_per_pixel(SDL_Window* win) {
     return 0;
 }
 
+/* ---------------------------------------------------------------- text box (bug descriptions)
+ * A dialog built in memory: a prompt, a large multi-line edit box, and
+ * Save / Skip buttons. */
+#define ID_TEXT 1001
+static wchar_t* g_text_out;
+
+static INT_PTR CALLBACK text_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)lp;
+    switch (msg) {
+    case WM_INITDIALOG:
+        SendDlgItemMessageW(h, ID_TEXT, EM_SETLIMITTEXT, 1 << 20, 0);
+        SetFocus(GetDlgItem(h, ID_TEXT));
+        return FALSE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            int n = GetWindowTextLengthW(GetDlgItem(h, ID_TEXT));
+            g_text_out = calloc((size_t)n + 1, sizeof(wchar_t));
+            if (g_text_out) GetDlgItemTextW(h, ID_TEXT, g_text_out, n + 1);
+            EndDialog(h, 1);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+static WORD* align4(WORD* p) { return (WORD*)(((ULONG_PTR)p + 3) & ~(ULONG_PTR)3); }
+static WORD* put_str(WORD* p, const wchar_t* s) { do { *p++ = (WORD)*s; } while (*s++); return p; }
+static WORD* put_item(WORD* p, DWORD style, short x, short y, short cx, short cy, WORD id, WORD cls, const wchar_t* text) {
+    p = align4(p);
+    DLGITEMTEMPLATE* it = (DLGITEMTEMPLATE*)p;
+    it->style = style | WS_CHILD | WS_VISIBLE; it->dwExtendedStyle = 0;
+    it->x = x; it->y = y; it->cx = cx; it->cy = cy; it->id = id;
+    p = (WORD*)(it + 1);
+    *p++ = 0xFFFF; *p++ = cls;                                   /* 0x80 button, 0x81 edit, 0x82 static */
+    p = put_str(p, text);
+    *p++ = 0;                                                    /* no creation data */
+    return p;
+}
+
+char* ask_text(SDL_Window* win, const char* title, const char* prompt) {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(win, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return NULL;
+    wchar_t wtitle[200], wprompt[1000];
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, wtitle, 200);
+    MultiByteToWideChar(CP_UTF8, 0, prompt, -1, wprompt, 1000);
+    static WORD buf[4096];
+    memset(buf, 0, sizeof buf);
+    DLGTEMPLATE* d = (DLGTEMPLATE*)align4(buf);
+    d->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    d->cdit = 4; d->x = 0; d->y = 0; d->cx = 340; d->cy = 230;
+    WORD* p = (WORD*)(d + 1);
+    *p++ = 0; *p++ = 0;                                          /* no menu, default class */
+    p = put_str(p, wtitle);
+    *p++ = 9; p = put_str(p, L"Segoe UI");                       /* font */
+    p = put_item(p, 0, 7, 7, 326, 34, 0xFFFF, 0x82, wprompt);
+    p = put_item(p, WS_BORDER | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 7, 44, 326, 158, ID_TEXT, 0x81, L"");
+    p = put_item(p, WS_TABSTOP | BS_DEFPUSHBUTTON, 213, 208, 60, 15, IDOK, 0x80, L"Save");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 277, 208, 56, 15, IDCANCEL, 0x80, L"Skip");
+    g_text_out = NULL;
+    INT_PTR r = DialogBoxIndirectParamW(GetModuleHandleW(NULL), d, info.info.win.window, text_proc, 0);
+    if (r != 1 || !g_text_out) { free(g_text_out); g_text_out = NULL; return NULL; }
+    int n = WideCharToMultiByte(CP_UTF8, 0, g_text_out, -1, NULL, 0, NULL, NULL);
+    char* out = malloc((size_t)(n > 0 ? n : 1));
+    if (out) { out[0] = 0; if (n > 0) WideCharToMultiByte(CP_UTF8, 0, g_text_out, -1, out, n, NULL, NULL); }
+    free(g_text_out); g_text_out = NULL;
+    return out;
+}
+
 #else
+char* ask_text(SDL_Window* win, const char* title, const char* prompt) { (void)win; (void)title; (void)prompt; return NULL; }
 float display_mm_per_pixel(SDL_Window* win) { (void)win; return 0; }
 void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) { (void)win; (void)shell_names; (void)n_shells; }
 void menu_show(int on) { (void)on; }

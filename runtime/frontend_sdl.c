@@ -5,13 +5,14 @@
  *   D-pad <- arrow keys     A <- X      B <- Z      X <- S      Y <- A
  *   L <- Q                  R <- W      START <- Enter         SELECT <- Right Shift / Backspace
  *   touch screen <- left mouse button on the bottom screen
- *   Tab (hold) = fast forward     F11 = fullscreen     F2 = screens side by side / stacked
+ *   Tab (hold) = fast forward     F11 or Alt+Enter = fullscreen (mouse at the top edge shows the menu bar)
+ *   F2 = screens side by side / stacked
  *   F3 = window size 1x..4x       F4 = 3D resolution 1x..4x (Enhanced)  F5 = Classic / Enhanced
  *   F6 = DS Lite screen filter    F7 = DS Lite console around the screens   P = pause
  *   F8 = actual size (the screens as big as a real DS Lite's)
  *   F12 = screenshot (dqix-shot-N.bmp)
  *   F10 = bug report (reports/<date-time>/: screenshot, inputs, saves, log)
- *   Esc = quit (the save file is always up to date)
+ *   Esc = leave fullscreen, or quit (the save file is always up to date)
  * On Windows every setting is also in the menu bar (menu_win32 below).
  * A game controller works too (Nintendo layout by position: right face button = A). */
 #define SDL_MAIN_HANDLED
@@ -24,6 +25,7 @@
 #include "frontend.h"
 #include "gl_render.h"
 #include "menu.h"
+#include "version.h"
 
 #define DS_FPS 59.8261
 
@@ -317,7 +319,7 @@ static uint16_t key_bits(const Uint8* ks) {
     if (ks[SDL_SCANCODE_X]) k |= 1 << 0;                           /* A */
     if (ks[SDL_SCANCODE_Z]) k |= 1 << 1;                           /* B */
     if (ks[SDL_SCANCODE_RSHIFT] || ks[SDL_SCANCODE_BACKSPACE]) k |= 1 << 2;   /* SELECT */
-    if (ks[SDL_SCANCODE_RETURN]) k |= 1 << 3;                      /* START */
+    if (ks[SDL_SCANCODE_RETURN] && !(SDL_GetModState() & KMOD_ALT)) k |= 1 << 3;   /* START (not with Alt+Enter = fullscreen) */
     if (ks[SDL_SCANCODE_RIGHT]) k |= 1 << 4;
     if (ks[SDL_SCANCODE_LEFT]) k |= 1 << 5;
     if (ks[SDL_SCANCODE_UP]) k |= 1 << 6;
@@ -523,8 +525,8 @@ static void present(void) {
 /* ---------------------------------------------------------------- settings changes (keys and menu) */
 static void update_title(double fps) {
     char title[128];
-    if (g_paused) snprintf(title, sizeof title, "Dragon Quest IX - paused (P to continue)");
-    else snprintf(title, sizeof title, "Dragon Quest IX - %s%s - %.1f fps%s", g_classic ? "Classic" : "Enhanced",
+    if (g_paused) snprintf(title, sizeof title, "Dragon Quest IX " DQIX_VERSION " - paused (P to continue)");
+    else snprintf(title, sizeof title, "Dragon Quest IX " DQIX_VERSION " - %s%s - %.1f fps%s", g_classic ? "Classic" : "Enhanced",
                   g_gl && g_opt.lcd ? " - DS Lite screen" : "", fps, g_fast ? " (fast)" : "");
     SDL_SetWindowTitle(g_win, title);
 }
@@ -563,7 +565,10 @@ static const char* CONTROLS_TEXT =
     "Touch screen   left mouse button on the bottom screen\n\n"
     "Tab (hold) fast forward   P pause   F5 Classic / Enhanced\n"
     "F6 DS Lite screen   F7 DS Lite console   F8 actual size   F2 layout   F3 window size\n"
-    "F4 3D resolution   F11 fullscreen   F12 screenshot   F10 bug report   Esc quit";
+    "F4 3D resolution   F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
+    "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit";
+
+static int g_menu_peek;          /* fullscreen: the menu bar is showing because the mouse is at the top */
 
 static void do_action(int id) {
     int relayout = 0;
@@ -571,11 +576,23 @@ static void do_action(int id) {
     case MI_PAUSE: g_paused = !g_paused; break;
     case MI_TURBO: g_turbo = !g_turbo; break;
     case MI_SHOT: g_shot_req = 1; break;
-    case MI_REPORT:
-        report_write("F10 pressed");
+    case MI_REPORT: {
+        extern char g_report_last_dir[300];
+        report_write("F10 pressed");                               /* captured first: the moment you pressed it */
+        char* text = g_win ? ask_text(g_win, "Bug report " DQIX_VERSION,
+            "The report is saved. Describe what went wrong (what you did, what you expected, what happened) - "
+            "as much as you like. Save adds it to the report; Skip keeps the report without a description.") : NULL;
+        if (text && g_report_last_dir[0]) {
+            char path[400]; snprintf(path, sizeof path, "%s/description.txt", g_report_last_dir);
+            FILE* f = fopen(path, "wb");
+            if (f) { fputs(text, f); fputs("\n", f); fclose(f); }
+        }
+        free(text);
         if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
         g_fps_t0 = SDL_GetPerformanceCounter();                    /* keep that title up for a second */
+        g_next_frame = SDL_GetPerformanceCounter();                /* the game waited while you typed */
         break;
+    }
     case MI_EXIT: exit(0);
     case MI_CLASSIC: case MI_ENHANCED:
         if (!g_gl) break;
@@ -607,6 +624,7 @@ static void do_action(int id) {
         break;
     case MI_FULL:
         g_fullscreen = !g_fullscreen;
+        g_menu_peek = 0;
         menu_show(!g_fullscreen);
         SDL_SetWindowFullscreen(g_win, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
         relayout = !g_fullscreen;
@@ -614,7 +632,7 @@ static void do_action(int id) {
     case MI_CONTROLS: SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Controls", CONTROLS_TEXT, g_win); break;
     case MI_ABOUT:
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "About",
-            "Dragon Quest IX for PC (private build, " __DATE__ ")\n\n"
+            "Dragon Quest IX for PC, " DQIX_VERSION " (" DQIX_VERSION_DATE "), built " __DATE__ "\n\n"
             "Classic draws the game exactly like the DS; Enhanced draws its 3D\n"
             "on the graphics card at up to 4x.\n\n"
             "DS Lite screen colours: Pokefan531's measured DS Lite profile.", g_win);
@@ -638,8 +656,8 @@ static void handle_events(void) {
         case SDL_KEYDOWN: {
             if (e.key.repeat || !g_win) break;
             SDL_Scancode k = e.key.keysym.scancode;
-            if (k == SDL_SCANCODE_ESCAPE) exit(0);
-            if (k == SDL_SCANCODE_F11) do_action(MI_FULL);
+            if (k == SDL_SCANCODE_ESCAPE) { if (g_fullscreen) do_action(MI_FULL); else exit(0); break; }
+            if (k == SDL_SCANCODE_F11 || (k == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) { do_action(MI_FULL); break; }
             if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? MI_STACKED : MI_SIDE);
             if (k == SDL_SCANCODE_F3) do_action(MI_SIZE1 + g_scale % 4);
             if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) do_action(MI_RES1 + g_scale3d % 4);
@@ -652,6 +670,13 @@ static void handle_events(void) {
             if (k == SDL_SCANCODE_P || k == SDL_SCANCODE_PAUSE) do_action(MI_PAUSE);
             break;
         }
+        case SDL_MOUSEMOTION:
+            /* fullscreen: the menu bar appears while the mouse is at the top edge */
+            if (g_fullscreen) {
+                if (!g_menu_peek && e.motion.y <= 1) { g_menu_peek = 1; menu_show(1); }
+                else if (g_menu_peek && e.motion.y > 80) { g_menu_peek = 0; menu_show(0); }
+            }
+            break;
         case SDL_WINDOWEVENT:
             if (e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED && g_opt.actual) { update_actual(); if (!g_fullscreen) layout_window(); }
             break;

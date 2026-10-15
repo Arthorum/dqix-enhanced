@@ -43,11 +43,11 @@ $(OBJ)/rt/menu_win32.o: runtime/menu_win32.c runtime/menu.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wno-unused-parameter $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
 
-$(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.h runtime/gl_render.h runtime/menu.h
+$(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.h runtime/gl_render.h runtime/menu.h runtime/version.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wno-unused-parameter $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
 
-$(OBJ)/rt/%.o: runtime/%.c runtime/nds.h runtime/cpu.h runtime/coro.h runtime/frontend.h
+$(OBJ)/rt/%.o: runtime/%.c runtime/nds.h runtime/cpu.h runtime/coro.h runtime/frontend.h runtime/version.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter $(DEFS) -Iruntime -I$(GEN) -c $< -o $@
 

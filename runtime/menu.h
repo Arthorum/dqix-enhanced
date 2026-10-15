@@ -23,3 +23,8 @@ int menu_command(const SDL_Event* e);         /* the chosen item, or 0 */
 /* Size of one pixel of the monitor the window is on, in millimetres, from
  * the monitor's own description of itself (EDID). 0 if unknown. */
 float display_mm_per_pixel(SDL_Window* win);
+
+/* A box where the player types a description (bug reports). Returns the text
+ * (UTF-8, caller frees) or NULL if the box was closed without saving or isn't
+ * available on this system. */
+char* ask_text(SDL_Window* win, const char* title, const char* prompt);
