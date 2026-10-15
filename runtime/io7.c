@@ -7,7 +7,6 @@
 #include "frontend.h"
 
 uint8_t g_io7[0x1000];
-static uint8_t g_wifi[0x10000];   /* 0x04800000: wireless registers, not emulated */
 uint32_t dispstat_read(Core* k);
 
 /* ================================================================ SPI */
@@ -132,12 +131,85 @@ void firmware_init(void) {
         uint16_t crc = crc16_buf(0xFFFF, u, 0x70);
         memcpy(&u[0x72], &crc, 2);
     }
+    wifi_reset(g_fw);
+    /* the frontend's wireless choices (set before boot); DQIX_ONLINE=dns for tests */
+    if (!g_wireless.online && getenv("DQIX_ONLINE")) { g_wireless.online = 1; snprintf(g_wireless.dns, sizeof g_wireless.dns, "%s", getenv("DQIX_ONLINE")); }
+    const char* m = getenv("DQIX_MAC");                          /* replaying a report: its mac line */
+    unsigned b[6];
+    if (m && sscanf(m, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+        for (int i = 0; i < 6; i++) g_wireless.mac[i] = (uint8_t)b[i];
+        g_wireless.mac_set = 1;
+    }
+    firmware_load_wireless();
+    if (g_wireless.mac_set) firmware_set_mac(g_wireless.mac);
+    firmware_set_ap(g_wireless.online, g_wireless.dns);
+    net_enable(g_wireless.online);
 }
+WirelessConfig g_wireless;
 
 /* What the firmware copies to RAM at boot: the user settings (newest valid
  * copy; both are the same here) and the header values the SDK reads. */
 const uint8_t* firmware_user_settings(void) { return &g_fw[FW_USER + 0x100]; }
 uint32_t firmware_user_offset(void) { return FW_USER; }
+
+/* ---------------------------------------------------------------- wireless settings
+ * The DS keeps three Wi-Fi connections in its firmware (256 bytes each, CRC
+ * at 0xFE). Slot 1 can be pointed at the virtual access point (wifi.c) with
+ * a fixed DNS server - how players reach community Nintendo Wi-Fi
+ * Connection servers on real hardware. What the game writes there (its
+ * Nintendo WFC ID) is kept in wireless.bin next to the game. */
+static const char WFC_FILE[] = "wireless.bin";
+static int g_fw_ap_dirty;
+
+static void ap_crc(uint8_t* a) { put16(&a[0xFE], crc16_buf(0x0000, a, 0xFE)); }
+
+void firmware_load_wireless(void) {
+    FILE* f = fopen(WFC_FILE, "rb");
+    if (!f) return;
+    uint8_t buf[0x300];
+    if (fread(buf, 1, sizeof buf, f) == sizeof buf) memcpy(&g_fw[FW_AP], buf, sizeof buf);
+    fclose(f);
+}
+static void firmware_save_wireless(void) {
+    if (!g_fw_ap_dirty) return;
+    g_fw_ap_dirty = 0;
+    FILE* f = fopen(WFC_FILE, "wb");
+    if (!f) return;
+    fwrite(&g_fw[FW_AP], 1, 0x300, f);
+    fclose(f);
+}
+
+void firmware_write_wireless(FILE* f) { fwrite(&g_fw[FW_AP], 1, 0x300, f); }
+
+/* on: slot 1 = the virtual access point "DQIX-PC" (open, address by DHCP, DNS = dns) */
+void firmware_set_ap(int on, const char* dns) {
+    uint8_t* a = &g_fw[FW_AP];
+    int ours = !memcmp(&a[0x40], "DQIX-PC", 8);
+    if (!on && !ours) return;
+    if (on) {
+        if (!ours) { memset(a, 0, 0x100); memcpy(&a[0x40], "DQIX-PC", 7); }
+        unsigned d[4] = { 0 };
+        if (sscanf(dns ? dns : "", "%u.%u.%u.%u", &d[0], &d[1], &d[2], &d[3]) == 4)
+            for (int i = 0; i < 4; i++) a[0xC8 + i] = (uint8_t)d[i];       /* primary DNS */
+        memset(&a[0xCC], 0, 4);                                            /* no secondary */
+        a[0xE6] = 0;                                                       /* no WEP */
+        a[0xE7] = 0;                                                       /* status: normal */
+        a[0xE8] = 7;                                                       /* SSID length */
+        a[0xEF] = 1;                                                       /* connection configured */
+    } else if (ours) {
+        a[0xE7] = 0xFF;                                                    /* not configured */
+    }
+    ap_crc(a);
+    g_fw_ap_dirty = 1;
+    firmware_save_wireless();
+}
+
+/* the console's MAC address (firmware header, under the Wi-Fi config CRC) */
+void firmware_set_mac(const uint8_t mac[6]) {
+    memcpy(&g_fw[0x36], mac, 6);
+    put16(&g_fw[0x2A], crc16_buf(0x0000, &g_fw[0x2C], 0x138));
+    wifi_reset(g_fw);
+}
 
 static uint8_t spi_xfer(int dev, uint8_t in, int first) {
     switch (dev) {
@@ -150,6 +222,7 @@ static uint8_t spi_xfer(int dev, uint8_t in, int first) {
     }
     case 1: {   /* firmware flash */
         if (first) {
+            firmware_save_wireless();                             /* the previous command may have written settings */
             g_spi_cmd = in; g_spi_pos = 0; g_fw_addr = 0;
             if (in == 0x04) g_fw_status &= (uint8_t)~2;           /* write disable */
             if (in == 0x06) g_fw_status |= 2;                     /* write enable */
@@ -163,7 +236,9 @@ static uint8_t spi_xfer(int dev, uint8_t in, int first) {
         }
         if (g_spi_cmd == 0x0A) {                                  /* page write (kept in memory) */
             if (n < 3) { g_fw_addr = (g_fw_addr << 8) | in; return 0; }
-            g_fw[g_fw_addr++ % sizeof g_fw] = in;
+            uint32_t wa = g_fw_addr++ % sizeof g_fw;
+            g_fw[wa] = in;
+            if (wa >= FW_AP && wa < FW_AP + 0x300) g_fw_ap_dirty = 1;
             return in;
         }
         if (g_spi_cmd == 0x05) return g_fw_status;                /* status: ready, write-enable latch */
@@ -339,11 +414,13 @@ static uint32_t reg7_read32(uint32_t off) {
 
 uint32_t io7_read(uint32_t a, int size) {
     if (a >= 0x04800000 && a < 0x04810000) {
+        time_poll(&g_c7);                                         /* status polling: let time move */
+        uint32_t v;
+        if (size == 4) v = wifi_read16(a & ~3u) | (uint32_t)wifi_read16((a & ~3u) + 2) << 16;
+        else { v = wifi_read16(a & ~1u); if (size == 1) v = (v >> ((a & 1) * 8)) & 0xFF; }
         { static int lg = -1; if (lg < 0) lg = getenv("DQIX_WIFILOG") != NULL;
-          if (lg) { uint32_t w; memcpy(&w, &g_wifi[(a & 0xFFFF) & ~3u], 4); fprintf(stderr, "wifi rd f%llu %08x = %08x (%d)\n", (unsigned long long)g_frame, a, w, size); } }
-        uint32_t v; memcpy(&v, &g_wifi[(a & 0xFFFF) & ~3u], 4);
-        v >>= (a & 3) * 8;
-        return size == 1 ? (v & 0xFF) : size == 2 ? (v & 0xFFFF) : v;
+          if (lg > 0 && lg++ < 200000) fprintf(stderr, "wifi rd f%llu %08x = %08x (%d)\n", (unsigned long long)g_frame, a, v, size); }
+        return v;
     }
     if (a >= 0x04100000) {
         if ((a & ~3u) == 0x04100000) return ipc_fifo_recv(&g_c7);
@@ -361,8 +438,15 @@ void io7_write(uint32_t a, uint32_t v, int size) {
     Core* k = &g_c7;
     if (a >= 0x04800000 && a < 0x04810000) {
         { static int lg = -1; if (lg < 0) lg = getenv("DQIX_WIFILOG") != NULL;
-          if (lg) fprintf(stderr, "wifi wr f%llu %08x = %08x (%d)\n", (unsigned long long)g_frame, a, v, size); }
-        memcpy(&g_wifi[a & 0xFFFF], &v, size); return; }
+          if (lg > 0 && lg++ < 200000) fprintf(stderr, "wifi wr f%llu %08x = %08x (%d)\n", (unsigned long long)g_frame, a, v, size); }
+        if (size == 4) { wifi_write16(a, (uint16_t)v); wifi_write16(a + 2, (uint16_t)(v >> 16)); }
+        else if (size == 2) wifi_write16(a, (uint16_t)v);
+        else {                                                    /* 8-bit writes: merge into the halfword */
+            uint16_t cur = wifi_read16(a & ~1u);
+            cur = (a & 1) ? (uint16_t)((cur & 0x00FF) | (v & 0xFF) << 8) : (uint16_t)((cur & 0xFF00) | (v & 0xFF));
+            wifi_write16(a & ~1u, cur);
+        }
+        return; }
     if (a >= 0x04100000) { LOG_WARN("io7 write %08x\n", a); return; }
     uint32_t off = a - 0x04000000u;
     if (off >= sizeof g_io7) { LOG_WARN("io7 write %08x = %x\n", a, v); return; }
@@ -400,6 +484,7 @@ void io7_write(uint32_t a, uint32_t v, int size) {
     case 0x0B8: case 0x0C4: case 0x0D0: case 0x0DC: if ((off & 3) + size > 2) dma_write_ctl(k, (base - 0xB8) / 12); break;
     case 0x100: case 0x104: case 0x108: case 0x10C: timer_write(k, (base - 0x100) / 4, off - base, v, size); break;
     case 0x180: ipc_sync_write(k, IO7_16(0x180)); break;
+    case 0x304: wifi_set_power((IO7_16(0x304) >> 1) & 1); break;      /* POWCNT2: wireless on/off */
     case 0x184: ipc_fifocnt_write(k, IO7_16(0x184)); break;
     case 0x188: ipc_fifo_send(k, IO7_32(0x188)); break;
     default: break;

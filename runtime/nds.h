@@ -207,6 +207,19 @@ void spi_write_cnt(uint16_t v);
 uint16_t spi_read_data(void);
 void spi_write_data(uint16_t v);
 void firmware_init(void);
+/* wifi.c: the wireless chip */
+void wifi_reset(const uint8_t* firmware);
+void firmware_load_wireless(void);
+void firmware_set_ap(int on, const char* dns);
+void firmware_set_mac(const uint8_t mac[6]);
+void firmware_write_wireless(FILE* f);               /* the Wi-Fi settings area (reports) */
+void net_enable(int on);
+typedef struct { int online; char dns[32]; uint8_t mac[6]; int mac_set; } WirelessConfig;
+extern WirelessConfig g_wireless;                  /* set by the frontend before boot */
+void wifi_set_power(int on);
+void wifi_advance(uint32_t cycles);
+uint16_t wifi_read16(uint32_t addr);
+void wifi_write16(uint32_t addr, uint16_t val);
 const uint8_t* firmware_user_settings(void);   /* 0x70 bytes, copied to 0x027FFC80 at boot */
 uint32_t firmware_user_offset(void);
 uint8_t rtc_io(uint8_t v, int write);

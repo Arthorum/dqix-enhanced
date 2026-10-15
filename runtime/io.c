@@ -178,6 +178,7 @@ void time_advance_lines(uint32_t lines) {
         timers_update(&g_c9);
         timers_update(&g_c7);
         sound_advance(CYCLES_PER_LINE);
+        wifi_advance(CYCLES_PER_LINE);
         arm7_run();
     }
 }

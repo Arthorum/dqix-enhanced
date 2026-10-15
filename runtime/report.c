@@ -91,6 +91,7 @@ void report_write(const char* reason) {
     if ((f = open_in(dir, "boot.sav", "wb"))) { had_boot_save = backup_write_boot(f); fclose(f); }
     if (!had_boot_save) { snprintf(path, sizeof path, "%s/boot.sav", dir); remove(path); }
     if ((f = open_in(dir, "now.sav", "wb"))) { backup_write_now(f); fclose(f); }
+    if ((f = open_in(dir, "wireless.bin", "wb"))) { firmware_write_wireless(f); fclose(f); }
     if ((f = open_in(dir, "info.txt", "w"))) {
         fprintf(f, "reason: %s\n", reason);
         fprintf(f, "frame: %llu\n", (unsigned long long)g_frame);
@@ -98,9 +99,14 @@ void report_write(const char* reason) {
         fprintf(f, "boot_save: %s\n", had_boot_save ? "yes" : "no (new game)");
         fprintf(f, "version: %s (%s)\n", DQIX_VERSION, DQIX_VERSION_DATE);
         fprintf(f, "built: %s %s\n", __DATE__, __TIME__);
+        fprintf(f, "wireless: %s%s%s\n", g_wireless.online ? "connected, DNS " : "off", g_wireless.online ? g_wireless.dns : "",
+                g_wireless.mac_set ? "" : " (default MAC)");
+        if (g_wireless.mac_set) fprintf(f, "mac: %02x:%02x:%02x:%02x:%02x:%02x\n", g_wireless.mac[0], g_wireless.mac[1],
+                                        g_wireless.mac[2], g_wireless.mac[3], g_wireless.mac[4], g_wireless.mac[5]);
         fprintf(f, "\nreplay: copy boot.sav (if any) to a save file, then run\n"
                    "  DQIX_RTC=%lld DQIX_INPUT_FILE=input.txt dqix <rom> <extract> %llu 1 <save file>\n",
                 (long long)rtc_base(), (unsigned long long)g_frame + 1);
+        fprintf(f, "  in this folder (it reads wireless.bin from here)%s\n", g_wireless.mac_set ? ", with DQIX_MAC set to the mac line" : "");
         fclose(f);
     }
     if ((f = open_in(dir, "log.txt", "w"))) {

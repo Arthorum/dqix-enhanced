@@ -20,12 +20,29 @@ SDL_LIBS ?= $(shell sdl2-config --libs)
 RT += runtime/gl_render.c runtime/menu_win32.c
 endif
 
+# libslirp (user-mode network stack for the wireless emulation, BSD licence)
+SLIRP_SRC = $(wildcard third_party/libslirp/src/*.c) third_party/libslirp/glib/glib.c
+SLIRPOBJ = $(patsubst third_party/libslirp/%.c,$(OBJ)/slirp/%.o,$(SLIRP_SRC))
+SLIRP_INC = -Ithird_party/libslirp/src -Ithird_party/libslirp/glib
+ifeq ($(OS),Windows_NT)
+NET_LIBS = -lws2_32 -liphlpapi
+endif
+NET_LIBS ?=
+
 GENOBJ = $(patsubst $(GEN)/%.c,$(OBJ)/gen/%.o,$(wildcard $(GEN)/*.c))
 GEN7OBJ = $(patsubst $(GEN7)/%.c,$(OBJ)/gen7/%.o,$(wildcard $(GEN7)/*.c))
 RTOBJ = $(patsubst runtime/%.c,$(OBJ)/rt/%.o,$(RT))
 
-$(OUT): $(GENOBJ) $(GEN7OBJ) $(RTOBJ)
-	$(CC) -o $@ $^ $(SDL_LIBS) -lm $(LDFLAGS)
+$(OUT): $(GENOBJ) $(GEN7OBJ) $(RTOBJ) $(SLIRPOBJ)
+	$(CC) -o $@ $^ $(SDL_LIBS) -lm $(NET_LIBS) $(LDFLAGS)
+
+$(OBJ)/slirp/%.o: third_party/libslirp/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -w -DLIBSLIRP_STATIC_BUILD -DBUILDING_LIBSLIRP -DG_LOG_DOMAIN=\"Slirp\" $(SLIRP_INC) -c $< -o $@
+
+$(OBJ)/rt/net.o: runtime/net.c runtime/nds.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -Wall -DLIBSLIRP_STATIC_BUILD $(DEFS) $(SLIRP_INC) -Iruntime -c $< -o $@
 
 $(OBJ)/gen/%.o: $(GEN)/%.c runtime/cpu.h
 	@mkdir -p $(dir $@)

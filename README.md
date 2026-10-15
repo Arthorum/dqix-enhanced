@@ -67,10 +67,26 @@ monitor pixels per DS pixel; at actual size that takes a very dense screen
 own pixels are about as fine as the DS Lite's, so they provide the grid. The game underneath is
 still Classic or Enhanced; with the filter off, Classic is pixel-exact.
 
-**Downloadable content (Game menu).** The 64 downloadable quests and 23
-special guests are on the cartridge; Nintendo Wi-Fi Connection only switched
-them on in the save. With this option on, the game switches them on in the
-save each time it starts (save layout from the open-source DQIX save editor).
+**Wireless menu.** The DS's wireless chip is emulated (from melonDS's
+Wifi.cpp), and the PC plays a wireless access point called `DQIX-PC`.
+*Connect to the internet* passes the DS's traffic to the internet through
+libslirp (a user-mode network stack: DHCP, DNS and TCP become ordinary
+sockets; nothing on the PC is changed). The DS's own Wi-Fi settings point its
+DNS at a community replacement for Nintendo Wi-Fi Connection, the way players
+set up a real DS: *Server* picks AltWFC (172.104.88.237, the default) or
+Wiimmfi (164.132.44.106); `wfc_server = <address>` in `settings.ini` uses
+another. Then talk to Sellma at the DQVC counter in Stornway's Quester's Rest,
+as on the DS. With it off, the game behaves like a DS with no access point
+(Sellma offers DQVC without connecting). Each copy makes up its own MAC
+address the first time (`wireless_mac` in `settings.ini`); the servers tell
+players apart by it. F10 reports record the connection: the address from
+DHCP, every name looked up and its answer, every connection opened or refused.
+
+*Unlock all downloadable content now* is the offline fallback: the 64
+downloadable quests and 23 special guests are on the cartridge, and Nintendo
+Wi-Fi Connection only switched them on in the save, so this switches them on
+in the save each time the game starts (save layout from the open-source DQIX
+save editor).
 
 **Settings.** The game remembers every menu choice in `settings.ini` next to `dqix.exe` (delete it to go
 back to the defaults). Enhanced needs OpenGL 3.3 (nearly every PC from the
@@ -160,6 +176,9 @@ DQIX_POLYDUMP=frame,x,y                        3D polygons covering a pixel
 DQIX_WAV=out.wav                               record the sound (headless build)
 DQIX_SNDLOG=1                                  log sound channel starts
 DQIX_CRC=out.txt                               a checksum of every frame (compare runs)
+DQIX_ONLINE=172.104.88.237                     connect to the internet through this DNS (tests)
+DQIX_MAC=00:09:bf:12:34:56                     the console's MAC (replaying a report's mac line)
+DQIX_WIFILOG=1 / DQIX_NETLOG=1 / DQIX_NETHEX=1 log the wireless chip / network / every frame in hex
 DQIX_DUMP_AT=100,200                           with DQIX_DUMP=dir,1: only those frames
 DQIX_MODE=enhanced / DQIX_NO_SETTINGS=1        window build: force a mode / ignore settings.ini
 ```
@@ -186,6 +205,9 @@ runtime/main.c         ROM loading, firmware boot state, entry
 runtime/gpu2d.c        both 2D engines, per scanline
 runtime/gpu3d.c        3D geometry engine + software rasterizer
 runtime/sound.c        sound channels and mixer
+runtime/wifi.c         the wireless chip and the access point DQIX-PC (after melonDS)
+runtime/net.c          the access point's internet connection (libslirp)
+third_party/libslirp   user-mode network stack (BSD licence, as vendored by melonDS)
 runtime/input.c        DS buttons / touch from the frontend or a script
 runtime/frontend_sdl.c window, input, audio, pacing, settings (SDL2)
 runtime/menu_win32.c   the menu bar (Windows)
@@ -235,13 +257,15 @@ Generated C is derived from the game: keep it private. The tool contains no game
   DQIX (same frames rendered here): colours per backlight level, black glow,
   pixel grid from a macro shot, motion blur from slow-motion video; plus the
   same shots of the port on the monitor with identical camera settings.
+* A simulated server that runs offline (from recorded replies of a real one),
+  so the Sellma download works with no internet and no community server.
 * Save states (states are tied to one build; see notes in the chat history).
 * Enhanced extras: widescreen, top-screen map.
 
 ## Known limits
 
-* Wireless (local play, Nintendo WFC) is not emulated; the game sees no
-  access points.
+* Local wireless play (with other DS consoles nearby) is not emulated; the
+  game's internet features go through the Wireless menu.
 * Anti-piracy and a few functions the decomp marks as data run in the
   interpreter (correct, but slower).
 * 528 `bx r12` long-call stubs go through the dispatcher (later optimisation).

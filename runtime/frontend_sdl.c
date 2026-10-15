@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <time.h>
 #include "nds.h"
 #include "frontend.h"
 #include "gl_render.h"
@@ -209,6 +211,38 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
 /* ---------------------------------------------------------------- settings.ini
  * Remembers the player's choices between launches (next to the game). */
 static const char* SETTINGS = "settings.ini";
+
+/* Wireless: the community servers that replace Nintendo Wi-Fi Connection.
+ * The DS finds a server through its DNS setting (firmware_set_ap), exactly
+ * as players set it up by hand on a real DS. */
+static const struct { const char* key; const char* dns; } WFC[] = {
+    { "altwfc", "172.104.88.237" },
+    { "wiimmfi", "164.132.44.106" },
+};
+static char g_wfc_server[64] = "altwfc";       /* a key above or a DNS address */
+static int g_net_want;                         /* the menu's "connect" check */
+static const char* wfc_dns(void) {
+    for (unsigned i = 0; i < sizeof WFC / sizeof WFC[0]; i++) if (!strcmp(g_wfc_server, WFC[i].key)) return WFC[i].dns;
+    return g_wfc_server;
+}
+static int wfc_custom(void) {
+    for (unsigned i = 0; i < sizeof WFC / sizeof WFC[0]; i++) if (!strcmp(g_wfc_server, WFC[i].key)) return 0;
+    return 1;
+}
+static void wireless_apply(int boot) {
+    g_wireless.online = g_net_want;
+    snprintf(g_wireless.dns, sizeof g_wireless.dns, "%s", wfc_dns());
+    if (!boot) { firmware_set_ap(g_wireless.online, g_wireless.dns); net_enable(g_wireless.online); }
+}
+/* every console has its own MAC address, and the servers tell players apart
+ * by it: one is made up the first time (Nintendo's prefix, random rest) */
+static void wireless_mac_new(void) {
+    uint32_t r = (uint32_t)time(NULL) ^ (uint32_t)SDL_GetPerformanceCounter() ^ (uint32_t)(uintptr_t)&r;
+    for (int i = 0; i < 8; i++) r = r * 1103515245u + 12345u;
+    g_wireless.mac[0] = 0x00; g_wireless.mac[1] = 0x09; g_wireless.mac[2] = 0xBF;
+    for (int i = 3; i < 6; i++) { r = r * 1103515245u + 12345u; g_wireless.mac[i] = (uint8_t)(r >> 16); }
+    g_wireless.mac_set = 1;
+}
 static void settings_load(void) {
     FILE* f = fopen(SETTINGS, "r");
     if (!f) return;
@@ -236,6 +270,15 @@ static void settings_load(void) {
         else if (!strcmp(key, "actual_size")) g_opt.actual = atoi(val) != 0;
         else if (!strcmp(key, "monitor_width_mm")) g_opt.monitor_width_mm = (float)atof(val);
         else if (!strcmp(key, "downloadable_content")) g_opt.dlc = atoi(val) != 0;
+        else if (!strcmp(key, "wireless")) g_net_want = atoi(val) != 0;
+        else if (!strcmp(key, "wfc_server")) snprintf(g_wfc_server, sizeof g_wfc_server, "%s", val);
+        else if (!strcmp(key, "wireless_mac")) {
+            unsigned b[6];
+            if (sscanf(val, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+                for (int i = 0; i < 6; i++) g_wireless.mac[i] = (uint8_t)b[i];
+                g_wireless.mac_set = 1;
+            }
+        }
     }
     fclose(f);
 }
@@ -271,8 +314,16 @@ static void settings_save(void) {
     fprintf(f, "# monitor itself; if it comes out wrong, put its visible width in millimetres here (0 = automatic)\n");
     fprintf(f, "actual_size = %d\n", g_opt.actual);
     fprintf(f, "monitor_width_mm = %g\n", g_opt.monitor_width_mm);
-    fprintf(f, "# the downloadable quests and special guests (Nintendo Wi-Fi Connection is gone): 0 or 1\n");
+    fprintf(f, "# switch on every downloadable quest and special guest at start, without connecting: 0 or 1\n");
     fprintf(f, "downloadable_content = %d\n", g_opt.dlc);
+    fprintf(f, "# Wireless menu: connect to a community Nintendo Wi-Fi Connection server: 0 or 1\n");
+    fprintf(f, "wireless = %d\n", g_net_want);
+    fprintf(f, "# which server: altwfc, wiimmfi, or the DNS address of another one (e.g. 1.2.3.4)\n");
+    fprintf(f, "wfc_server = %s\n", g_wfc_server);
+    fprintf(f, "# this copy's own MAC address (made up the first time; the servers know you by it)\n");
+    if (g_wireless.mac_set)
+        fprintf(f, "wireless_mac = %02x:%02x:%02x:%02x:%02x:%02x\n", g_wireless.mac[0], g_wireless.mac[1],
+                g_wireless.mac[2], g_wireless.mac[3], g_wireless.mac[4], g_wireless.mac[5]);
     fclose(f);
 }
 
@@ -358,7 +409,11 @@ void frontend_init(int argc, char** argv) {
     g_report_perf = perf_write;
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
     skins_scan();
-    if (!getenv("DQIX_NO_SETTINGS")) settings_load();
+    if (!getenv("DQIX_NO_SETTINGS")) {
+        settings_load();
+        if (!g_wireless.mac_set && !g_headless) { wireless_mac_new(); settings_save(); }
+    }
+    wireless_apply(1);                                          /* read by firmware_init */
     if (g_opt.dlc) backup_unlock_dlc();                        /* before the game reads the save */
     if (getenv("DQIX_MODE")) g_classic = strcmp(getenv("DQIX_MODE"), "enhanced") != 0;   /* tests */
     /* real pixels on high-DPI Windows setups (not stretched by the system), so
@@ -629,6 +684,10 @@ static void menu_sync(void) {
     menu_check(MI_PAUSE, g_paused);
     menu_check(MI_TURBO, g_turbo);
     menu_check(MI_DLC, g_opt.dlc);
+    menu_check(MI_NET, g_net_want);
+    menu_check(MI_SRV_ALTWFC, !strcmp(g_wfc_server, "altwfc"));
+    menu_check(MI_SRV_WIIMMFI, !strcmp(g_wfc_server, "wiimmfi"));
+    menu_check(MI_SRV_CUSTOM, wfc_custom()); menu_enable(MI_SRV_CUSTOM, wfc_custom());
     menu_check(MI_CLASSIC, g_classic); menu_check(MI_ENHANCED, !g_classic);
     menu_enable(MI_ENHANCED, g_gl);
     for (int i = 0; i < 4; i++) { menu_check(MI_RES1 + i, g_scale3d == i + 1); menu_enable(MI_RES1 + i, g_gl && !g_classic); }
@@ -678,6 +737,31 @@ static void do_action(int id) {
             "The quests are offered by their quest givers once you reach them in the story; the guests visit "
             "Quester's Rest." :
             "Off. A save that already has them keeps them; this only stops switching them on at start.", g_win);
+        break;
+    case MI_NET:
+        g_net_want = !g_net_want;
+        wireless_apply(0);
+        if (g_net_want) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Wireless",
+            "Connected mode is on. In the game, talk to Sellma at the DQVC counter in Stornway's Quester's Rest "
+            "and the DS will connect through this PC "
+            "to the server chosen under Wireless > Server.\n\n"
+            "If the connection fails, press F10 right after: the bug report records how far it got.", g_win);
+        break;
+    case MI_SRV_ALTWFC: case MI_SRV_WIIMMFI:
+        snprintf(g_wfc_server, sizeof g_wfc_server, "%s", WFC[id - MI_SRV_ALTWFC].key);
+        wireless_apply(0);
+        break;
+    case MI_SRV_CUSTOM: break;
+    case MI_NET_HELP:
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Wireless",
+            "Nintendo Wi-Fi Connection closed in 2014. Fans run replacement servers (AltWFC, Wiimmfi) that a "
+            "real DS reaches by changing its DNS setting; this game does the same.\n\n"
+            "The PC plays the part of a wireless access point called DQIX-PC and passes the DS's traffic to the "
+            "internet. Nothing else on your PC is changed.\n\n"
+            "Connect to the internet: the DS gets online when the game asks for it, e.g. when Sellma downloads "
+            "DQVC items and new quests. Turn it off and the game behaves like a DS with no access point.\n\n"
+            "Unlock all downloadable content now: switches on every downloadable quest and special guest in "
+            "your save when the game starts, without connecting. A fallback if no server works.", g_win);
         break;
     case MI_SHOT: g_shot_req = 1; break;
     case MI_REPORT: {

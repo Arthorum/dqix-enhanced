@@ -35,8 +35,6 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(game, MI_SHOT, L"Save &screenshot\tF12");
     item(game, MI_REPORT, L"Save &bug report\tF10");
     sep(game);
-    item(game, MI_DLC, L"&Downloadable quests and special guests");
-    sep(game);
     item(game, MI_EXIT, L"E&xit\tEsc");
 
     HMENU gfx = sub(g_bar, L"G&raphics");
@@ -82,6 +80,17 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(size, MI_SIZE4, L"4x");
     item(view, MI_INTEGER, L"&Integer scaling");
     item(view, MI_FULL, L"&Fullscreen\tF11");
+
+    HMENU wl = sub(g_bar, L"&Wireless");
+    item(wl, MI_NET, L"&Connect to the internet (Nintendo WFC replacement)");
+    HMENU srv = sub(wl, L"&Server");
+    item(srv, MI_SRV_ALTWFC, L"&AltWFC (172.104.88.237)");
+    item(srv, MI_SRV_WIIMMFI, L"&Wiimmfi (164.132.44.106)");
+    item(srv, MI_SRV_CUSTOM, L"&Custom (wfc_server in settings.ini)");
+    sep(wl);
+    item(wl, MI_DLC, L"&Unlock all downloadable content now (offline)");
+    sep(wl);
+    item(wl, MI_NET_HELP, L"&How does this work?");
 
     HMENU help = sub(g_bar, L"&Help");
     item(help, MI_CONTROLS, L"&Controls");
