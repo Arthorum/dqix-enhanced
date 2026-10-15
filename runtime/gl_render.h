@@ -18,7 +18,10 @@ typedef struct {
     float backlight;                                  /* 0..1 */
     int shell;                                        /* draw the console around the screens */
     float lid[3], base[3], btn[3], hinge[3];          /* its colours (linear 0..1, as shown) */
+    int skin;                                         /* draw the console photo (gl_set_skin) instead */
+    float skin_k;                                     /* photo pixels per canvas unit */
 } GlPresent;
+void gl_set_skin(const uint8_t* rgba, int w, int h);
 void gl_present(const GlPresent* v);
 uint8_t* gl_read_window(int w, int h);
 uint8_t* gl_read_full(int* w, int* h);

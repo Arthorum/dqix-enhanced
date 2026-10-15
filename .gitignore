@@ -22,3 +22,6 @@ __pycache__/
 # One-time history setup files
 *.bundle
 setup-history.bat
+
+# console photos are other people's pictures: kept out of the history
+skins/*.png

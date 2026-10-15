@@ -87,7 +87,79 @@ static const Shell SHELLS[] = {
     { "Enamel Navy", "navy", 0x24314F, 0x24314F, 0x313E5F, 0x1A2440 },
     { "Crimson / Black", "crimson", 0xB21F2B, 0x222225, 0x2E2E32, 0x161618 },
 };
-#define N_SHELLS ((int)(sizeof SHELLS / sizeof SHELLS[0]))
+#define N_DRAWN ((int)(sizeof SHELLS / sizeof SHELLS[0]))
+
+/* Console photos: skins/<name>.png with skins/<name>.txt giving where the
+ * screens are in the picture ("top x y w h", "bottom x y w h", optional
+ * "name ..."). Listed after the drawn colours. */
+#define MAX_SKINS 10
+typedef struct { char file[200], name[64]; float top[4], bot[4]; int w, h; } Skin;
+static Skin g_skins[MAX_SKINS];
+static int g_nskins;
+static int g_skin_loaded = -1;                 /* which photo is in the GPU */
+#define N_SHELLS (N_DRAWN + g_nskins)
+
+static void skin_add(const char* png) {
+    if (g_nskins >= MAX_SKINS) return;
+    Skin* k = &g_skins[g_nskins];
+    memset(k, 0, sizeof *k);
+    snprintf(k->file, sizeof k->file, "skins/%s", png);
+    char txt[220]; snprintf(txt, sizeof txt, "%s", k->file);
+    char* dot = strrchr(txt, '.'); if (!dot) return;
+    strcpy(dot, ".txt");
+    FILE* f = fopen(txt, "r");
+    if (!f) return;
+    char line[256]; int got = 0;
+    snprintf(k->name, sizeof k->name, "%.*s (photo)", (int)(strrchr(png, '.') - png), png);
+    while (fgets(line, sizeof line, f)) {
+        float a, b, c, d;
+        if (sscanf(line, " top %f %f %f %f", &a, &b, &c, &d) == 4) { k->top[0] = a; k->top[1] = b; k->top[2] = c; k->top[3] = d; got |= 1; }
+        else if (sscanf(line, " bottom %f %f %f %f", &a, &b, &c, &d) == 4) { k->bot[0] = a; k->bot[1] = b; k->bot[2] = c; k->bot[3] = d; got |= 2; }
+        else if (!strncmp(line, "name ", 5)) { snprintf(k->name, sizeof k->name, "%s", line + 5); k->name[strcspn(k->name, "\r\n")] = 0; }
+    }
+    fclose(f);
+    if (got == 3 && k->top[2] > 0) g_nskins++;
+}
+
+#ifdef _WIN32
+#include <io.h>
+static void skins_scan(void) {
+    struct _finddata_t fd; intptr_t h = _findfirst("skins/*.png", &fd);
+    if (h == -1) return;
+    do skin_add(fd.name); while (_findnext(h, &fd) == 0);
+    _findclose(h);
+}
+#else
+#include <dirent.h>
+static void skins_scan(void) {
+    DIR* d = opendir("skins");
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d))) { size_t n = strlen(e->d_name); if (n > 4 && !strcmp(e->d_name + n - 4, ".png")) skin_add(e->d_name); }
+    closedir(d);
+}
+#endif
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO_WARNINGS
+#include "stb_image.h"
+
+/* The photo for the chosen console colour (if it is one), in the GPU. */
+static const Skin* current_skin(void) {
+    int i = g_opt.shell_color - N_DRAWN;
+    if (i < 0 || i >= g_nskins || !g_gl) return NULL;
+    if (g_skin_loaded != i) {
+        int w, h, n;
+        uint8_t* px = stbi_load(g_skins[i].file, &w, &h, &n, 4);
+        if (!px) { fprintf(stderr, "can't load %s\n", g_skins[i].file); return NULL; }
+        gl_set_skin(px, w, h);
+        stbi_image_free(px);
+        g_skins[i].w = w; g_skins[i].h = h;
+        g_skin_loaded = i;
+    }
+    return &g_skins[i];
+}
 static const float BACKLIGHT[5] = { 0, 0.36f, 0.56f, 0.78f, 1.0f };
 static const char* BACKLIGHT_NAME[5] = { "", "low", "medium", "high", "max" };
 
@@ -100,6 +172,14 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
     if (g_side_by_side) {
         v->cw = 512; v->ch = 192;
         v->top[0] = 0; v->bot[0] = 256; v->top[1] = v->bot[1] = 0;
+    } else if (shell && current_skin()) {
+        /* the photo: canvas units are DS pixels at the photo's top-screen scale */
+        const Skin* k = current_skin();
+        float kk = k->top[2] / 256.0f;
+        v->cw = (float)k->w / kk; v->ch = (float)k->h / kk;
+        v->top[0] = k->top[0] / kk; v->top[1] = k->top[1] / kk;
+        v->bot[0] = k->bot[0] / kk; v->bot[1] = k->bot[1] / kk;
+        v->skin = 1; v->skin_k = kk;
     } else if (shell) {
         v->cw = 560; v->ch = 630;
         v->top[0] = v->bot[0] = 152; v->top[1] = 78; v->bot[1] = 78 + 192 + 90;
@@ -119,7 +199,7 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
     v->lcd = g_gl && g_opt.lcd;
     v->lcd_color = g_opt.lcd_color; v->grid = g_opt.grid; v->ghost = g_opt.ghost;
     v->backlight = BACKLIGHT[g_opt.backlight];
-    const Shell* sh = &SHELLS[g_opt.shell_color];
+    const Shell* sh = &SHELLS[g_opt.shell_color < N_DRAWN ? g_opt.shell_color : 1];
     uint32_t cols[4] = { sh->lid, sh->base, sh->btn, sh->hinge };
     float* dst[4] = { v->lid, v->base, v->btn, v->hinge };
     for (int i = 0; i < 4; i++) for (int k = 0; k < 3; k++) dst[i][k] = (float)((cols[i] >> (16 - 8 * k)) & 255) / 255.0f;
@@ -147,7 +227,10 @@ static void settings_load(void) {
         else if (!strcmp(key, "backlight")) { for (int i = 1; i <= 4; i++) if (!strcmp(val, BACKLIGHT_NAME[i])) g_opt.backlight = i; }
         else if (!strcmp(key, "screen_gap")) g_opt.gap = atoi(val) != 0;
         else if (!strcmp(key, "console")) g_opt.shell = atoi(val) != 0;
-        else if (!strcmp(key, "console_color")) { for (int i = 0; i < N_SHELLS; i++) if (!strcmp(val, SHELLS[i].key)) g_opt.shell_color = i; }
+        else if (!strcmp(key, "console_color")) {
+            for (int i = 0; i < N_DRAWN; i++) if (!strcmp(val, SHELLS[i].key)) g_opt.shell_color = i;
+            for (int i = 0; i < g_nskins; i++) if (!strcmp(val, g_skins[i].file + 6)) g_opt.shell_color = N_DRAWN + i;   /* a photo, by file name */
+        }
         else if (!strcmp(key, "integer_scaling")) g_opt.integer = atoi(val) != 0;
         else if (!strcmp(key, "actual_size")) g_opt.actual = atoi(val) != 0;
         else if (!strcmp(key, "monitor_width_mm")) g_opt.monitor_width_mm = (float)atof(val);
@@ -176,10 +259,10 @@ static void settings_save(void) {
     fprintf(f, "motion_blur = %d\n", g_opt.ghost);
     fprintf(f, "backlight = %s\n", BACKLIGHT_NAME[g_opt.backlight]);
     fprintf(f, "# the real gap between the screens; the DS Lite drawn around them (F7) and its colour:\n");
-    fprintf(f, "# white, black, ice_blue, coral_pink, navy, crimson\n");
+    fprintf(f, "# white, black, ice_blue, coral_pink, navy, crimson, or a photo in the skins folder by file name\n");
     fprintf(f, "screen_gap = %d\n", g_opt.gap);
     fprintf(f, "console = %d\n", g_opt.shell);
-    fprintf(f, "console_color = %s\n", SHELLS[g_opt.shell_color].key);
+    fprintf(f, "console_color = %s\n", g_opt.shell_color < N_DRAWN ? SHELLS[g_opt.shell_color].key : g_skins[g_opt.shell_color - N_DRAWN].file + 6);
     fprintf(f, "# whole-number scaling only (every DS pixel the same size): 0 or 1\n");
     fprintf(f, "integer_scaling = %d\n", g_opt.integer);
     fprintf(f, "# screens as big as a real DS Lite's (F8): 0 or 1. The size of your monitor is read from the\n");
@@ -270,6 +353,7 @@ void frontend_init(int argc, char** argv) {
     SDL_SetMainReady();
     g_report_perf = perf_write;
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
+    skins_scan();
     if (!getenv("DQIX_NO_SETTINGS")) settings_load();
     if (getenv("DQIX_MODE")) g_classic = strcmp(getenv("DQIX_MODE"), "enhanced") != 0;   /* tests */
     /* real pixels on high-DPI Windows setups (not stretched by the system), so
@@ -293,8 +377,9 @@ void frontend_init(int argc, char** argv) {
             g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
         }
         apply_mode();
-        const char* names[N_SHELLS];
-        for (int i = 0; i < N_SHELLS; i++) names[i] = SHELLS[i].name;
+        const char* names[N_DRAWN + MAX_SKINS];
+        for (int i = 0; i < N_DRAWN; i++) names[i] = SHELLS[i].name;
+        for (int i = 0; i < g_nskins; i++) names[N_DRAWN + i] = g_skins[i].name;
         menu_init(g_win, names, N_SHELLS);
         update_actual();
         menu_sync();
@@ -641,7 +726,7 @@ static void do_action(int id) {
             "DS Lite screen colours: Pokefan531's measured DS Lite profile.", g_win);
         break;
     default:
-        if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) g_opt.shell_color = id - MI_SHELLC0;
+        if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) { g_opt.shell_color = id - MI_SHELLC0; relayout = 1; }
         else return;
     }
     if (relayout && g_win) layout_window();

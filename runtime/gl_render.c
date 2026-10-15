@@ -255,6 +255,9 @@ static const char* FS_SCREEN =
     "uniform float u_backlight;\n"
     "uniform int u_shell;\n"
     "uniform vec3 u_lid, u_base, u_btn, u_hinge;\n"
+    "uniform int u_skinmode;               // 1: a console photo (u_skintex) instead of the drawn one\n"
+    "uniform sampler2D u_skintex;\n"
+    "uniform vec2 u_skinscale;             // canvas units -> skin texture coordinates\n"
     "\n"
     "const mat3 DSL = mat3(0.93, 0.025, 0.008,  0.14, 0.90, -0.03,  -0.07, 0.075, 1.022);\n"
     "const float DSL_LUM = 0.935;\n"
@@ -408,6 +411,11 @@ static const char* FS_SCREEN =
     "        vec2 sp = (p - r.xy) * vec2(256.0, 192.0) / r.zw;          // DS pixels\n"
     "        if (u_lcd == 0) outc = texture(u_src, vec2(sp.x / 256.0, (in_bot ? 0.5 : 1.0) - sp.y / 384.0)).rgb;   // exact\n"
     "        else outc = pow(clamp(screen(sp, in_bot ? 1 : 0), 0.0, 1.0), vec3(1.0 / 2.2));\n"
+    "    } else if (u_shell != 0 && u_skinmode != 0) {\n"
+    "        vec3 bg = vec3(0.055, 0.058, 0.065) * (1.0 - 0.35 * length((p - u_canvas * 0.5) / u_canvas));\n"
+    "        vec4 c = texture(u_skintex, p * u_skinscale);\n"
+    "        bool inside = all(greaterThanEqual(p, vec2(0.0))) && all(lessThan(p, u_canvas));\n"
+    "        outc = inside ? mix(bg, c.rgb, c.a) : bg;\n"
     "    } else if (u_shell != 0) {\n"
     "        outc = dslite(p).rgb;\n"
     "    } else {\n"
@@ -452,6 +460,7 @@ static GLuint program(const char* vs, const char* fs, int poly) {
 static int g_scale = 2;
 static GLuint prog_poly, prog_post, prog_comp, prog_copy, prog_screen, prog_ghost;
 static GLuint ghost_tex[2], ghost_fbo[2]; static int ghost_cur = -1, ghost_w, ghost_h;
+static GLuint skin_tex; static int skin_w, skin_h;          /* console photo (View > Console colour) */
 static GLuint vao_poly, vbo_poly, vao_quad, vbo_quad;
 static GLuint samplers[9];                                    /* [s_mode * 3 + t_mode]: clamp, repeat, mirror */
 static GLuint white_tex;
@@ -938,10 +947,32 @@ void gl_present(const GlPresent* v) {
     p_glUniform3fv(p_glGetUniformLocation(P, "u_base"), 1, v->base);
     p_glUniform3fv(p_glGetUniformLocation(P, "u_btn"), 1, v->btn);
     p_glUniform3fv(p_glGetUniformLocation(P, "u_hinge"), 1, v->hinge);
+    int skin = v->shell && v->skin && skin_tex;
+    p_glUniform1i(p_glGetUniformLocation(P, "u_skinmode"), skin);
+    p_glUniform1i(p_glGetUniformLocation(P, "u_skintex"), 1);
+    if (skin) {
+        p_glActiveTexture(GL_TEXTURE1); p_glBindTexture(GL_TEXTURE_2D, skin_tex);
+        p_glUniform2f(p_glGetUniformLocation(P, "u_skinscale"), v->skin_k / (float)skin_w, v->skin_k / (float)skin_h);
+        p_glActiveTexture(GL_TEXTURE0);
+    }
     p_glUniform4f(p_glGetUniformLocation(P, "u_rect"), -1, -1, 2, 2);
     p_glUniform4f(p_glGetUniformLocation(P, "u_uv"), 0, 0, 1, 1);
     p_glBindVertexArray(vao_quad);
     p_glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
+/* A console photo (RGBA, rows top-down), drawn around the screens. */
+void gl_set_skin(const uint8_t* rgba, int w, int h) {
+    if (!skin_tex) p_glGenTextures(1, &skin_tex);
+    p_glBindTexture(GL_TEXTURE_2D, skin_tex);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    p_glGenerateMipmap(GL_TEXTURE_2D);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    skin_w = w; skin_h = h;
 }
 
 /* The window as shown (for tests): top-down RGB, caller frees. */

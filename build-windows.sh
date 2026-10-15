@@ -14,6 +14,8 @@ make -j"$(nproc)" -f build.mk GEN=$D/build/recomp GEN7=$D/build/recomp7 OBJ=$D/b
      CFLAGS="-O1 -w" DEFS=-DRECOMP_TRACE SDL_CFLAGS="$(sdl2-config --cflags)" SDL_LIBS="-lSDL2" \
      LDFLAGS="-static-libgcc -Wl,--stack,67108864"
 cp /ucrt64/bin/SDL2.dll "$OUT/"
+mkdir -p "$OUT/skins"
+cp skins/*.png skins/*.txt "$OUT/skins/" 2>/dev/null || true     # console photos (View > Console colour)
 cat > "$OUT/play.bat" <<'BAT'
 @echo off
 rem Dragon Quest IX (PC). Keys: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R,
