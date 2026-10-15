@@ -224,6 +224,16 @@ Generated C is derived from the game: keep it private. The tool contains no game
   instructions' cycle cost; every 512 ARM9 cycles (2,048 ARM7) the runtime
   turns them into bus time, runs the other CPU and delivers interrupts.
 
+## Later
+
+* Tune the DS Lite screen filter against photos of a real DS Lite running
+  DQIX (same frames rendered here): colours per backlight level, black glow,
+  pixel grid from a macro shot, motion blur from slow-motion video; plus the
+  same shots of the port on the monitor with identical camera settings.
+* Unlock the downloadable quests / special guests (Nintendo WFC is gone).
+* Save states (states are tied to one build; see notes in the chat history).
+* Enhanced extras: widescreen, top-screen map.
+
 ## Known limits
 
 * Wireless (local play, Nintendo WFC) is not emulated; the game sees no
