@@ -119,9 +119,12 @@ void firmware_init(void) {
         for (int i = 0; nick[i]; i++) { u[0x06 + 2 * i] = (uint8_t)nick[i]; }
         u[0x1A] = (uint8_t)strlen(nick);
         /* touch calibration: ADC (0x200,0x200)->(0x20,0x20), (0xE00,0xE00)->(0xE0,0xA0) */
-        uint16_t adc1 = 0x200, adc2 = 0xE00;
-        memcpy(&u[0x58], &adc1, 2); memcpy(&u[0x5A], &adc1, 2); u[0x5C] = 0x20; u[0x5D] = 0x20;
-        memcpy(&u[0x5E], &adc2, 2); memcpy(&u[0x60], &adc2, 2); u[0x62] = 0xE0; u[0x63] = 0xA0;
+        /* touch calibration: x ADC = 16 * pixel, y ADC = 0x200 + 16 * pixel, so
+         * every pixel (0-255, 0-191) is inside the 12-bit ADC range like a real
+         * panel, and the steps are a power of two so the game's conversion back
+         * (fixed-point, rounding down) is exact */
+        put16(&u[0x58], 0x200); put16(&u[0x5A], 0x400); u[0x5C] = 0x20; u[0x5D] = 0x20;
+        put16(&u[0x5E], 0xE00); put16(&u[0x60], 0xC00); u[0x62] = 0xE0; u[0x63] = 0xA0;
         uint16_t flags = 0x0001 | 0x0400;    /* English, backlight */
         memcpy(&u[0x64], &flags, 2);
         uint16_t count = (uint16_t)copy;

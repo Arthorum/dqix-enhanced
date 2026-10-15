@@ -148,8 +148,10 @@ uint16_t input_touch_adc(int channel) {
     const uint8_t* u = firmware_user_settings();
     int ax1 = u[0x58] | u[0x59] << 8, ay1 = u[0x5A] | u[0x5B] << 8, px1 = u[0x5C], py1 = u[0x5D];
     int ax2 = u[0x5E] | u[0x5F] << 8, ay2 = u[0x60] | u[0x61] << 8, px2 = u[0x62], py2 = u[0x63];
-    if (channel == 5) return (uint16_t)(ax1 + (g_touch_x - px1) * (ax2 - ax1) / (px2 - px1));
-    if (channel == 1) return (uint16_t)(ay1 + (g_touch_y - py1) * (ay2 - ay1) / (py2 - py1));
+    /* the converter reads 0..4095; it can't go past either end */
+    /* the middle of the pixel's ADC step, so the game's rounding lands on it */
+    if (channel == 5) { int v = ax1 + ((g_touch_x - px1) * 2 + 1) * (ax2 - ax1) / (2 * (px2 - px1)); return (uint16_t)(v < 0 ? 0 : v > 0xFFF ? 0xFFF : v); }
+    if (channel == 1) { int v = ay1 + ((g_touch_y - py1) * 2 + 1) * (ay2 - ay1) / (2 * (py2 - py1)); return (uint16_t)(v < 0 ? 0 : v > 0xFFF ? 0xFFF : v); }
     if (channel == 3) return 0x100;                   /* Z1 pressure */
     if (channel == 4) return 0xF00;                   /* Z2 */
     return 0x800;

@@ -354,8 +354,10 @@ static uint16_t pad_bits(void) {
     return k;
 }
 
-/* Window pixel -> bottom-screen pixel; returns 0 when outside it. */
-static int to_touch(int wx, int wy, int* tx, int* ty) {
+/* Window pixel -> bottom-screen pixel; returns 0 when outside it, unless
+ * clamp is set (a drag that started on the screen stays on its edge, as a
+ * stylus would at the rim). */
+static int to_touch(int wx, int wy, int* tx, int* ty, int clamp) {
     float lx, ly;
     GlPresent v;
     if (g_gl) {                                                  /* same layout as gl_present() */
@@ -364,6 +366,7 @@ static int to_touch(int wx, int wy, int* tx, int* ty) {
         lx = ((float)wx + 0.5f - v.ox) / v.sc; ly = ((float)wy + 0.5f - v.oy) / v.sc;
     } else { canvas_layout(&v, 1, 1); SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly); }
     int x = (int)floorf(lx - v.bot[0]), y = (int)floorf(ly - v.bot[1]);
+    if (clamp) { x = x < 0 ? 0 : x > 255 ? 255 : x; y = y < 0 ? 0 : y > 191 ? 191 : y; }
     if (x < 0 || x > 255 || y < 0 || y > 191) return 0;
     *tx = x; *ty = y;
     return 1;
@@ -708,7 +711,10 @@ void frontend_frame(void) {
         int mx, my;
         Uint32 mb = SDL_GetMouseState(&mx, &my);
         int tx, ty;
-        g_fe_touch = (mb & SDL_BUTTON(SDL_BUTTON_LEFT)) && to_touch(mx, my, &tx, &ty);
+        static int dragging;                                  /* the press began on the touch screen */
+        int held = (mb & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+        g_fe_touch = held && to_touch(mx, my, &tx, &ty, dragging);
+        dragging = g_fe_touch;
         if (g_fe_touch) { g_fe_tx = tx; g_fe_ty = ty; }
         uint64_t tp = SDL_GetPerformanceCounter();
         present();

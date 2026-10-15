@@ -359,8 +359,22 @@ void cpu7_unhandled(Cpu* c, uint32_t a, uint32_t w) {
 
 /* ---------------------------------------------------------------- logging */
 int g_log_level = 2;
+/* At most LOG_PER_FRAME lines per frame: a burst (the game clearing memory
+ * that isn't mapped, thousands of writes) would otherwise print thousands
+ * of lines, and printing is slow enough (a Windows console) to stall the game. */
+#define LOG_PER_FRAME 32
 void rt_log(int level, const char* fmt, ...) {
     if (level > g_log_level) return;
+    static uint64_t frame = ~0ull; static unsigned count, dropped; static uint64_t dropped_frame;
+    if (g_frame != frame) {
+        if (dropped) {
+            char note[128];
+            snprintf(note, sizeof note, "[f%llu] ... %u more log lines in that frame not shown\n", (unsigned long long)dropped_frame, dropped);
+            fputs(note, stderr); report_log_line(note);
+        }
+        frame = g_frame; count = 0; dropped = 0;
+    }
+    if (++count > LOG_PER_FRAME) { dropped++; dropped_frame = g_frame; return; }
     char line[512];
     int n = snprintf(line, sizeof line, "[f%llu l%u %s] ", (unsigned long long)g_frame, g_vcount, arm7_is_running() ? "7" : "9");
     va_list ap; va_start(ap, fmt);
