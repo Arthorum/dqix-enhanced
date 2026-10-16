@@ -25,3 +25,11 @@ setup-history.bat
 
 # the built-in Wi-Fi server's files: DQIX's downloads as Nintendo served them (game data, not ours)
 /wfc/*/
+# the one-click build's working files and result, your ROM, and the optional
+# extras (game data)
+/build/
+/game/
+/rom/*.nds
+/extras/*
+!/extras/README.txt
+/release/

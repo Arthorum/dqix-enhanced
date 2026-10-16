@@ -1,4 +1,4 @@
-# DQIX static recompiler (private)
+# Dragon Quest IX for PC (private)
 
 Turns Dragon Quest IX's DS machine code (both CPUs) into C that compiles
 natively, plus the runtime that stands in for the DS hardware.
@@ -9,18 +9,43 @@ natively, plus the runtime that stands in for the DS hardware.
   opening movie, title, adventure-log menu, character creation, the story
   opening in Angel Falls and the first battle all render.
 * Milestone 4 (done): a playable PC build. Window, keyboard / mouse / gamepad,
-  sound, frame pacing (SDL2). Built on Windows with `build-pc.bat`.
+  sound, frame pacing (SDL2). Built on Windows with `BUILD.bat` from your ROM.
 * Milestone 5 (done): Classic mode, the game exactly as a DS shows and plays
   it (see "Classic and Enhanced" below), and Enhanced mode, with 3D drawn on
   the graphics card at 1-4x resolution.
 * Next: more Enhanced features (widescreen, top-screen map), always optional.
 
-## Building the PC version (Windows)
+## Getting started (Windows)
 
-Double-click `build-pc.bat`. The first time, it installs MSYS2 (a free C
-compiler, SDL2 and Python, via winget, into C:\msys64). Then it recompiles
-the game and builds `..\build\pc\dqix.exe`. When it finishes, double-click
-`..\build\pc\play.bat`. The save file is `..\build\pc\dqix.sav`.
+You need your own Dragon Quest IX cartridge's ROM (the USA version), Windows
+10 or 11 (64-bit), about 3 GB of free space, and the internet the first time.
+
+1. Put your ROM (`.nds`) in the `rom` folder. (Or skip this and choose it
+   when step 2 asks.)
+2. Double-click **`BUILD.bat`**. The first time, it installs MSYS2 (free
+   build tools: a C compiler, SDL2 and Python, via winget, into C:\msys64),
+   which takes a few minutes. Then it checks the ROM, takes the game's code
+   out of it, turns it into C and compiles it (10-20 minutes the first time,
+   much less after updates).
+3. Play with **`game\play.bat`** (make a shortcut to it if you like). The
+   `game` folder holds everything the game needs, including your save
+   (`dqix.sav`) and settings (`settings.ini`), so you can move it anywhere.
+
+**Optional extras.** Copy them into the `extras` folder (so it contains
+`wfc\YDQE\...`) and run `BUILD.bat` again: DQIX's downloads for the built-in
+Wi-Fi server (Sellma's downloadable quests, DQVC's news and its 52 weekly
+sales). They are game data, so they aren't part of this project; see
+`extras\README.txt`.
+
+Nothing from the game is in this project: `BUILD.bat` makes everything from
+your ROM on your PC (`tools/extract_rom.py` takes the code out of it,
+`recomp/` turns it into C). The function names and boundaries come from the
+public-domain DQIX decompilation project (`config/usa/arm9`, its
+`symbols.txt` and `relocs.txt` files). **Don't share the `game` or `build`
+folders**: they contain the game.
+
+`build-pc.bat` is the older developer build: it uses a dqix-decomp checkout
+one folder up (`..\extract`, `..\config`) and builds `..\build\pc`.
 
 | DS | Keyboard | Controller |
 |---|---|---|
@@ -253,7 +278,12 @@ interpret.txt          functions run in the interpreter (encrypted in the ROM)
 build.mk               makefile (make -f build.mk)
 tools/where.sh         run, then show where the game is
 tests/                 decoder check vs LLVM; behaviour tests for recompiler + interpreter
-recomp.bat             regenerate the ARM9 C on Windows
+recomp.bat             regenerate the ARM9 C on Windows (developer build)
+BUILD.bat              the one-click build: your ROM -> the game folder
+tools/build-game.sh    what BUILD.bat runs (inside MSYS2; also works on Linux)
+tools/extract_rom.py   takes the code out of a DS ROM (same output as dsd rom extract)
+config/usa/arm9        function names and relocations from the dqix-decomp project
+rom/, extras/          where your ROM and the optional extras go
 ```
 
 Generated C is derived from the game: keep it private. The tool contains no game code.
