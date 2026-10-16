@@ -11,7 +11,7 @@ enum {
     MI_SHELL = 130, MI_GAP, MI_ACTUAL, MI_SHELLC0,                      /* MI_SHELLC0 + colour index */
     MI_STACKED = 150, MI_SIDE, MI_SIZE1, MI_SIZE2, MI_SIZE3, MI_SIZE4, MI_INTEGER, MI_FULL,
     MI_CONTROLS = 170, MI_ABOUT,
-    MI_NET = 180, MI_SRV_ALTWFC, MI_SRV_WIIMMFI, MI_SRV_CUSTOM, MI_NET_HELP,
+    MI_NET = 180, MI_SRV_ALTWFC, MI_SRV_WIIMMFI, MI_SRV_CUSTOM, MI_NET_HELP, MI_SRV_BUILTIN,
 };
 
 /* shell_names: the console colours, in order (MI_SHELLC0 + i) */

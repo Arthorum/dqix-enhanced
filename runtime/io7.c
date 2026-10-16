@@ -133,7 +133,12 @@ void firmware_init(void) {
     }
     wifi_reset(g_fw);
     /* the frontend's wireless choices (set before boot); DQIX_ONLINE=dns for tests */
-    if (!g_wireless.online && getenv("DQIX_ONLINE")) { g_wireless.online = 1; snprintf(g_wireless.dns, sizeof g_wireless.dns, "%s", getenv("DQIX_ONLINE")); }
+    if (!g_wireless.online && getenv("DQIX_ONLINE")) {               /* tests: an address, or "builtin" */
+        g_wireless.online = 1;
+        g_wireless.builtin = !strcmp(getenv("DQIX_ONLINE"), "builtin");
+        snprintf(g_wireless.dns, sizeof g_wireless.dns, "%s", g_wireless.builtin ? "10.64.0.2" : getenv("DQIX_ONLINE"));
+    }
+    wfc_enable(g_wireless.online && g_wireless.builtin, getenv("DQIX_WFC_DIR"));
     const char* m = getenv("DQIX_MAC");                          /* replaying a report: its mac line */
     unsigned b[6];
     if (m && sscanf(m, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {

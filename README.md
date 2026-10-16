@@ -68,22 +68,32 @@ own pixels are about as fine as the DS Lite's, so they provide the grid. The gam
 still Classic or Enhanced; with the filter off, Classic is pixel-exact.
 
 **Wireless menu.** The DS's wireless chip is emulated (from melonDS's
-Wifi.cpp), and the PC plays a wireless access point called `DQIX-PC`.
-*Connect to the internet* passes the DS's traffic to the internet through
-libslirp (a user-mode network stack: DHCP, DNS and TCP become ordinary
-sockets; nothing on the PC is changed). The DS's own Wi-Fi settings point its
-DNS at a community replacement for Nintendo Wi-Fi Connection, the way players
-set up a real DS: *Server* picks AltWFC (172.104.88.237, the default) or
-Wiimmfi (164.132.44.106; it passes DQIX on to Nintendo, which answers
-"service discontinued", error 20110); `wfc_server = <address>` in `settings.ini` uses
-another. Then talk to Sellma at the DQVC counter in Stornway's Quester's Rest,
-as on the DS. With it off, the game behaves like a DS with no access point
-(Sellma offers DQVC without connecting). Each copy makes up its own MAC
-address the first time (`wireless_mac` in `settings.ini`); the servers tell
-players apart by it. F10 reports record the connection: the address from
-DHCP, every name looked up and its answer, every connection opened or refused.
+Wifi.cpp), and the PC plays a wireless access point called `DQIX-PC`. Turn on
+*Connect*, then talk to Sellma at the DQVC counter in Stornway's Quester's
+Rest, as on the DS: "Downloading data", the new quests and DQVC's stock.
 
-*Unlock all downloadable content now* is the offline fallback: the 64
+*Server > Built-in* (the default) needs no internet: `runtime/wfc.c` answers
+the game itself (the connection test, Nintendo's login server and download
+server) with DQIX's downloads as Nintendo last served them, preserved by
+fans (`wfc/`, see `wfc/README.txt`). The last quest file switches on all 64
+downloadable quests. The game logs in over HTTPS with the DS's own SSL; as in
+the community's "NoSSL" patches, its login and download addresses are
+switched to `http://` in memory (the ROM is not changed). Nintendo's login
+code also needs a `Date` header in the reply.
+
+The other servers go through the internet via libslirp (a user-mode network
+stack: DHCP, DNS and TCP become ordinary sockets; nothing on the PC is
+changed), with the DS's DNS pointed at a community replacement for Nintendo
+Wi-Fi Connection: AltWFC (172.104.88.237) or Wiimmfi (164.132.44.106), or
+`wfc_server = <address>` in `settings.ini`. In October 2026 neither served
+DQIX any more (Wiimmfi passes it on to Nintendo, which answers "service
+discontinued", error 20110). With *Connect* off, the game behaves like a DS
+with no access point (Sellma offers DQVC without connecting). Each copy
+makes up its own MAC address the first time (`wireless_mac` in
+`settings.ini`). F10 reports record the connection: every name looked up,
+every request to the built-in server, every connection.
+
+*Unlock all downloadable content now* skips Sellma: the 64
 downloadable quests and 23 special guests are on the cartridge, and Nintendo
 Wi-Fi Connection only switched them on in the save, so this switches them on
 in the save each time the game starts (save layout from the open-source DQIX
@@ -177,7 +187,9 @@ DQIX_POLYDUMP=frame,x,y                        3D polygons covering a pixel
 DQIX_WAV=out.wav                               record the sound (headless build)
 DQIX_SNDLOG=1                                  log sound channel starts
 DQIX_CRC=out.txt                               a checksum of every frame (compare runs)
-DQIX_ONLINE=172.104.88.237                     connect to the internet through this DNS (tests)
+DQIX_ONLINE=builtin / DQIX_ONLINE=1.2.3.4      connect: the built-in server / through this DNS (tests)
+DQIX_WFC_DIR=path                              the built-in server's files (default: wfc)
+DQIX_WFCDEBUG=1                                print every request to the built-in server and its reply
 DQIX_MAC=00:09:bf:12:34:56                     the console's MAC (replaying a report's mac line)
 DQIX_WIFILOG=1 / DQIX_NETLOG=1 / DQIX_NETHEX=1 log the wireless chip / network / every frame in hex
 DQIX_DUMP_AT=100,200                           with DQIX_DUMP=dir,1: only those frames
@@ -207,7 +219,9 @@ runtime/gpu2d.c        both 2D engines, per scanline
 runtime/gpu3d.c        3D geometry engine + software rasterizer
 runtime/sound.c        sound channels and mixer
 runtime/wifi.c         the wireless chip and the access point DQIX-PC (after melonDS)
-runtime/net.c          the access point's internet connection (libslirp)
+runtime/net.c          the access point's network (libslirp)
+runtime/wfc.c          the built-in Nintendo Wi-Fi Connection server (DNS, TCP, login, downloads)
+wfc/                   its files, per game code (not in git; see wfc/README.txt)
 third_party/libslirp   user-mode network stack (BSD licence, as vendored by melonDS)
 runtime/input.c        DS buttons / touch from the frontend or a script
 runtime/frontend_sdl.c window, input, audio, pacing, settings (SDL2)
@@ -258,8 +272,8 @@ Generated C is derived from the game: keep it private. The tool contains no game
   DQIX (same frames rendered here): colours per backlight level, black glow,
   pixel grid from a macro shot, motion blur from slow-motion video; plus the
   same shots of the port on the monitor with identical camera settings.
-* A simulated server that runs offline (from recorded replies of a real one),
-  so the Sellma download works with no internet and no community server.
+* The built-in server could hand out DQIX's downloads one week at a time, as
+  Nintendo did (the quest files would need to be decoded first).
 * Save states (states are tied to one build; see notes in the chat history).
 * Enhanced extras: widescreen, top-screen map.
 

@@ -18,6 +18,7 @@
 #ifdef DQIX_NO_NET
 int net_send(const uint8_t* eth, int len) { (void)eth; return len; }
 int net_recv(uint8_t* eth) { (void)eth; return 0; }
+void net_deliver(const uint8_t* f, int len) { (void)f; (void)len; }
 void net_enable(int on) { (void)on; }
 #else
 
@@ -104,6 +105,8 @@ static void summarize(const uint8_t* e, int len, int out) {
     }
 }
 
+static slirp_ssize_t cb_send(const void* buf, size_t len, void* opaque);
+void net_deliver(const uint8_t* f, int len) { cb_send(f, (size_t)len, NULL); }
 static slirp_ssize_t cb_send(const void* buf, size_t len, void* opaque) {
     (void)opaque;
     if (len > 2048) return (slirp_ssize_t)len;
@@ -196,6 +199,7 @@ int net_send(const uint8_t* eth, int len) {
     if (!g_on || !g_slirp) return len;
     if (g_log > 0) NLOG("net: DS -> %d bytes, type %02x%02x\n", len, eth[12], eth[13]);
     hexlog("TX ", eth, len);
+    if (wfc_input(eth, len)) return len;                     /* the built-in server's */
     summarize(eth, len, 1);
     slirp_input(g_slirp, eth, len);
     pump();
@@ -204,6 +208,7 @@ int net_send(const uint8_t* eth, int len) {
 
 int net_recv(uint8_t* eth) {
     if (!g_on || !g_slirp) return 0;
+    wfc_poll();
     if (g_qhead == g_qtail) pump();
     if (g_qhead == g_qtail) return 0;
     int n = g_qlen[g_qhead];

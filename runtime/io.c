@@ -167,7 +167,7 @@ void time_advance_lines(uint32_t lines) {
     while (lines--) {
         g_subline = 0;
         if (++g_vcount >= LINES_PER_FRAME) {
-            g_vcount = 0; g_frame++;
+            g_vcount = 0; g_frame++; wfc_frame();
             if (g_frame_limit && g_frame >= g_frame_limit) exit(0);
         }
         if (g_vcount < 192) gpu_render_line((int)g_vcount);

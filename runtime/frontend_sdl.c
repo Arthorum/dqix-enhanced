@@ -216,10 +216,11 @@ static const char* SETTINGS = "settings.ini";
  * The DS finds a server through its DNS setting (firmware_set_ap), exactly
  * as players set it up by hand on a real DS. */
 static const struct { const char* key; const char* dns; } WFC[] = {
+    { "builtin", "10.64.0.2" },          /* wfc.c answers; the DNS is the virtual network's */
     { "altwfc", "172.104.88.237" },
     { "wiimmfi", "164.132.44.106" },
 };
-static char g_wfc_server[64] = "altwfc";       /* a key above or a DNS address */
+static char g_wfc_server[64] = "builtin";       /* a key above or a DNS address */
 static int g_net_want;                         /* the menu's "connect" check */
 static const char* wfc_dns(void) {
     for (unsigned i = 0; i < sizeof WFC / sizeof WFC[0]; i++) if (!strcmp(g_wfc_server, WFC[i].key)) return WFC[i].dns;
@@ -231,8 +232,12 @@ static int wfc_custom(void) {
 }
 static void wireless_apply(int boot) {
     g_wireless.online = g_net_want;
+    g_wireless.builtin = !strcmp(g_wfc_server, "builtin");
     snprintf(g_wireless.dns, sizeof g_wireless.dns, "%s", wfc_dns());
-    if (!boot) { firmware_set_ap(g_wireless.online, g_wireless.dns); net_enable(g_wireless.online); }
+    if (!boot) {
+        firmware_set_ap(g_wireless.online, g_wireless.dns); net_enable(g_wireless.online);
+        wfc_enable(g_wireless.online && g_wireless.builtin, NULL);
+    }
 }
 /* every console has its own MAC address, and the servers tell players apart
  * by it: one is made up the first time (Nintendo's prefix, random rest) */
@@ -318,7 +323,7 @@ static void settings_save(void) {
     fprintf(f, "downloadable_content = %d\n", g_opt.dlc);
     fprintf(f, "# Wireless menu: connect to a community Nintendo Wi-Fi Connection server: 0 or 1\n");
     fprintf(f, "wireless = %d\n", g_net_want);
-    fprintf(f, "# which server: altwfc, wiimmfi, or the DNS address of another one (e.g. 1.2.3.4)\n");
+    fprintf(f, "# which server: builtin (offline, the files in the wfc folder), altwfc, wiimmfi, or another's DNS address\n");
     fprintf(f, "wfc_server = %s\n", g_wfc_server);
     fprintf(f, "# this copy's own MAC address (made up the first time; the servers know you by it)\n");
     if (g_wireless.mac_set)
@@ -685,6 +690,7 @@ static void menu_sync(void) {
     menu_check(MI_TURBO, g_turbo);
     menu_check(MI_DLC, g_opt.dlc);
     menu_check(MI_NET, g_net_want);
+    menu_check(MI_SRV_BUILTIN, !strcmp(g_wfc_server, "builtin"));
     menu_check(MI_SRV_ALTWFC, !strcmp(g_wfc_server, "altwfc"));
     menu_check(MI_SRV_WIIMMFI, !strcmp(g_wfc_server, "wiimmfi"));
     menu_check(MI_SRV_CUSTOM, wfc_custom()); menu_enable(MI_SRV_CUSTOM, wfc_custom());
@@ -747,8 +753,8 @@ static void do_action(int id) {
             "to the server chosen under Wireless > Server.\n\n"
             "If the connection fails, press F10 right after: the bug report records how far it got.", g_win);
         break;
-    case MI_SRV_ALTWFC: case MI_SRV_WIIMMFI:
-        snprintf(g_wfc_server, sizeof g_wfc_server, "%s", WFC[id - MI_SRV_ALTWFC].key);
+    case MI_SRV_BUILTIN: case MI_SRV_ALTWFC: case MI_SRV_WIIMMFI:
+        snprintf(g_wfc_server, sizeof g_wfc_server, "%s", WFC[id == MI_SRV_BUILTIN ? 0 : id == MI_SRV_ALTWFC ? 1 : 2].key);
         wireless_apply(0);
         break;
     case MI_SRV_CUSTOM: break;
@@ -758,10 +764,12 @@ static void do_action(int id) {
             "real DS reaches by changing its DNS setting; this game does the same.\n\n"
             "The PC plays the part of a wireless access point called DQIX-PC and passes the DS's traffic to the "
             "internet. Nothing else on your PC is changed.\n\n"
+            "Server > Built-in: nothing goes to the internet. The PC answers the game itself with DQIX's "
+            "downloads as Nintendo served them (preserved by fans, in the wfc folder).\n\n"
             "Connect to the internet: the DS gets online when the game asks for it, e.g. when Sellma downloads "
             "DQVC items and new quests. Turn it off and the game behaves like a DS with no access point.\n\n"
             "Unlock all downloadable content now: switches on every downloadable quest and special guest in "
-            "your save when the game starts, without connecting. A fallback if no server works.", g_win);
+            "your save when the game starts, without visiting Sellma.", g_win);
         break;
     case MI_SHOT: g_shot_req = 1; break;
     case MI_REPORT: {

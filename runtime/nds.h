@@ -212,9 +212,15 @@ void wifi_reset(const uint8_t* firmware);
 void firmware_load_wireless(void);
 void firmware_set_ap(int on, const char* dns);
 void firmware_set_mac(const uint8_t mac[6]);
-void firmware_write_wireless(FILE* f);               /* the Wi-Fi settings area (reports) */
+void firmware_write_wireless(FILE* f);
+void net_deliver(const uint8_t* frame, int len);    /* a frame to the DS (the built-in server) */
+void wfc_enable(int on, const char* dir);           /* the built-in WFC server (wfc.c) */
+int wfc_enabled(void);
+void wfc_frame(void);
+void wfc_poll(void);
+int wfc_input(const uint8_t* frame, int len);               /* the Wi-Fi settings area (reports) */
 void net_enable(int on);
-typedef struct { int online; char dns[32]; uint8_t mac[6]; int mac_set; } WirelessConfig;
+typedef struct { int online; char dns[32]; uint8_t mac[6]; int mac_set; int builtin; } WirelessConfig;   /* builtin: wfc.c answers */
 extern WirelessConfig g_wireless;                  /* set by the frontend before boot */
 void wifi_set_power(int on);
 void wifi_advance(uint32_t cycles);

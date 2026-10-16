@@ -1,0 +1,440 @@
+/* The built-in Nintendo Wi-Fi Connection server (Wireless > Server > Built-in).
+ *
+ * Nintendo's servers are gone and the community ones no longer serve DQIX,
+ * so the PC answers the game itself, offline:
+ *
+ *   DNS        every *.nintendowifi.net name -> WFC_IP (any other name: not found)
+ *   conntest   http://conntest.nintendowifi.net/  -> 200 with X-Organization: Nintendo
+ *   nas        /ac   login / svcloc (where the download server is) -> accepted
+ *   dls1       /download  count / list / contents -> the files in wfc/<game code>/
+ *
+ * The files are the DQIX downloads as Nintendo served them (preserved by the
+ * community: github.com/InternalLoss/DLS1-Files), listed in _list.txt as
+ *   name \t \t attr1 \t attr2 \t attr3 \t size
+ *
+ * The game logs in over HTTPS with the DS's own SSL; like the community's
+ * "NoSSL" patches, the login and download addresses in the game's network
+ * library (overlay 31) are switched to http:// once it is in memory, so the
+ * server speaks plain HTTP.
+ *
+ * TCP: the DS opens one short connection per request (HTTP/1.0). The frames
+ * for WFC_IP never reach libslirp; a small responder here handles the
+ * handshake, collects the request, sends the reply and closes. The link is
+ * a memory queue, so retransmitting is only a safety net. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <time.h>
+#include "nds.h"
+
+static const uint8_t WFC_IP[4] = { 192, 0, 2, 80 };   /* TEST-NET-1: never a real host */
+
+static char g_dir[512] = "wfc";
+static int g_on;
+void wfc_enable(int on, const char* dir) {
+    g_on = on;
+    if (dir && dir[0]) snprintf(g_dir, sizeof g_dir, "%s", dir);
+}
+int wfc_enabled(void) { return g_on; }
+
+static void ev(const char* fmt, ...) {
+    char line[300];
+    va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    report_log_line(line);
+    if (getenv("DQIX_NETLOG")) fprintf(stderr, "[f%llu] %s", (unsigned long long)g_frame, line);
+}
+
+/* ---------------------------------------------------------------- NoSSL
+ * Every few frames, look through the overlay area for the network library's
+ * https:// addresses (login, download) and make them http://. Only strings
+ * naming Nintendo's servers or the download path are touched. */
+void wfc_frame(void) {
+    if (!g_on || g_frame % 8) return;
+    for (uint32_t a = 0x200000; a < 0x300000; a += 4) {
+        uint8_t* p = &g_main_ram[a];
+        if (p[0] != 'h' || memcmp(p, "https://", 8)) continue;
+        size_t n = strnlen((const char*)p, 80);
+        if (n >= 80 || n < 10) continue;
+        if (!strstr((const char*)p, "nintendowifi.net") && !strstr((const char*)p, "/download")) continue;
+        memmove(p + 4, p + 5, n - 5);                    /* "https://x" -> "http://x" */
+        p[n - 1] = 0;
+        ev("wfc: %08x now %s (built-in server: no SSL)\n", 0x02000000u + a, (const char*)p);
+    }
+}
+
+/* ---------------------------------------------------------------- frames */
+static uint16_t cksum(const uint8_t* p, int n, uint32_t s) {
+    for (int i = 0; i + 1 < n; i += 2) s += (uint32_t)(p[i] << 8 | p[i + 1]);
+    if (n & 1) s += (uint32_t)(p[n - 1] << 8);
+    while (s >> 16) s = (s & 0xFFFF) + (s >> 16);
+    return (uint16_t)~s;
+}
+static void put16be(uint8_t* p, unsigned v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static void put32be(uint8_t* p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+static uint32_t get32be(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+/* Ethernet + IPv4 header for a reply: swap the addresses of the frame q */
+static int ip_reply(uint8_t* f, const uint8_t* q, int proto, int l4len, const uint8_t src_ip[4]) {
+    memcpy(f, q + 6, 6); memcpy(f + 6, q, 6); f[12] = 8; f[13] = 0;
+    uint8_t* ip = f + 14;
+    static uint16_t id = 1;
+    ip[0] = 0x45; ip[1] = 0; put16be(ip + 2, 20 + l4len); put16be(ip + 4, id++); ip[6] = 0x40; ip[7] = 0;
+    ip[8] = 64; ip[9] = (uint8_t)proto; ip[10] = ip[11] = 0;
+    memcpy(ip + 12, src_ip, 4); memcpy(ip + 16, q + 14 + 12, 4);
+    put16be(ip + 10, cksum(ip, 20, 0));
+    return 14 + 20 + l4len;
+}
+static uint32_t pseudo(const uint8_t* ip, int proto, int len) {
+    uint32_t s = 0;
+    for (int i = 12; i < 20; i += 2) s += (uint32_t)(ip[i] << 8 | ip[i + 1]);
+    return s + (uint32_t)proto + (uint32_t)len;
+}
+
+/* ---------------------------------------------------------------- DNS */
+static int dns(const uint8_t* q, int len) {
+    const uint8_t* ip = q + 14; int ihl = (ip[0] & 15) * 4;
+    const uint8_t* udp = ip + ihl; const uint8_t* d = udp + 8;
+    int dn = len - 14 - ihl - 8;
+    if (dn < 17) return 1;
+    char name[128]; int o = 12, k = 0;
+    while (o < dn && d[o] && k < 120) { int l = d[o++]; for (int i = 0; i < l && o < dn && k < 126; i++) name[k++] = (char)d[o++]; if (d[o]) name[k++] = '.'; }
+    name[k] = 0;
+    int qend = o + 5;                                       /* zero byte + type + class */
+    if (qend > dn) return 1;
+    int ours = strstr(name, "nintendowifi.net") != NULL;
+    uint8_t f[600];
+    uint8_t* r = f + 14 + 20 + 8;
+    memcpy(r, d, (size_t)qend);
+    r[2] = 0x81; r[3] = ours ? 0x80 : 0x83;                 /* response, recursion; NXDOMAIN if not ours */
+    r[6] = 0; r[7] = ours ? 1 : 0; r[8] = r[9] = r[10] = r[11] = 0;
+    int n = qend;
+    if (ours) {
+        static const uint8_t ans[12] = { 0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4 };
+        memcpy(r + n, ans, 12); memcpy(r + n + 12, WFC_IP, 4); n += 16;
+    }
+    uint8_t* u = f + 14 + 20;
+    put16be(u, 53); put16be(u + 2, (unsigned)(udp[0] << 8 | udp[1])); put16be(u + 4, 8 + n); u[6] = u[7] = 0;
+    int tot = ip_reply(f, q, 17, 8 + n, ip + 16);
+    put16be(u + 6, cksum(u, 8 + n, pseudo(f + 14, 17, 8 + n)));
+    net_deliver(f, tot);
+    ev("wfc: %s -> %s\n", name, ours ? "built-in server" : "not found");
+    return 1;
+}
+
+/* ---------------------------------------------------------------- HTTP */
+static char* load_file(const char* path, int* size) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char* b = malloc((size_t)n + 1);
+    if (b && fread(b, 1, (size_t)n, f) != (size_t)n) { free(b); b = NULL; }
+    fclose(f);
+    if (b) { b[n] = 0; *size = (int)n; }
+    return b;
+}
+
+/* the DS's base64: '+' '/' '=' are sent as '.' '-' '*' */
+static int b64val(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '.' || c == '>') return 62;
+    if (c == '/' || c == '-' || c == '?') return 63;
+    return -1;
+}
+static int b64dec(const char* s, int n, char* out, int cap) {
+    int o = 0, bits = 0; uint32_t acc = 0;
+    for (int i = 0; i < n; i++) {
+        int v = b64val((unsigned char)s[i]);
+        if (v < 0) continue;
+        acc = acc << 6 | (uint32_t)v; bits += 6;
+        if (bits >= 8) { bits -= 8; if (o < cap - 1) out[o++] = (char)(acc >> bits); }
+    }
+    out[o] = 0;
+    return o;
+}
+static int b64enc(const char* s, char* out) {
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int n = (int)strlen(s), o = 0;
+    for (int i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)(uint8_t)s[i] << 16 | (i + 1 < n ? (uint32_t)(uint8_t)s[i + 1] << 8 : 0) | (i + 2 < n ? (uint8_t)s[i + 2] : 0);
+        out[o++] = T[v >> 18 & 63]; out[o++] = T[v >> 12 & 63];
+        out[o++] = i + 1 < n ? T[v >> 6 & 63] : '*';
+        out[o++] = i + 2 < n ? T[v & 63] : '*';
+    }
+    out[o] = 0;
+    return o;
+}
+/* a form field, base64-decoded ("" if missing) */
+static void field(const char* body, const char* key, char* out, int cap) {
+    size_t kl = strlen(key);
+    const char* p = body;
+    out[0] = 0;
+    while (p && *p) {
+        if (!strncmp(p, key, kl) && p[kl] == '=') {
+            const char* v = p + kl + 1; const char* e = strchr(v, '&');
+            int n = e ? (int)(e - v) : (int)strlen(v);
+            while (n > 0 && (v[n - 1] == '\r' || v[n - 1] == '\n')) n--;
+            char raw[512]; int m = 0;
+            for (int i = 0; i < n && m < 511; i++) {                 /* undo %xx */
+                if (v[i] == '%' && i + 2 < n) { unsigned c; sscanf(v + i + 1, "%2x", &c); raw[m++] = (char)c; i += 2; }
+                else raw[m++] = v[i];
+            }
+            b64dec(raw, m, out, cap);
+            return;
+        }
+        p = strchr(p, '&'); if (p) p++;
+    }
+}
+static void kv(char* out, const char* k, const char* v) {
+    char e[512]; b64enc(v, e);
+    if (out[0]) strcat(out, "&");
+    strcat(out, k); strcat(out, "="); strcat(out, e);
+}
+static void now_str(char* s) {
+    time_t t = (time_t)rtc_base() + (time_t)(g_frame / 60);   /* the DS's clock */
+    struct tm* tm = gmtime(&t);
+    strftime(s, 20, "%Y%m%d%H%M%S", tm);
+}
+
+/* the reply to one request; returns a malloc'd buffer */
+static char* http(const char* req, int reqlen, int* outlen) {
+    char method[8] = "", path[128] = "";
+    sscanf(req, "%7s %127s", method, path);
+    const char* body = strstr(req, "\r\n\r\n");
+    body = body ? body + 4 : req + reqlen;
+    char* out = malloc(4096 + 65536);
+    char text[4096] = ""; const char* ctype = "text/plain"; const char* extra = "";
+    char* bin = NULL; int binlen = 0, status = 200;
+    char extrab[256] = "";
+
+    if (!strcmp(method, "GET")) {                                  /* conntest */
+        strcpy(text, "ok"); ctype = "text/html"; extra = "X-Organization: Nintendo\r\nServer: BigIP\r\n";
+        ev("wfc: connection test answered\n");
+    } else if (!strcmp(path, "/ac")) {                             /* nas */
+        char action[32], svc[16], gamecd[8], userid[32];
+        field(body, "action", action, sizeof action); field(body, "svc", svc, sizeof svc);
+        field(body, "gamecd", gamecd, sizeof gamecd); field(body, "userid", userid, sizeof userid);
+        for (char* c = action; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+        char dt[20]; now_str(dt);
+        char token[100] = "NDS";
+        for (int i = 3; i < 99; i++) token[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(unsigned)rand() % 62];
+        token[99] = 0;
+        if (!strcmp(action, "acctcreate")) {
+            kv(text, "retry", "0"); kv(text, "returncd", "002"); kv(text, "userid", userid[0] ? userid : "1000000000001");
+        } else if (!strcmp(action, "login")) {
+            kv(text, "retry", "0"); kv(text, "returncd", "001"); kv(text, "locator", "gamespy.com");
+            kv(text, "challenge", "DQIXPC00"); kv(text, "token", token);
+        } else {                                                   /* svcloc and anything else */
+            kv(text, "retry", "0"); kv(text, "returncd", "007"); kv(text, "statusdata", "Y");
+            kv(text, "svchost", "dls1.nintendowifi.net");
+            kv(text, !strcmp(svc, "9000") ? "token" : "servicetoken", token);
+        }
+        kv(text, "datetime", dt);
+        strcat(text, "\r\n");
+        extra = "NODE: wifiappe1\r\n";
+        ev("wfc: login (%s, game %s, service %s) accepted\n", action, gamecd, svc[0] ? svc : "-");
+    } else if (!strcmp(path, "/download")) {                       /* dls1 */
+        char action[16], gamecd[8], a1[32], a2[32], a3[32], name[64];
+        field(body, "action", action, sizeof action); field(body, "gamecd", gamecd, sizeof gamecd);
+        field(body, "attr1", a1, sizeof a1); field(body, "attr2", a2, sizeof a2); field(body, "attr3", a3, sizeof a3);
+        field(body, "contents", name, sizeof name);
+        for (char* c = action; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+        int okcd = strlen(gamecd) == 4;
+        for (int i = 0; i < 4 && okcd; i++) okcd = (gamecd[i] >= 'A' && gamecd[i] <= 'Z') || (gamecd[i] >= '0' && gamecd[i] <= '9');
+        char p[700]; snprintf(p, sizeof p, "%s/%s/_list.txt", g_dir, okcd ? gamecd : "none");
+        int ln = 0; char* list = okcd ? load_file(p, &ln) : NULL;
+        char hits[2048] = ""; int count = 0;
+        for (char* line = list ? strtok(list, "\r\n") : NULL; line; line = strtok(NULL, "\r\n")) {
+            char f[6][64] = { { 0 } }; int nf = 0; const char* s = line;
+            while (nf < 6) { const char* t = strchr(s, '\t'); int l = t ? (int)(t - s) : (int)strlen(s); if (l > 63) l = 63;
+                             memcpy(f[nf], s, (size_t)l); f[nf][l] = 0; nf++; if (!t) break; s = t + 1; }
+            if (nf < 6) continue;
+            if ((a1[0] && strcmp(a1, f[2])) || (a2[0] && strcmp(a2, f[3])) || (a3[0] && strcmp(a3, f[4]))) continue;
+            count++;
+            if (strlen(hits) + strlen(line) + 3 < sizeof hits) { strcat(hits, line); strcat(hits, "\r\n"); }
+        }
+        free(list);
+        if (!strcmp(action, "count")) snprintf(text, sizeof text, "%d", count);
+        else if (!strcmp(action, "list")) strcpy(text, count ? hits : "\r\n");
+        else if (!strcmp(action, "contents")) {
+            int okn = name[0] && !strstr(name, "..") && !strchr(name, '/') && !strchr(name, '\\');
+            snprintf(p, sizeof p, "%s/%s/%s", g_dir, okcd ? gamecd : "none", name);
+            bin = okn && okcd ? load_file(p, &binlen) : NULL;
+            if (bin) { ctype = "application/x-dsdl"; snprintf(extrab, sizeof extrab, "Content-Disposition: attachment; filename=\"%s\"\r\n", name); extra = extrab; }
+            else status = 404;
+        }
+        extra = extra[0] ? extra : "X-DLS-Host: http://127.0.0.1/\r\n";
+        if (!strcmp(action, "contents")) ev("wfc: download %s %s (%s)\n", gamecd, name, bin ? "sent" : "not found");
+        else ev("wfc: download %s %s attr %s/%s/%s: %d file%s\n", gamecd, action, a1, a2, a3, count, count == 1 ? "" : "s");
+        if (okcd && !count && !strcmp(action, "count") && !list) ev("wfc: no files in %s/%s (copy the game's files there)\n", g_dir, gamecd);
+    } else {
+        status = 404;
+        ev("wfc: %s %s: not handled\n", method, path);
+    }
+    const char* payload = bin ? bin : text;
+    int plen = bin ? binlen : (int)strlen(text);
+    char date[64];
+    { time_t t = (time_t)rtc_base() + (time_t)(g_frame / 60); strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&t)); }
+    int h = snprintf(out, 4096, "HTTP/1.1 %d %s\r\nDate: %s\r\nServer: Nintendo Wii (http)\r\nContent-Type: %s\r\n%sContent-Length: %d\r\nConnection: close\r\n\r\n",
+                     status, status == 200 ? "OK" : "Not Found", date, ctype, extra, status == 200 ? plen : 0);
+    if (status == 200 && plen <= 65536) { memcpy(out + h, payload, (size_t)plen); h += plen; }
+    free(bin);
+    *outlen = h;
+    if (getenv("DQIX_WFCDEBUG")) {
+        fprintf(stderr, "---- request\n%.*s\n---- decoded:", reqlen, req);
+        for (const char* q = body; q && *q; ) {
+            const char* e = strchr(q, '='); if (!e) break;
+            char k[40] = ""; snprintf(k, sizeof k, "%.*s", (int)(e - q) < 39 ? (int)(e - q) : 39, q);
+            char v[300]; field(body, k, v, sizeof v); fprintf(stderr, " %s=[%s]", k, v);
+            q = strchr(e, '&'); if (q) q++;
+        }
+        fprintf(stderr, "\n---- reply\n%.*s\n----\n", h, out);
+    }
+    return out;
+}
+
+/* ---------------------------------------------------------------- TCP */
+typedef struct {
+    int used;
+    uint8_t mac_ds[6], mac_gw[6], ip_ds[4];
+    uint16_t port;                 /* the DS's port */
+    uint32_t rcv_nxt, iss, snd_una, snd_nxt;
+    uint16_t wnd;
+    char req[8192]; int reqlen;
+    char* resp; int resplen;       /* reply; bytes [0, resplen) at seq iss+1.. ; FIN after */
+    int fin_in, fin_sent;
+    int64_t last;                  /* frame of the last progress (retransmit) */
+} Conn;
+static Conn g_c[4];
+
+static void tcp_send(Conn* c, uint32_t seq, int flags, const uint8_t* data, int n) {
+    uint8_t f[1600];
+    uint8_t q[34];                                  /* a fake request frame for ip_reply */
+    memcpy(q, c->mac_gw, 6); memcpy(q + 6, c->mac_ds, 6); memcpy(q + 14 + 12, c->ip_ds, 4);
+    int opt = (flags & 0x02) ? 4 : 0;               /* SYN: MSS */
+    uint8_t* t = f + 14 + 20;
+    put16be(t, 80); put16be(t + 2, c->port); put32be(t + 4, seq); put32be(t + 8, c->rcv_nxt);
+    t[12] = (uint8_t)((20 + opt) / 4 << 4); t[13] = (uint8_t)flags; put16be(t + 14, 8192); t[16] = t[17] = 0; t[18] = t[19] = 0;
+    if (opt) { t[20] = 2; t[21] = 4; put16be(t + 22, 1400); }
+    if (n) memcpy(t + 20 + opt, data, (size_t)n);
+    int l4 = 20 + opt + n;
+    int tot = ip_reply(f, q, 6, l4, WFC_IP);
+    memcpy(f, c->mac_ds, 6); memcpy(f + 6, c->mac_gw, 6);
+    memcpy(f + 14 + 16, c->ip_ds, 4);
+    f[14 + 10] = f[14 + 11] = 0; put16be(f + 14 + 10, cksum(f + 14, 20, 0));
+    put16be(t + 16, cksum(t, l4, pseudo(f + 14, 6, l4)));
+    net_deliver(f, tot);
+}
+/* send what the window allows, then FIN */
+static void tcp_push(Conn* c) {
+    if (!c->resp) return;
+    uint32_t base = c->iss + 1;
+    while (1) {
+        int off = (int)(c->snd_nxt - base);
+        int inflight = (int)(c->snd_nxt - c->snd_una);
+        if (off < c->resplen) {
+            int n = c->resplen - off; if (n > 1400) n = 1400;
+            if (inflight + n > (c->wnd ? c->wnd : 1400)) break;
+            tcp_send(c, c->snd_nxt, 0x18, (const uint8_t*)c->resp + off, n);
+            c->snd_nxt += (uint32_t)n;
+        } else {
+            if (!c->fin_sent) { tcp_send(c, c->snd_nxt, 0x11, NULL, 0); c->snd_nxt++; c->fin_sent = 1; }
+            break;
+        }
+    }
+}
+
+static int tcp(const uint8_t* q, int len) {
+    const uint8_t* ip = q + 14; int ihl = (ip[0] & 15) * 4;
+    const uint8_t* t = ip + ihl;
+    int tl = (ip[2] << 8 | ip[3]) - ihl;
+    if (tl < 20 || 14 + ihl + tl > len) return 1;
+    uint16_t sport = (uint16_t)(t[0] << 8 | t[1]), dport = (uint16_t)(t[2] << 8 | t[3]);
+    uint32_t seq = get32be(t + 4), ack = get32be(t + 8);
+    int doff = (t[12] >> 4) * 4, flags = t[13];
+    uint16_t wnd = (uint16_t)(t[14] << 8 | t[15]);
+    const uint8_t* data = t + doff; int dl = tl - doff;
+    Conn* c = NULL;
+    for (int i = 0; i < 4; i++) if (g_c[i].used && g_c[i].port == sport) c = &g_c[i];
+
+    if (flags & 0x04) { if (c) { free(c->resp); c->used = 0; } return 1; }       /* RST */
+    if ((flags & 0x12) == 0x02) {                                                  /* SYN */
+        if (dport != 80) {                                                        /* only HTTP: refuse */
+            Conn tmp = { 0 }; memcpy(tmp.mac_ds, q + 6, 6); memcpy(tmp.mac_gw, q, 6); memcpy(tmp.ip_ds, ip + 12, 4);
+            tmp.port = sport; tmp.rcv_nxt = seq + 1;
+            tcp_send(&tmp, 0, 0x14, NULL, 0);
+            ev("wfc: refused a connection to port %d\n", dport);
+            return 1;
+        }
+        if (c && c->rcv_nxt == seq + 1) { tcp_send(c, c->iss, 0x12, NULL, 0); return 1; }   /* repeated SYN */
+        if (c) { free(c->resp); c->used = 0; }
+        for (int i = 0; i < 4 && !c; i++) if (!g_c[i].used) c = &g_c[i];
+        if (!c) { c = &g_c[0]; free(c->resp); }
+        memset(c, 0, sizeof *c);
+        c->used = 1; memcpy(c->mac_ds, q + 6, 6); memcpy(c->mac_gw, q, 6); memcpy(c->ip_ds, ip + 12, 4);
+        c->port = sport; c->rcv_nxt = seq + 1; c->iss = (uint32_t)rand() << 8; c->snd_una = c->iss; c->snd_nxt = c->iss + 1;
+        c->wnd = wnd; c->last = (int64_t)g_frame;
+        tcp_send(c, c->iss, 0x12, NULL, 0);
+        return 1;
+    }
+    if (!c) { if (!(flags & 0x04)) { Conn tmp = { 0 }; memcpy(tmp.mac_ds, q + 6, 6); memcpy(tmp.mac_gw, q, 6); memcpy(tmp.ip_ds, ip + 12, 4);
+                                     tmp.port = sport; tmp.rcv_nxt = seq + (uint32_t)dl; tcp_send(&tmp, ack, 0x04, NULL, 0); } return 1; }
+    c->wnd = wnd;
+    if (flags & 0x10) {                                                            /* ACK */
+        if ((int32_t)(ack - c->snd_una) > 0 && (int32_t)(ack - c->snd_nxt) <= 0) { c->snd_una = ack; c->last = (int64_t)g_frame; }
+    }
+    if (dl > 0) {
+        if (seq == c->rcv_nxt && c->reqlen + dl < (int)sizeof c->req) {
+            memcpy(c->req + c->reqlen, data, (size_t)dl); c->reqlen += dl; c->rcv_nxt += (uint32_t)dl;
+            c->req[c->reqlen] = 0;
+        }
+        tcp_send(c, c->snd_nxt, 0x10, NULL, 0);
+        /* a whole request? headers, then Content-Length bytes */
+        const char* hdr_end = strstr(c->req, "\r\n\r\n");
+        if (hdr_end && !c->resp) {
+            int need = 0;
+            const char* cl = strstr(c->req, "Content-Length:"); if (!cl) cl = strstr(c->req, "content-length:");
+            if (cl && cl < hdr_end) need = atoi(cl + 15);
+            if (c->reqlen - (int)(hdr_end + 4 - c->req) >= need) {
+                c->resp = http(c->req, c->reqlen, &c->resplen);
+            }
+        }
+    }
+    if ((flags & 0x01) && seq + (uint32_t)dl == c->rcv_nxt && !c->fin_in) {
+        c->rcv_nxt++; c->fin_in = 1;
+        tcp_send(c, c->snd_nxt, 0x10, NULL, 0);
+    }
+    tcp_push(c);
+    if (c->fin_sent && c->fin_in && c->snd_una == c->snd_nxt) { free(c->resp); c->used = 0; }
+    return 1;
+}
+
+/* resend anything unacknowledged for half a second (safety net) */
+void wfc_poll(void) {
+    for (int i = 0; i < 4; i++) {
+        Conn* c = &g_c[i];
+        if (!c->used) continue;
+        if ((int64_t)g_frame - c->last > 600) { free(c->resp); c->used = 0; continue; }   /* gone quiet: forget it */
+        if (c->snd_una != c->snd_nxt && (int64_t)g_frame - c->last > 30) {
+            c->last = (int64_t)g_frame;
+            if (c->snd_una == c->iss) { tcp_send(c, c->iss, 0x12, NULL, 0); continue; }
+            c->snd_nxt = c->snd_una;
+            if (c->fin_sent && (int)(c->snd_una - (c->iss + 1)) >= c->resplen) c->fin_sent = 0;
+            tcp_push(c);
+        }
+    }
+}
+
+/* A frame from the DS: 1 if the built-in server took it. */
+int wfc_input(const uint8_t* q, int len) {
+    if (!g_on || len < 34 || q[12] != 8 || q[13] != 0) return 0;
+    const uint8_t* ip = q + 14; int ihl = (ip[0] & 15) * 4;
+    if (len < 14 + ihl + 8) return 0;
+    int proto = ip[9];
+    if (proto == 17 && (ip[ihl + 2] << 8 | ip[ihl + 3]) == 53) return dns(q, len);
+    if (proto == 6 && !memcmp(ip + 16, WFC_IP, 4)) return tcp(q, len);
+    return 0;
+}

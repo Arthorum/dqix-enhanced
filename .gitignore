@@ -23,3 +23,5 @@ __pycache__/
 *.bundle
 setup-history.bat
 
+# the built-in Wi-Fi server's files: DQIX's downloads as Nintendo served them (game data, not ours)
+/wfc/*/
