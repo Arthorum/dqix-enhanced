@@ -33,3 +33,5 @@ setup-history.bat
 /extras/*
 !/extras/README.txt
 /release/
+# bookmarks: copies of saves and settings at each bookmark (private)
+/bookmarks/
