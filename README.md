@@ -74,7 +74,8 @@ libslirp (a user-mode network stack: DHCP, DNS and TCP become ordinary
 sockets; nothing on the PC is changed). The DS's own Wi-Fi settings point its
 DNS at a community replacement for Nintendo Wi-Fi Connection, the way players
 set up a real DS: *Server* picks AltWFC (172.104.88.237, the default) or
-Wiimmfi (164.132.44.106); `wfc_server = <address>` in `settings.ini` uses
+Wiimmfi (164.132.44.106; it passes DQIX on to Nintendo, which answers
+"service discontinued", error 20110); `wfc_server = <address>` in `settings.ini` uses
 another. Then talk to Sellma at the DQVC counter in Stornway's Quester's Rest,
 as on the DS. With it off, the game behaves like a DS with no access point
 (Sellma offers DQVC without connecting). Each copy makes up its own MAC

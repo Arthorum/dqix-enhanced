@@ -85,7 +85,7 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(wl, MI_NET, L"&Connect to the internet (Nintendo WFC replacement)");
     HMENU srv = sub(wl, L"&Server");
     item(srv, MI_SRV_ALTWFC, L"&AltWFC (172.104.88.237)");
-    item(srv, MI_SRV_WIIMMFI, L"&Wiimmfi (164.132.44.106)");
+    item(srv, MI_SRV_WIIMMFI, L"&Wiimmfi (164.132.44.106): not for DQIX");
     item(srv, MI_SRV_CUSTOM, L"&Custom (wfc_server in settings.ini)");
     sep(wl);
     item(wl, MI_DLC, L"&Unlock all downloadable content now (offline)");

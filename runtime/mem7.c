@@ -49,20 +49,28 @@ uint32_t mem7_read32(uint32_t a) {
     if (!p) return unmapped7(a, 4);
     uint32_t v; memcpy(&v, p, 4); return v;
 }
+/* Writes to the BIOS (0-3FFF) do nothing on the DS. The SDK's wireless code
+ * writes there through an unset pointer while connected; log the first only. */
+static int bios_write(uint32_t a) {
+    static int said;
+    if (a >= 0x4000) return 0;
+    if (!said) { said = 1; LOG_WARN("arm7 writes to the BIOS at %08x (ignored, as on the DS; not logged again)\n", a); }
+    return 1;
+}
 void mem7_write8(uint32_t a, uint8_t v) {
     if ((a >> 24) == 4) { io7_write(a, v, 1); return; }
     uint8_t* p = resolve7(a);
-    if (p) *p = v; else LOG_WARN("arm7 write8 to unmapped %08x = %02x\n", a, v);
+    if (p) *p = v; else if (!bios_write(a)) LOG_WARN("arm7 write8 to unmapped %08x = %02x\n", a, v);
 }
 void mem7_write16(uint32_t a, uint16_t v) {
     a &= ~1u;
     if ((a >> 24) == 4) { io7_write(a, v, 2); return; }
     uint8_t* p = resolve7(a);
-    if (p) memcpy(p, &v, 2); else LOG_WARN("arm7 write16 to unmapped %08x = %04x\n", a, v);
+    if (p) memcpy(p, &v, 2); else if (!bios_write(a)) LOG_WARN("arm7 write16 to unmapped %08x = %04x\n", a, v);
 }
 void mem7_write32(uint32_t a, uint32_t v) {
     a &= ~3u;
     if ((a >> 24) == 4) { io7_write(a, v, 4); return; }
     uint8_t* p = resolve7(a);
-    if (p) memcpy(p, &v, 4); else LOG_WARN("arm7 write32 to unmapped %08x = %08x\n", a, v);
+    if (p) memcpy(p, &v, 4); else if (!bios_write(a)) LOG_WARN("arm7 write32 to unmapped %08x = %08x\n", a, v);
 }
