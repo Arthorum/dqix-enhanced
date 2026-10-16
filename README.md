@@ -81,6 +81,20 @@ the community's "NoSSL" patches, its login and download addresses are
 switched to `http://` in memory (the ROM is not changed). Nintendo's login
 code also needs a `Date` header in the reply.
 
+**DQVC's weekly stock** follows the original calendar: the 52 sales that ran
+every year from July 2010 to 2014 (Opening Sale, Slime Sale, Halloween
+Fayre, Winter Fayre, Valentine Fayre, Bridal Fayre, Orb Week...), each
+starting on the date it did, picked by your PC's clock. Each week's file
+holds that sale's whole lineup and the game shows six of them, chosen per
+player, as the real service did. `wfc/YDQE/dqvc.txt` is the schedule (week
+start, item, price, quantity), made by `tools/dqvc_build.py` from the lists
+on yab's DQ9 Tools; quantities aren't listed there, so they are 1 for
+equipment and 3 for other items unless a preserved file says otherwise. The
+download files are RC4-encrypted with the key `XENLONPROJECTKEY` (the
+game's code name) and end with 4 bytes that make the whole encrypted file,
+read as one number, divisible by 0xC2A030D4; the server builds and seals
+each week's file when the game asks.
+
 The other servers go through the internet via libslirp (a user-mode network
 stack: DHCP, DNS and TCP become ordinary sockets; nothing on the PC is
 changed), with the DS's DNS pointed at a community replacement for Nintendo
@@ -190,6 +204,7 @@ DQIX_CRC=out.txt                               a checksum of every frame (compar
 DQIX_ONLINE=builtin / DQIX_ONLINE=1.2.3.4      connect: the built-in server / through this DNS (tests)
 DQIX_WFC_DIR=path                              the built-in server's files (default: wfc)
 DQIX_WFCDEBUG=1                                print every request to the built-in server and its reply
+DQIX_RAMDUMP=dir,frame,...                     main RAM at those frames (debugging)
 DQIX_MAC=00:09:bf:12:34:56                     the console's MAC (replaying a report's mac line)
 DQIX_WIFILOG=1 / DQIX_NETLOG=1 / DQIX_NETHEX=1 log the wireless chip / network / every frame in hex
 DQIX_DUMP_AT=100,200                           with DQIX_DUMP=dir,1: only those frames
@@ -222,6 +237,7 @@ runtime/wifi.c         the wireless chip and the access point DQIX-PC (after mel
 runtime/net.c          the access point's network (libslirp)
 runtime/wfc.c          the built-in Nintendo Wi-Fi Connection server (DNS, TCP, login, downloads)
 wfc/                   its files, per game code (not in git; see wfc/README.txt)
+tools/dqvc_build.py    builds wfc/YDQE/dqvc.txt (DQVC's weekly stock) from saved pages
 third_party/libslirp   user-mode network stack (BSD licence, as vendored by melonDS)
 runtime/input.c        DS buttons / touch from the frontend or a script
 runtime/frontend_sdl.c window, input, audio, pacing, settings (SDL2)
@@ -272,8 +288,9 @@ Generated C is derived from the game: keep it private. The tool contains no game
   DQIX (same frames rendered here): colours per backlight level, black glow,
   pixel grid from a macro shot, motion blur from slow-motion video; plus the
   same shots of the port on the monitor with identical camera settings.
-* The built-in server could hand out DQIX's downloads one week at a time, as
-  Nintendo did (the quest files would need to be decoded first).
+* The downloadable quests could arrive one week at a time, as Nintendo
+  released them (the quest file format is decoded; the release order is
+  needed).
 * Save states (states are tied to one build; see notes in the chat history).
 * Enhanced extras: widescreen, top-screen map.
 

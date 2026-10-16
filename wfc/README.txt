@@ -13,5 +13,8 @@ them, preserved by the community: https://github.com/InternalLoss/DLS1-Files
   auction*   DQVC's stock
   infomes*   the news message
 
+  dqvc.txt   (YDQE) DQVC's 52 weekly stocks on the original calendar, made
+             by tools/dqvc_build.py; the server builds each week's file
+
 They are game data, so they are kept out of the git history; build-windows.sh
 copies them next to dqix.exe.

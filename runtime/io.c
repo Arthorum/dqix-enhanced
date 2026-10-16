@@ -3,6 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+/* DQIX_RAMDUMP=dir,frame,frame...: main RAM at those frames (debugging) */
+static void ram_dump_check(void) {
+    static int init; static char dir[256]; static unsigned long long at[64]; static int n;
+    if (!init) {
+        init = 1; const char* e = getenv("DQIX_RAMDUMP");
+        if (e) { const char* c = strchr(e, ','); if (c) { snprintf(dir, sizeof dir, "%.*s", (int)(c - e), e);
+                 while (c && n < 64) { at[n++] = strtoull(c + 1, NULL, 10); c = strchr(c + 1, ','); } } }
+    }
+    for (int i = 0; i < n; i++) if (at[i] == g_frame) {
+        char p[300]; snprintf(p, sizeof p, "%s/ram%06llu.bin", dir, (unsigned long long)g_frame);
+        FILE* f = fopen(p, "wb"); if (f) { fwrite(g_main_ram, 1, MAIN_RAM_SIZE, f); fclose(f); }
+    }
+}
 #include "frontend.h"
 
 uint8_t g_io[0x2000];
@@ -167,7 +180,7 @@ void time_advance_lines(uint32_t lines) {
     while (lines--) {
         g_subline = 0;
         if (++g_vcount >= LINES_PER_FRAME) {
-            g_vcount = 0; g_frame++; wfc_frame();
+            g_vcount = 0; g_frame++; wfc_frame(); ram_dump_check();
             if (g_frame_limit && g_frame >= g_frame_limit) exit(0);
         }
         if (g_vcount < 192) gpu_render_line((int)g_vcount);

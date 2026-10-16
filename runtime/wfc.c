@@ -123,6 +123,113 @@ static int dns(const uint8_t* q, int len) {
     return 1;
 }
 
+/* ---------------------------------------------------------------- DQVC
+ * DQIX's download files are RC4-encrypted (key "XENLONPROJECTKEY", the game's
+ * code name) and end with 4 bytes that make the whole encrypted file, read as
+ * one big-endian number, divisible by 0xC2A030D4 (overlay 23, 021f6324).
+ * Decrypted, a DQVC stock ("auction") file is
+ *   u32 serial, u32 end of records, u32 27, u32 2
+ *   records: u16 tag, u8 words, u8 type, words (u32 each)
+ *     0x65 [0]  0x64 [20]  0x67 [2099 12 31] (valid until)
+ *     0x68 [item, price, 1, quantity] per item: the week's pool; the game
+ *          shows six of them, picked per player
+ *   "YYYY/MM/DD hh:mm:ss\0" "YYMMDD\0", 0xFF to 32 bytes, then the 4 bytes
+ *
+ * wfc/<game>/dqvc.txt, when present, rotates the stock every week, on the
+ * same calendar as the original service (which ran the same 52 sales every
+ * year from July 2010 to 2014):
+ *   week MM/DD <title>      a new week, starting on that date every year
+ *   <item id> <price> <quantity> <name...>
+ * The DS's clock (your PC's) picks the week that started most recently.
+ */
+static void rc4(const uint8_t* key, int kl, uint8_t* d, int n) {
+    uint8_t S[256]; int i, j = 0;
+    for (i = 0; i < 256; i++) S[i] = (uint8_t)i;
+    for (i = 0; i < 256; i++) { j = (j + S[i] + key[i % kl]) & 255; uint8_t t = S[i]; S[i] = S[j]; S[j] = t; }
+    i = j = 0;
+    for (int k = 0; k < n; k++) {
+        i = (i + 1) & 255; j = (j + S[i]) & 255; uint8_t t = S[i]; S[i] = S[j]; S[j] = t;
+        d[k] ^= S[(S[i] + S[j]) & 255];
+    }
+}
+/* encrypt plain[0..n) in place and append the check bytes; returns n + 4 */
+static int seal(uint8_t* d, int n) {
+    rc4((const uint8_t*)"XENLONPROJECTKEY", 16, d, n);
+    const uint64_t M = 0xC2A030D4u;
+    uint64_t h = 0;
+    for (int i = 0; i < n; i++) h = ((h << 8) + d[i]) % M;
+    for (int i = 0; i < 4; i++) h = (h << 8) % M;            /* h * 2^32 mod M */
+    uint32_t x = (uint32_t)((M - h) % M);
+    d[n] = (uint8_t)(x >> 24); d[n + 1] = (uint8_t)(x >> 16); d[n + 2] = (uint8_t)(x >> 8); d[n + 3] = (uint8_t)x;
+    return n + 4;
+}
+static void put32le(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+static char* load_file(const char* path, int* size);
+typedef struct { uint32_t id, price, qty; } StockItem;
+/* This week's stock for the game, built from dqvc.txt: a malloc'd file and
+ * its name, or NULL (no schedule). */
+static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len, char* title, int titlecap) {
+    char p[700]; snprintf(p, sizeof p, "%s/%s/dqvc.txt", g_dir, gamecd);
+    int n = 0; char* txt = load_file(p, &n);
+    if (!txt) return NULL;
+    /* each week's start (month/day) */
+    static const int DOY[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    int starts[128]; int weeks = 0;
+    for (char* l = txt; l && *l; ) {
+        char* e = strchr(l, '\n');
+        int mo, d;
+        if (!strncmp(l, "week", 4) && weeks < 128) starts[weeks++] = sscanf(l + 4, " %d/%d", &mo, &d) == 2 && mo >= 1 && mo <= 12 ? DOY[mo - 1] + d - 1 : -1;
+        l = e ? e + 1 : NULL;
+    }
+    if (!weeks || starts[0] < 0) { free(txt); return NULL; }
+    /* today, on the DS's clock (local time) */
+    time_t now = (time_t)rtc_base() + (time_t)(g_frame / 60);
+    struct tm* t = gmtime(&now);                             /* rtc_base is already local time */
+    int today = DOY[t->tm_mon] + t->tm_mday - 1;
+    if (t->tm_mon == 1 && t->tm_mday == 29) today = DOY[1] + 27;  /* 29 Feb counts as 28 Feb */
+    int pos = (today - starts[0] + 365) % 365;               /* days since this cycle's first week */
+    int w = 0;
+    for (int i = 0; i < weeks; i++) if (starts[i] >= 0 && (starts[i] - starts[0] + 365) % 365 <= pos) w = i;
+    int cycle_year = t->tm_year + 1900 - (today < starts[0] ? 1 : 0);
+    int64_t abs_week = (int64_t)(cycle_year - 2010) * weeks + w;
+    /* the items of week w */
+    StockItem items[200]; int ni = 0; int cur = -1;
+    title[0] = 0;
+    for (char* l = txt; l && *l; ) {
+        char* e = strchr(l, '\n'); if (e) *e = 0;
+        if (!strncmp(l, "week", 4)) { cur++; if (cur == w) { const char* t = l + 4; while (*t == ' ') t++; while (*t && *t != ' ') t++; while (*t == ' ') t++; snprintf(title, (size_t)titlecap, "%s", t);
+                                                            size_t tl = strlen(title); while (tl && (title[tl - 1] == '\r' || title[tl - 1] == ' ')) title[--tl] = 0; } }
+        else if (cur == w && ni < 200) {
+            unsigned id, price, qty;
+            if (sscanf(l, "%u %u %u", &id, &price, &qty) == 3 && id) { items[ni].id = id; items[ni].price = price; items[ni].qty = qty ? qty : 1; ni++; }
+        }
+        l = e ? e + 1 : NULL;
+    }
+    free(txt);
+    if (!ni) return NULL;
+    int body = 16 + 8 + 8 + 16 + ni * 20;
+    uint8_t* f = calloc(1, (size_t)body + 32 + 4);
+    uint32_t serial = 1000 + (uint32_t)abs_week;           /* new every week, so the game takes it as new */
+    put32le(f, serial); put32le(f + 4, (uint32_t)body); put32le(f + 8, 27); put32le(f + 12, 2);
+    uint8_t* q = f + 16;
+    static const uint8_t t65[] = { 0x65, 0, 1, 0, 0, 0, 0, 0 }, t64[] = { 0x64, 0, 1, 0, 20, 0, 0, 0 };
+    memcpy(q, t65, 8); q += 8; memcpy(q, t64, 8); q += 8;
+    q[0] = 0x67; q[1] = 0; q[2] = 3; q[3] = 0x15; put32le(q + 4, 2099); put32le(q + 8, 12); put32le(q + 12, 31); q += 16;
+    for (int i = 0; i < ni; i++) {
+        q[0] = 0x68; q[1] = 0; q[2] = 4; q[3] = 0x55;
+        put32le(q + 4, items[i].id); put32le(q + 8, items[i].price); put32le(q + 12, 1); put32le(q + 16, items[i].qty); q += 20;
+    }
+    { struct tm* g = gmtime(&now);
+      char ds[40]; strftime(ds, sizeof ds, "%Y/%m/%d %H:%M:%S", g); memcpy(q, ds, 20);
+      strftime(ds, sizeof ds, "%y%m%d", g); memcpy(q + 20, ds, 7);
+      memset(q + 27, 0xFF, 5); }
+    *len = seal(f, body + 32);
+    snprintf(name, (size_t)namecap, "dqvc_w%04d.bin", (int)abs_week);
+    ev("wfc: DQVC week %d of %d (%s): %d items\n", w + 1, weeks, title, ni);
+    return f;
+}
+
 /* ---------------------------------------------------------------- HTTP */
 static char* load_file(const char* path, int* size) {
     FILE* f = fopen(path, "rb");
@@ -247,7 +354,13 @@ static char* http(const char* req, int reqlen, int* outlen) {
         char p[700]; snprintf(p, sizeof p, "%s/%s/_list.txt", g_dir, okcd ? gamecd : "none");
         int ln = 0; char* list = okcd ? load_file(p, &ln) : NULL;
         char hits[2048] = ""; int count = 0;
+        char wname[64] = "", wtitle[128]; int wlen = 0;
+        uint8_t* wk = okcd ? dqvc_week(gamecd, wname, sizeof wname, &wlen, wtitle, sizeof wtitle) : NULL;
+        free(wk);
+        char wline[160] = "";
+        if (wk) snprintf(wline, sizeof wline, "%s\t\tauction\t\t\t%d", wname, wlen);
         for (char* line = list ? strtok(list, "\r\n") : NULL; line; line = strtok(NULL, "\r\n")) {
+            if (wk && strstr(line, "\tauction\t")) line = wline;          /* this week's DQVC stock */
             char f[6][64] = { { 0 } }; int nf = 0; const char* s = line;
             while (nf < 6) { const char* t = strchr(s, '\t'); int l = t ? (int)(t - s) : (int)strlen(s); if (l > 63) l = 63;
                              memcpy(f[nf], s, (size_t)l); f[nf][l] = 0; nf++; if (!t) break; s = t + 1; }
@@ -262,6 +375,12 @@ static char* http(const char* req, int reqlen, int* outlen) {
         else if (!strcmp(action, "contents")) {
             int okn = name[0] && !strstr(name, "..") && !strchr(name, '/') && !strchr(name, '\\');
             snprintf(p, sizeof p, "%s/%s/%s", g_dir, okcd ? gamecd : "none", name);
+            if (okn && okcd && !strncmp(name, "dqvc_w", 6)) {
+                char wn[64], wt[128]; int wl = 0;
+                bin = (char*)dqvc_week(gamecd, wn, sizeof wn, &wl, wt, sizeof wt);
+                if (bin && strcmp(wn, name)) { free(bin); bin = NULL; }     /* a week that is over */
+                binlen = wl;
+            } else
             bin = okn && okcd ? load_file(p, &binlen) : NULL;
             if (bin) { ctype = "application/x-dsdl"; snprintf(extrab, sizeof extrab, "Content-Disposition: attachment; filename=\"%s\"\r\n", name); extra = extrab; }
             else status = 404;
