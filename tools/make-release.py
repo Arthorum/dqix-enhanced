@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Make the zips for sharing privately (run from the project folder).
 
-  tools/make-release.py <out dir>
+  tools/make-release.py <out dir>      (zips go in <out dir>/stable or /nightly)
 
   DQIX-PC-<version>.zip         the project as committed (git archive of HEAD):
                                 BUILD.bat, the recompiler, the runtime... no game
@@ -17,6 +17,8 @@ import io, os, re, subprocess, sys, zipfile
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 ver = re.search(r'DQIX_VERSION "([^"]+)"', open('runtime/version.h').read()).group(1)
+out = os.path.join(out, 'nightly' if 'nightly' in ver else 'stable')        # release/stable, release/nightly
+os.makedirs(out, exist_ok=True)
 
 # the project, exactly as committed, with Windows line endings for the .bat files
 tar = subprocess.run(['git', 'archive', '--format=zip', '--prefix=DQIX-PC/', 'HEAD'], check=True, capture_output=True).stdout
