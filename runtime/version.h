@@ -2,5 +2,5 @@
  * a bug report (whose folder name starts with it) shows which update it came
  * from. */
 #pragma once
-#define DQIX_VERSION "v24"
+#define DQIX_VERSION "v25"
 #define DQIX_VERSION_DATE "2026-10-15"
