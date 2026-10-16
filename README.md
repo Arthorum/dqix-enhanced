@@ -13,7 +13,8 @@ natively, plus the runtime that stands in for the DS hardware.
 * Milestone 5 (done): Classic mode, the game exactly as a DS shows and plays
   it (see "Classic and Enhanced" below), and Enhanced mode, with 3D drawn on
   the graphics card at 1-4x resolution.
-* Next: more Enhanced features (widescreen, top-screen map), always optional.
+* Next: local wireless, tag mode and co-op across the internet (see
+  `docs/STATE.md`, which also says where the project stands).
 
 ## Getting started (Windows)
 
