@@ -13,7 +13,9 @@ natively, plus the runtime that stands in for the DS hardware.
 * Milestone 5 (done): Classic mode, the game exactly as a DS shows and plays
   it (see "Classic and Enhanced" below), and Enhanced mode, with 3D drawn on
   the graphics card at 1-4x resolution.
-* Next: local wireless, tag mode and co-op across the internet (see
+* Milestone 6 (nightly): local wireless between DSes, and **playing with
+  friends far away**: tag mode and visiting/inviting (Pavo) for up to 4
+  players across the internet (see "Playing with friends far away" below and
   `docs/STATE.md`, which also says where the project stands).
 
 ## Getting started (Windows)
@@ -138,6 +140,37 @@ downloadable quests and 23 special guests are on the cartridge, and Nintendo
 Wi-Fi Connection only switched them on in the save, so this switches them on
 in the save each time the game starts (save layout from the open-source DQIX
 save editor).
+
+**Playing with friends far away (Wireless menu).** Tag mode (Erinn's
+"Canvass for guests") and visiting or inviting other players (Pavo) need DS
+systems next to each other. Here, friends anywhere can do it, up to 4
+players. One hosts (*Wireless > Play with friends far away > Host*), the
+others *Join* with the address the host's game shows; the host presses Enter
+when everyone is in. All the games restart together, each from its own save.
+
+How it works: the DS's wireless needs answers within microseconds, which no
+internet connection can give, so *every PC runs every player's DS*: yours in
+the window, your friends' unseen, all talking through the emulated air on
+that PC (`runtime/air.c`: deterministic, every console counts the same 8 us
+ticks and a frame arrives at its sender's tick plus the preamble). Only the
+buttons travel between the PCs (`runtime/session.c`, TCP via the host): each
+press is used a few frames later (the input delay, chosen from the pings) on
+every PC at once. The game is deterministic, so every PC computes exactly
+the same; fingerprints of memory every 2 seconds catch a PC that doesn't
+(a different build, say). The wireless chip now does what DSes do between
+themselves: frames, beacons, the MP CMD / REPLY / ACK exchanges (ported from
+melonDS's Wifi.cpp).
+
+To let friends in, the host's game asks the home router to forward a port
+(UPnP) and shows the internet address to give out (copied to the
+clipboard). If the router won't, forward TCP port 27900 (`session_port` in
+`settings.ini`) to the host's PC, or all of you use a free virtual LAN
+(Tailscale, ZeroTier, Radmin VPN) and use the host's address there. Everyone
+needs the same version of the game. Your name in sessions: *Your name...*
+(`player_name` in `settings.ini`). Tests: `DQIX_SESSION=host[:port[:players]]`
+or `join:address[:port]`; `DQIX_AIR=name,index,count` connects copies on one
+PC without a session. In tag mode, press A once more after Erinn's "Go get
+'em!": the canvassing starts then.
 
 **Settings.** The game remembers every menu choice in `settings.ini` next to `dqix.exe` (delete it to go
 back to the defaults). Enhanced needs OpenGL 3.3 (nearly every PC from the

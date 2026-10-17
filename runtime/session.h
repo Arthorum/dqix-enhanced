@@ -52,10 +52,13 @@ typedef struct {
     int gone[SESSION_MAX];
     char address[128];                    /* what friends type in (host) / where we connect (guest) */
     char message[256];                    /* the latest news (joined, left, out of sync, errors) */
+    char hint[600];                       /* host: how friends get in */
+    int ready;                            /* host: the address is known */
     int desync;
 } SessionInfo;
 void session_info(SessionInfo* out);
 void session_start_now(void);             /* host: everyone is here */
 void session_cancel(void);
+void session_set_name(const char* name);
 /* the lobby screen etc.: called repeatedly while the lobby waits */
 extern void (*session_lobby_hook)(void);

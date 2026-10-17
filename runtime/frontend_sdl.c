@@ -28,6 +28,14 @@
 #include "gl_render.h"
 #include "menu.h"
 #include "version.h"
+#include "session.h"
+#include "air.h"
+#include "text.h"
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #define DS_FPS 59.8261
 
@@ -222,6 +230,8 @@ static const struct { const char* key; const char* dns; } WFC[] = {
     { "wiimmfi", "164.132.44.106" },
 };
 static char g_wfc_server[64] = "builtin";       /* a key above or a DNS address */
+static char g_player_name[32] = "";              /* sessions: what friends see */
+static int g_session_port = SESSION_PORT;
 static int g_net_want;                         /* the menu's "connect" check */
 static const char* wfc_dns(void) {
     for (unsigned i = 0; i < sizeof WFC / sizeof WFC[0]; i++) if (!strcmp(g_wfc_server, WFC[i].key)) return WFC[i].dns;
@@ -256,6 +266,13 @@ static void settings_load(void) {
     while (fgets(line, sizeof line, f)) {
         char key[64]; char val[64];
         if (line[0] == '#' || sscanf(line, " %63[^= ] = %63s", key, val) != 2) continue;
+        if (!strcmp(key, "player_name")) {                       /* the whole rest of the line (may have spaces) */
+            const char* v = strchr(line, '=') + 1; while (*v == ' ') v++;
+            snprintf(g_player_name, sizeof g_player_name, "%s", v);
+            g_player_name[strcspn(g_player_name, "\r\n")] = 0;
+            continue;
+        }
+        if (!strcmp(key, "session_port")) { int v = atoi(val); if (v > 0 && v < 65536) g_session_port = v; continue; }
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
         else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
@@ -326,6 +343,9 @@ static void settings_save(void) {
     fprintf(f, "wireless = %d\n", g_net_want);
     fprintf(f, "# which server: builtin (offline, the files in the wfc folder), altwfc, wiimmfi, or another's DNS address\n");
     fprintf(f, "wfc_server = %s\n", g_wfc_server);
+    fprintf(f, "# playing with friends far away: your name, and the port friends connect to when you host\n");
+    fprintf(f, "player_name = %s\n", g_player_name);
+    fprintf(f, "session_port = %d\n", g_session_port);
     fprintf(f, "# this copy's own MAC address (made up the first time; the servers know you by it)\n");
     if (g_wireless.mac_set)
         fprintf(f, "wireless_mac = %02x:%02x:%02x:%02x:%02x:%02x\n", g_wireless.mac[0], g_wireless.mac[1],
@@ -409,6 +429,8 @@ static int try_gl(void) {
     return 1;
 }
 
+static void lobby_hook(void);
+static void idle_pump(void);
 void frontend_init(int argc, char** argv) {
     (void)argc; (void)argv;
     SDL_SetMainReady();
@@ -453,6 +475,8 @@ void frontend_init(int argc, char** argv) {
         layout_window();
         if (g_fullscreen) { menu_show(0); SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP); }
         atexit(settings_save);
+        session_lobby_hook = lobby_hook;
+        air_idle_hook = idle_pump;
     }
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -679,14 +703,32 @@ static void present(void) {
 
 /* ---------------------------------------------------------------- settings changes (keys and menu) */
 static void update_title(double fps) {
-    char title[128];
-    if (g_paused) snprintf(title, sizeof title, "Dragon Quest IX " DQIX_VERSION " - paused (P to continue)");
-    else snprintf(title, sizeof title, "Dragon Quest IX " DQIX_VERSION " - %s%s - %.1f fps%s", g_classic ? "Classic" : "Enhanced",
-                  g_gl && g_opt.lcd ? " - DS Lite screen" : "", fps, g_fast ? " (fast)" : "");
+    char title[400], ses[300] = "";
+    if (session_running()) {
+        SessionInfo si; session_info(&si);
+        int here = 0; for (int k = 0; k < si.n; k++) here += !si.gone[k];
+        if (si.desync) snprintf(ses, sizeof ses, " - OUT OF SYNC: leave the session (Wireless menu)");
+        else if (si.state == 4) snprintf(ses, sizeof ses, " - session over: %s", si.message);
+        else snprintf(ses, sizeof ses, " - together: %d of %d players, delay %d", here, si.n, si.delay);
+        static char last[256]; static uint64_t shown;
+        if (strcmp(last, si.message)) { snprintf(last, sizeof last, "%s", si.message); shown = SDL_GetPerformanceCounter(); }
+        if (!si.desync && si.state == 3 && SDL_GetPerformanceCounter() - shown < g_perf_freq * 8) snprintf(ses + strlen(ses), sizeof ses - strlen(ses), " - %s", si.message);
+    }
+    if (g_paused) snprintf(title, sizeof title, "Dragon Quest IX " DQIX_VERSION " - paused (P to continue)%s", ses);
+    else snprintf(title, sizeof title, "Dragon Quest IX " DQIX_VERSION " - %s%s - %.1f fps%s%s", g_classic ? "Classic" : "Enhanced",
+                  g_gl && g_opt.lcd ? " - DS Lite screen" : "", fps, g_fast ? " (fast)" : "", ses);
     SDL_SetWindowTitle(g_win, title);
 }
 
 static void menu_sync(void) {
+    {
+        SessionInfo si; session_info(&si);
+        int in = session_requested();
+        menu_enable(MI_SES_START, in && si.host && si.state == 2 && si.n >= 2);
+        menu_enable(MI_SES_LEAVE, in);
+        menu_enable(MI_SES_HOST, !in); menu_enable(MI_SES_JOIN, !in);
+        menu_enable(MI_NET, !in);                            /* a session is offline (the PCs must agree) */
+    }
     int stacked = !g_side_by_side;
     menu_check(MI_PAUSE, g_paused);
     menu_check(MI_TURBO, g_turbo);
@@ -730,6 +772,172 @@ static const char* CONTROLS_TEXT =
     "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit";
 
 static int g_menu_peek;          /* fullscreen: the menu bar is showing because the mouse is at the top */
+static void settings_save(void);
+
+/* ---------------------------------------------------------------- playing with friends far away */
+static const char SESSION_HELP[] =
+    "Tag mode, visiting other worlds and inviting friends (Pavo) need DS systems close to each other. "
+    "This lets friends anywhere play those parts together, up to 4 players.\n\n"
+    "How: one of you hosts (Wireless > Play with friends far away > Host), the others join with the address "
+    "the host's game shows. When everyone is in, the host presses Enter. All the games restart together, "
+    "each from its own save, and from then on every PC runs every player's DS: yours in the window, your "
+    "friends' unseen. Only the buttons travel between the PCs, so the DSes really are side by side - "
+    "on every PC at once.\n\n"
+    "What to expect:\n"
+    "- Save your adventure before hosting or joining: the game restarts.\n"
+    "- Everyone needs the same version of this game.\n"
+    "- Buttons react a little later than usual (the input delay, a few frames, depending on the distance).\n"
+    "- If someone's PC is slow, everyone waits for it while your DSes are talking wirelessly.\n"
+    "- Your game saves to your own save as always. Leaving (or closing the game) switches your DS off for the others.\n\n"
+    "Getting in: the host's game asks the home router to let friends in. If the router won't, forward TCP port "
+    "27900 to the host's PC, or all of you use a free virtual LAN such as Tailscale, ZeroTier or Radmin VPN and "
+    "use the host's address there. Windows may ask whether to allow the game on networks: allow it.";
+
+/* start this program again, in a session or not (the save is written first) */
+static void restart_with(const char* session) {
+    backup_flush();
+    settings_save();
+#ifdef _WIN32
+    SetEnvironmentVariableA("DQIX_SESSION", session);
+    SetEnvironmentVariableA("DQIX_PLAYER_NAME", g_player_name[0] ? g_player_name : NULL);
+    STARTUPINFOW si; memset(&si, 0, sizeof si); si.cb = sizeof si;
+    PROCESS_INFORMATION pi;
+    wchar_t* cmd = _wcsdup(GetCommandLineW());
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        exit(0);
+    }
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Dragon Quest IX", "The game couldn't start again by itself. Close it and start it again.", g_win);
+#else
+    if (session) setenv("DQIX_SESSION", session, 1); else unsetenv("DQIX_SESSION");
+    if (g_player_name[0]) setenv("DQIX_PLAYER_NAME", g_player_name, 1);
+    extern char** g_argv;
+    execv("/proc/self/exe", g_argv);
+#endif
+}
+
+static int ask_yes(const char* title, const char* text, const char* yes) {
+    const SDL_MessageBoxButtonData b[2] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, yes }, { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel" } };
+    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, title, text, 2, b, NULL };
+    int r = 0;
+    return SDL_ShowMessageBox(&d, &r) == 0 && r == 1;
+}
+
+static int ask_name(void) {
+    char* t = g_win ? ask_text(g_win, "Your name", "The name your friends see in the session (your hero's name, say):") : NULL;
+    if (!t) return g_player_name[0] != 0;
+    t[strcspn(t, "\r\n")] = 0;
+    if (t[0]) snprintf(g_player_name, sizeof g_player_name, "%s", t);
+    free(t);
+    settings_save();
+    return g_player_name[0] != 0;
+}
+
+static void session_action(int id) {
+    static const char RESTART[] = "\n\nThe game restarts for this: save your adventure first (in the game) if you haven't.";
+    switch (id) {
+    case MI_SES_HOST: {
+        if (!g_player_name[0] && !ask_name()) return;
+        char text[400]; snprintf(text, sizeof text, "Host a session: your friends join you (up to 3 of them).%s", RESTART);
+        if (!ask_yes("Host a session", text, "Host")) return;
+        char ses[64]; snprintf(ses, sizeof ses, "host:%d", g_session_port);
+        restart_with(ses);
+        break;
+    }
+    case MI_SES_JOIN: {
+        if (!g_player_name[0] && !ask_name()) return;
+        char* t = g_win ? ask_text(g_win, "Join a friend",
+            "The address your friend's game shows (for example 203.0.113.7:27900). "
+            "The game restarts and connects: save your adventure first if you haven't.") : NULL;
+        if (!t) return;
+        char* a = t; while (*a == ' ') a++;
+        a[strcspn(a, " \r\n")] = 0;
+        if (!a[0]) { free(t); return; }
+        char ses[200]; snprintf(ses, sizeof ses, "join:%s", a);
+        free(t);
+        restart_with(ses);
+        break;
+    }
+    case MI_SES_LEAVE:
+        if (!ask_yes("Leave the session", "Leave and play alone? Your DS is switched off for the others; your game restarts "
+                     "(it was saved whenever you saved in the game).", "Leave")) return;
+        restart_with(NULL);
+        break;
+    case MI_SES_START: session_start_now(); break;
+    case MI_SES_NAME: ask_name(); break;
+    case MI_SES_HELP: SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Playing with friends far away", SESSION_HELP, g_win); break;
+    }
+}
+
+/* the lobby: until everyone is in */
+static void present(void);
+static void do_action(int id);
+static void lobby_draw(void) {
+    SessionInfo si; session_info(&si);
+    static int copied;
+    if (si.host && si.ready && !copied) { SDL_SetClipboardText(si.address); copied = 1; }
+    for (int s = 0; s < 2; s++) for (int i = 0; i < 256 * 192; i++) g_screen[s][i] = s ? 0x10203Au : 0x0B1830u;
+    uint32_t* top = g_screen[0]; uint32_t* bot = g_screen[1];
+    const uint32_t W = 0xFFFFFFu, Y = 0xFFD860u, G = 0xA8B8D8u, R = 0xFF8080u;
+    if (!text_ready()) {                                     /* no font: the title bar says it */
+        char t[300]; snprintf(t, sizeof t, "Session: %s (Enter = start, Esc = cancel)", si.state == 2 ? (si.host ? si.address : "waiting for the host") : si.message);
+        if (g_win) SDL_SetWindowTitle(g_win, t);
+        present(); return;
+    }
+    int y = 6;
+    text_draw(top, 256, 192, 8, y, 15, Y, "Playing with friends far away"); y += 22;
+    if (si.state == 5) { text_wrap(top, 256, 192, 8, y, 240, 12, R, si.message); text_wrap(bot, 256, 192, 8, 8, 240, 12, G, "Esc: back (the game restarts on its own)."); present(); return; }
+    if (si.host) {
+        if (!si.ready) { text_draw(top, 256, 192, 8, y, 12, W, "Finding your address..."); y += 18; }
+        else {
+            text_draw(top, 256, 192, 8, y, 12, G, "Give your friends this address:"); y += 15;
+            text_draw(top, 256, 192, 12, y, 15, W, si.address); y += 19;
+            text_draw(top, 256, 192, 12, y, 10, G, "(copied - paste it into a message)"); y += 15;
+            y = text_wrap(top, 256, 192, 8, y, 240, 10, G, si.hint);
+        }
+    } else {
+        text_draw(top, 256, 192, 8, y, 12, G, si.state == 1 ? "Connecting to" : "Connected to"); y += 15;
+        text_draw(top, 256, 192, 12, y, 14, W, si.address); y += 20;
+        if (si.state == 2) text_wrap(top, 256, 192, 8, y, 240, 12, G, "You're in. Waiting for the host to start the session.");
+    }
+    int by = 6;
+    text_draw(bot, 256, 192, 8, by, 13, Y, "Players"); by += 18;
+    for (int k = 0; k < si.n && si.state >= 2; k++) {
+        char line[96];
+        if (k == si.me) snprintf(line, sizeof line, "%d.  %s  (you)", k + 1, si.names[k]);
+        else if (si.host && k > 0) snprintf(line, sizeof line, "%d.  %s  (%d ms)", k + 1, si.names[k], si.ping_ms[k]);
+        else snprintf(line, sizeof line, "%d.  %s", k + 1, si.names[k]);
+        text_draw(bot, 256, 192, 14, by, 13, W, line); by += 17;
+    }
+    by = 128;
+    if (si.message[0]) by = text_wrap(bot, 256, 192, 8, by, 240, 10, G, si.message);
+    text_wrap(bot, 256, 192, 8, 164, 240, 11, Y, si.host ? (si.n >= 2 ? "Enter: start (everyone is here)    Esc: cancel" : "Waiting for friends...    Esc: cancel")
+                                                         : "Esc: cancel");
+    { static int calls; const char* shot = getenv("DQIX_LOBBY_SHOT");     /* tests: the lobby after a few seconds */
+      if (shot && ++calls == 120) save_bmp_screens((const uint32_t(*)[256 * 192])g_screen, shot); }
+    present();
+}
+
+static void lobby_hook(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        int mi = menu_command(&e);
+        if (mi) { do_action(mi); continue; }
+        if (e.type == SDL_QUIT) exit(0);
+        if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+            SDL_Scancode k = e.key.keysym.scancode;
+            SessionInfo si; session_info(&si);
+            if (k == SDL_SCANCODE_ESCAPE) { if (si.state == 5) restart_with(NULL); else if (ask_yes("Cancel", "Stop and play alone? The game restarts.", "Stop")) restart_with(NULL); }
+            if ((k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER) && si.host && si.n >= 2) session_start_now();
+        }
+    }
+    menu_sync();
+    lobby_draw();
+    SDL_Delay(30);
+}
+
+/* waiting for a friend's DS: keep the window alive */
+static void idle_pump(void) { if (g_win) SDL_PumpEvents(); }
 
 static void do_action(int id) {
     int relayout = 0;
@@ -772,6 +980,9 @@ static void do_action(int id) {
             "DQVC items and new quests. Turn it off and the game behaves like a DS with no access point.\n\n"
             "Unlock all downloadable content now: switches on every downloadable quest and special guest in "
             "your save when the game starts, without visiting Sellma.", g_win);
+        break;
+    case MI_SES_HOST: case MI_SES_JOIN: case MI_SES_LEAVE: case MI_SES_NAME: case MI_SES_START: case MI_SES_HELP:
+        session_action(id);
         break;
     case MI_SHOT: g_shot_req = 1; break;
     case MI_REPORT: {

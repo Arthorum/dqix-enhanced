@@ -60,13 +60,15 @@ $(OBJ)/rt/menu_win32.o: runtime/menu_win32.c runtime/menu.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wno-unused-parameter $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
 
-$(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.h runtime/gl_render.h runtime/menu.h runtime/version.h
+$(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.h runtime/gl_render.h runtime/menu.h runtime/version.h runtime/session.h runtime/air.h runtime/text.h
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -g -Wall -Wno-unused-parameter $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
+	$(CC) -O2 -g -Wall -Wno-unused-parameter $(DETERMINISM) $(SDL_CFLAGS) $(DEFS) -Iruntime -c $< -o $@
 
-$(OBJ)/rt/%.o: runtime/%.c runtime/nds.h runtime/cpu.h runtime/coro.h runtime/frontend.h runtime/version.h
+# Sessions need every PC to compute exactly the same: no stack garbage in uninitialised variables.
+DETERMINISM ?= -ftrivial-auto-var-init=zero
+$(OBJ)/rt/%.o: runtime/%.c runtime/nds.h runtime/cpu.h runtime/coro.h runtime/frontend.h runtime/version.h runtime/air.h runtime/session.h
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter $(DEFS) -Iruntime -I$(GEN) -c $< -o $@
+	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter $(DETERMINISM) $(DEFS) -Iruntime -I$(GEN) -c $< -o $@
 
 clean:
 	rm -rf $(OBJ) $(OUT)

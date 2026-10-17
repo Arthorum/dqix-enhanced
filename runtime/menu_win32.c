@@ -90,6 +90,15 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(srv, MI_SRV_WIIMMFI, L"&Wiimmfi (164.132.44.106): not for DQIX");
     item(srv, MI_SRV_CUSTOM, L"&Custom (wfc_server in settings.ini)");
     sep(wl);
+    HMENU friends = sub(wl, L"&Play with friends far away (tag mode, visiting)");
+    item(friends, MI_SES_HOST, L"&Host: your friends join you...");
+    item(friends, MI_SES_JOIN, L"&Join a friend...");
+    item(friends, MI_SES_START, L"&Start now (everyone is here)\tEnter");
+    item(friends, MI_SES_LEAVE, L"&Leave and play alone");
+    sep(friends);
+    item(friends, MI_SES_NAME, L"Your &name...");
+    item(friends, MI_SES_HELP, L"&How does this work?");
+    sep(wl);
     item(wl, MI_DLC, L"&Unlock all downloadable content now (without Sellma)");
     sep(wl);
     item(wl, MI_NET_HELP, L"&How does this work?");

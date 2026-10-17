@@ -33,7 +33,9 @@ with zipfile.ZipFile(p, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr(info, data)
 print(p, os.path.getsize(p) // 1024, 'KB,', len(src.infolist()), 'entries')
 
-# the extras
+# the extras (only where they are: they don't change between nightlies)
+if not os.path.isdir('wfc') or not any(os.path.isfile(os.path.join('wfc', g, '_list.txt')) for g in os.listdir('wfc')):
+    print('no extras here (wfc/): skipped'); sys.exit(0)
 p = os.path.join(out, f'DQIX-PC-{ver}-extras.zip')
 n = 0
 with zipfile.ZipFile(p, 'w', zipfile.ZIP_DEFLATED) as z:

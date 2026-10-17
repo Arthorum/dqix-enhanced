@@ -72,12 +72,26 @@ static double now_ms(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 #endif
 }
+/* waiting for another console: spin briefly (it is usually microseconds
+ * away), then let others run, and after a couple of milliseconds sleep in
+ * short naps so a console waiting on a friend's buttons doesn't burn a core. */
+static double g_wait_start;
 static void relax(unsigned* spins) {
-    if (++*spins < 200) { __builtin_ia32_pause(); return; }
+    ++*spins;
+    if (*spins < 256) { __builtin_ia32_pause(); return; }
+    if (*spins == 256) g_wait_start = now_ms();
+    if (now_ms() - g_wait_start < 2.0) {
 #ifdef _WIN32
-    if (*spins < 4000) SwitchToThread(); else Sleep(0);
+        SwitchToThread();
 #else
-    sched_yield();
+        sched_yield();
+#endif
+        return;
+    }
+#ifdef _WIN32
+    Sleep(1);
+#else
+    struct timespec t = { 0, 250000 }; nanosleep(&t, NULL);
 #endif
 }
 /* wait helper: calls the idle hook every 15 ms or so */
@@ -112,6 +126,11 @@ int air_init(const char* name, int index, int count) {
     if (g_air->magic != AIR_MAGIC) { g_air->count = (uint32_t)count; g_air->magic = AIR_MAGIC; }
     g_me = index; g_n = count;
     g_air->con[g_me].attached = 1;
+#ifdef _WIN32
+    { HMODULE w = LoadLibraryA("winmm.dll");                    /* 1 ms sleeps instead of 15.6 ms */
+      typedef unsigned (__stdcall *TBP)(unsigned); TBP tbp = w ? (TBP)(void*)GetProcAddress(w, "timeBeginPeriod") : NULL;
+      if (tbp) tbp(1); }
+#endif
     atexit(air_leave);
     LOG_INFO("air: console %d of %d (%s)\n", index + 1, count, name);
     return 1;

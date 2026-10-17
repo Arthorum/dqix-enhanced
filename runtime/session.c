@@ -8,6 +8,7 @@
 #include "air.h"
 #include "session.h"
 #include "version.h"
+#include "upnp.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -78,7 +79,8 @@ static int g_state;                 /* SessionInfo.state */
 static int g_start_req, g_cancel_req, g_auto_players;
 static Console g_con[SESSION_MAX];
 static int g_ping[SESSION_MAX], g_gone[SESSION_MAX];
-static char g_addr[128], g_msg[256], g_name[32] = "Player";
+static char g_addr[128], g_msg[256], g_name[32] = "Player", g_hint[600];
+static int g_port = SESSION_PORT, g_upnp_done;
 static int g_desync;
 static Peer g_peer[SESSION_MAX];    /* host: guests 1..3 (by slot); guest: [0] = the host */
 static sock_t g_listen = BADSOCK;
@@ -307,6 +309,14 @@ static void write_file(const char* path, const uint8_t* d, uint32_t n) {
     if (f) { fwrite(d, 1, n, f); fclose(f); }
 }
 
+/* the hidden consoles, to notice one that stops by itself (a crash) */
+#ifdef _WIN32
+static HANDLE g_child[SESSION_MAX];
+#else
+static pid_t g_child[SESSION_MAX];
+#endif
+static int g_child_dead[SESSION_MAX];
+
 #ifdef _WIN32
 static HANDLE g_job;
 /* our environment, one "NAME=value" per entry */
@@ -371,7 +381,8 @@ static void spawn_hidden(int k) {
         AssignProcessToJobObject(g_job, pi.hProcess);
         SetPriorityClass(pi.hProcess, ABOVE_NORMAL_PRIORITY_CLASS);
         ResumeThread(pi.hThread);
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        g_child[k] = pi.hProcess;
     } else news("could not start player %d's console (error %lu)", k + 1, GetLastError());
     if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
     free(block);
@@ -385,6 +396,7 @@ static void spawn_hidden(int k) {
         execve(self, args, env);
         _exit(127);
     }
+    g_child[k] = pid;
 #endif
     free(env);
 }
@@ -434,6 +446,26 @@ static void console_left(int k, uint64_t last) {
     g_gone[k] = 1;
     air_input_put(k, last, AIR_INPUT_END);
     news("%s left (their DS is switched off)", g_con[k].name);
+}
+
+static void check_children(void) {
+    static double last;
+    if (now_ms() - last < 500) return;
+    last = now_ms();
+    for (int k = 0; k < g_n; k++) {
+        if (k == g_me || !g_child[k] || g_child_dead[k]) continue;
+#ifdef _WIN32
+        DWORD code = 0;
+        int dead = GetExitCodeProcess(g_child[k], &code) && code != STILL_ACTIVE;
+#else
+        int st = 0, dead = waitpid(g_child[k], &st, WNOHANG) == g_child[k];
+        int code = WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+#endif
+        if (!dead) continue;
+        g_child_dead[k] = 1;
+        air_set_gone(k);                                           /* nobody waits for it any more */
+        if (!g_gone[k]) news("%s's DS stopped by itself (exit code %d, see session\\console%d.log)", g_con[k].name, (int)code, k + 1);
+    }
 }
 
 static void check_hashes(void) {
@@ -499,6 +531,7 @@ static void send_mine(void) {
 }
 
 /* ---------------------------------------------------------------- the network thread */
+static void host_reachability(void);
 static void handle(int i, int type, Rd* r) {
     Peer* p = &g_peer[i];
     switch (type) {
@@ -573,6 +606,7 @@ static void* net_thread(void* u)
 {
     (void)u;
     double last_ping = 0;
+    if (g_host) host_reachability();
     for (;;) {
         if (g_host && g_state == 2) host_accept();
         if (g_host && g_state == 2 && now_ms() - last_ping > 500) {
@@ -581,7 +615,7 @@ static void* net_thread(void* u)
             host_send_lobby();
         }
         if (g_host && g_state == 2 && (g_start_req || (g_auto_players && g_n >= g_auto_players))) { g_start_req = 0; host_start(); }
-        if (g_running) { send_mine(); check_hashes(); }
+        if (g_running) { send_mine(); check_hashes(); check_children(); }
         for (int i = 0; i < SESSION_MAX; i++) {
             Peer* p = &g_peer[i];
             if (p->s == BADSOCK) continue;
@@ -598,6 +632,63 @@ static void* net_thread(void* u)
 #else
     return NULL;
 #endif
+}
+
+/* ---------------------------------------------------------------- reachability (host) */
+/* this PC's global IPv6 address, if it has one (no packet is sent) */
+static int ipv6_global(char* out, size_t n) {
+    sock_t s = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (s == BADSOCK) return 0;
+    struct sockaddr_in6 to; memset(&to, 0, sizeof to);
+    to.sin6_family = AF_INET6; to.sin6_port = htons(53);
+    inet_pton(AF_INET6, "2001:4860:4860::8888", &to.sin6_addr);
+    int ok = connect(s, (struct sockaddr*)&to, sizeof to) == 0;
+    struct sockaddr_in6 me; socklen_t ml = sizeof me;
+    if (ok) ok = getsockname(s, (struct sockaddr*)&me, &ml) == 0;
+    closesock(s);
+    if (!ok) return 0;
+    if ((me.sin6_addr.s6_addr[0] & 0xE0) != 0x20) return 0;       /* global unicast is 2000::/3 */
+    inet_ntop(AF_INET6, &me.sin6_addr, out, (socklen_t)n);
+    return 1;
+}
+
+/* this PC's address on the home network (no packet is sent) */
+static int ipv4_local(char* out, size_t n) {
+    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == BADSOCK) return 0;
+    struct sockaddr_in to; memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET; to.sin_port = htons(53);
+    inet_pton(AF_INET, "8.8.8.8", &to.sin_addr);
+    int ok = connect(s, (struct sockaddr*)&to, sizeof to) == 0;
+    struct sockaddr_in me; socklen_t ml = sizeof me;
+    if (ok) ok = getsockname(s, (struct sockaddr*)&me, &ml) == 0;
+    closesock(s);
+    if (!ok || me.sin_addr.s_addr == 0) return 0;
+    inet_ntop(AF_INET, &me.sin_addr, out, (socklen_t)n);
+    return 1;
+}
+
+static void host_reachability(void) {
+    char ext[64] = "", lan[64] = "", why[256] = "", v6[80] = "";
+    int r = getenv("DQIX_NO_UPNP") ? 0 : upnp_open(g_port, ext, sizeof ext, lan, sizeof lan, why, sizeof why);
+    if (!lan[0]) ipv4_local(lan, sizeof lan);
+    if (getenv("DQIX_NO_UPNP")) snprintf(why, sizeof why, "not tried");
+    int has6 = ipv6_global(v6, sizeof v6);
+    lock();
+    if (r == 1 && ext[0]) {
+        snprintf(g_addr, sizeof g_addr, "%s:%d", ext, g_port);
+        snprintf(g_hint, sizeof g_hint, "Your router opened port %d by itself. Friends in the same house use %s:%d instead.", g_port, lan[0] ? lan : "this PC's address", g_port);
+    } else {
+        if (has6) snprintf(g_addr, sizeof g_addr, "[%s]:%d", v6, g_port);
+        else snprintf(g_addr, sizeof g_addr, "%s:%d", lan[0] ? lan : "this PC", g_port);
+        snprintf(g_hint, sizeof g_hint, "Your router didn't open the port (%s). %s"
+                 "Either forward TCP port %d to this PC (%s) in your router and give friends your internet address, "
+                 "or all of you join a free virtual LAN (Tailscale, ZeroTier or Radmin VPN) and give them this PC's address there.",
+                 why, has6 ? "The address above works for friends who have IPv6. " : "Friends in the same house can use the address above. ",
+                 g_port, lan[0] ? lan : "this PC");
+    }
+    unlock();
+    g_upnp_done = 1;
 }
 
 /* ---------------------------------------------------------------- setup */
@@ -673,12 +764,14 @@ void session_boot(void) {
     int port = SESSION_PORT, players = 0;
     if (!strncmp(e, "host", 4)) {
         sscanf(e, "host:%d:%d", &port, &players);
+        g_port = port;
         g_host = 1; g_me = 0; g_n = 1;
         my_console(&g_con[0]);
         g_rtc = rtc_base();
         g_auto_players = players;
         if (!start_host(port)) { news("can't wait for players on port %d (is another game hosting?)", port); g_state = 5; return; }
-        snprintf(g_addr, sizeof g_addr, "port %d", port);
+        snprintf(g_addr, sizeof g_addr, "(finding your address...)");
+        atexit(upnp_close);
         g_state = 2;
         news("hosting on port %d: waiting for players", port);
     } else if (!strncmp(e, "join:", 5)) {
@@ -734,6 +827,8 @@ void session_info(SessionInfo* o) {
     for (int k = 0; k < g_n && k < SESSION_MAX; k++) { snprintf(o->names[k], 32, "%s", g_con[k].name); o->ping_ms[k] = g_ping[k]; o->gone[k] = g_gone[k]; }
     snprintf(o->address, sizeof o->address, "%s", g_addr);
     snprintf(o->message, sizeof o->message, "%s", g_msg);
+    snprintf(o->hint, sizeof o->hint, "%s", g_hint);
+    o->ready = !g_host || g_upnp_done;
     unlock();
 }
 void session_start_now(void) { if (g_host) g_start_req = 1; }

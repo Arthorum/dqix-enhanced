@@ -71,7 +71,9 @@ static void report(void) {
     if (getenv("DQIX_THREADS")) threads_dump(stderr);
 }
 
+char** g_argv;
 int main(int argc, char** argv) {
+    g_argv = argv;
     if (argc < 3) {
         fprintf(stderr, "usage: %s <rom.nds> <extract/usa dir> [frames] [log level] [save file]\n", argv[0]);
         return 2;
