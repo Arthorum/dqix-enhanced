@@ -83,6 +83,32 @@ static void load_script(void) {
     if (g_nscript) qsort(g_script, (size_t)g_nscript, sizeof(Press), cmp_press);
 }
 
+/* Tests: scripts for the other consoles of a local session (DQIX_INPUT_1..3),
+ * as packed session inputs for a frame. */
+static Press* g_alt[4]; static int g_nalt[4], g_altcap[4], g_altloaded[4];
+uint32_t input_script_for(int slot, uint64_t frame) {
+    if (slot < 1 || slot > 3) return 0;
+    if (!g_altloaded[slot]) {
+        g_altloaded[slot] = 1;
+        char name[32]; snprintf(name, sizeof name, "DQIX_INPUT_%d", slot);
+        const char* text = getenv(name);
+        if (text) {
+            Press* save = g_script; int n = g_nscript, cap = g_cap;
+            g_script = NULL; g_nscript = g_cap = 0;
+            parse_script(text);
+            if (g_nscript) qsort(g_script, (size_t)g_nscript, sizeof(Press), cmp_press);
+            g_alt[slot] = g_script; g_nalt[slot] = g_nscript; g_altcap[slot] = g_cap;
+            g_script = save; g_nscript = n; g_cap = cap;
+        }
+    }
+    uint16_t keys = 0; int touch = 0, tx = 0, ty = 0;
+    for (int i = 0; i < g_nalt[slot] && g_alt[slot][i].frame <= frame; i++) {
+        Press* p = &g_alt[slot][i];
+        if (frame < p->frame + p->len) { keys |= (uint16_t)p->keys; if (p->touch) { touch = 1; tx = p->tx; ty = p->ty; } }
+    }
+    return session_pack(keys, touch, tx, ty);
+}
+
 /* ---------------------------------------------------------------- recording */
 static Press* g_rec;
 static int g_nrec, g_rec_cap;

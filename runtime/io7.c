@@ -154,6 +154,12 @@ void firmware_init(void) {
     if (img) firmware_load_image(img);
 }
 
+/* another MAC address in a copy of the image (tests: several consoles from one PC) */
+void firmware_image_set_mac(uint8_t* img, const uint8_t mac[6]) {
+    memcpy(&img[0x36], mac, 6);
+    put16(&img[0x2A], crc16_buf(0x0000, &img[0x2C], 0x138));
+}
+
 /* The whole flash image (sessions: the other PCs run this console with it). */
 const uint8_t* firmware_image(uint32_t* size) { *size = FW_SIZE; return g_fw; }
 int firmware_load_image(const char* path) {

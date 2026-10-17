@@ -12,6 +12,8 @@ size_t g_rom_size;
 extern unsigned long long g_calls_traced;
 
 static void load_rom(const char* path) {
+    const uint8_t* shared; size_t n;
+    if (rt_host_rom(&shared, &n)) { g_rom = (uint8_t*)shared; g_rom_size = n; return; }   /* hosted: the host's copy */
     FILE* f = fopen(path, "rb");
     if (!f) rt_fatal("cannot open ROM %s\n", path);
     fseek(f, 0, SEEK_END);
@@ -72,7 +74,7 @@ static void report(void) {
 }
 
 char** g_argv;
-int main(int argc, char** argv) {
+int dqix_main(int argc, char** argv) {
     g_argv = argv;
     if (argc < 3) {
         fprintf(stderr, "usage: %s <rom.nds> <extract/usa dir> [frames] [log level] [save file]\n", argv[0]);

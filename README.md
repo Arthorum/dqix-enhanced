@@ -150,7 +150,9 @@ when everyone is in. All the games restart together, each from its own save.
 
 How it works: the DS's wireless needs answers within microseconds, which no
 internet connection can give, so *every PC runs every player's DS*: yours in
-the window, your friends' unseen, all talking through the emulated air on
+the window, your friends' unseen (from `dqixcore.dll`, the game built a
+second time as a library: one copy per friend's DS, all taking turns on one
+thread, so 4 players need about 2 CPU cores), all talking through the emulated air on
 that PC (`runtime/air.c`: deterministic, every console counts the same 8 us
 ticks and a frame arrives at its sender's tick plus the preamble). Only the
 buttons travel between the PCs (`runtime/session.c`, TCP via the host): each
@@ -168,8 +170,10 @@ clipboard). If the router won't, forward TCP port 27900 (`session_port` in
 (Tailscale, ZeroTier, Radmin VPN) and use the host's address there. Everyone
 needs the same version of the game. Your name in sessions: *Your name...*
 (`player_name` in `settings.ini`). Tests: `DQIX_SESSION=host[:port[:players]]`
-or `join:address[:port]`; `DQIX_AIR=name,index,count` connects copies on one
-PC without a session. In tag mode, press A once more after Erinn's "Go get
+or `join:address[:port]`, or `local:N` (N consoles on one PC, the others'
+buttons from `DQIX_INPUT_1..3`); `DQIX_AIR=name,index,count` connects copies
+on one PC without a session; `DQIX_PROCESSES=1` runs the hidden DSes as
+separate processes instead of `dqixcore`. In tag mode, press A once more after Erinn's "Go get
 'em!": the canvassing starts then.
 
 **Settings.** The game remembers every menu choice in `settings.ini` next to `dqix.exe` (delete it to go

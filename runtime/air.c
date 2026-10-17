@@ -77,6 +77,7 @@ static double now_ms(void) {
  * short naps so a console waiting on a friend's buttons doesn't burn a core. */
 static double g_wait_start;
 static void relax(unsigned* spins) {
+    if (rt_yield()) return;                                     /* one of several consoles on a thread: let the others run */
     ++*spins;
     if (*spins < 256) { __builtin_ia32_pause(); return; }
     if (*spins == 256) g_wait_start = now_ms();
@@ -103,6 +104,14 @@ static void waiting(double* last) {
 
 /* this console is switched off: nobody waits for it any more */
 static void air_leave(void) { if (g_air && g_me >= 0) g_air->con[g_me].gone = 1; }
+void air_leave_now(void) { air_leave(); }
+/* how far all the consoles have got, together (a host sees whether anything moved) */
+uint64_t air_progress(void) {
+    if (!g_air) return 0;
+    uint64_t p = 0;
+    for (int k = 0; k < g_n; k++) p += ld(&g_air->con[k].tick) + ld(&g_air->in[k].count) * 1000003u + ld(&g_air->in[k].read) * 7919u + g_air->con[k].gone;
+    return p;
+}
 
 int air_init(const char* name, int index, int count) {
     if (count < 1 || count > AIR_MAX || index < 0 || index >= count) return 0;

@@ -37,7 +37,7 @@ static void on_prof(int sig, siginfo_t* si, void* ctx) {
 static void write_samples(void) {
     FILE* f = fopen(g_out, "w");
     if (!f) return;
-    extern char __executable_start;                    /* lets the PIE base be removed */
+    extern char __executable_start __attribute__((weak));   /* lets the PIE base be removed (absent in a library) */
     fprintf(f, "base %lx\n", (unsigned long)(uintptr_t)&__executable_start);
     for (unsigned i = 0; i < g_nsamples; i++) fprintf(f, "%lx\n", (unsigned long)g_samples[i]);
     fclose(f);

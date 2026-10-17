@@ -394,5 +394,5 @@ _Noreturn void rt_fatal(const char* fmt, ...) {
     char reason[600];
     snprintf(reason, sizeof reason, "crash: %s", msg);
     report_write(reason);
-    exit(1);
+    rt_exit(1);
 }

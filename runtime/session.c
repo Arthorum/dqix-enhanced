@@ -81,7 +81,7 @@ static Console g_con[SESSION_MAX];
 static int g_ping[SESSION_MAX], g_gone[SESSION_MAX];
 static char g_addr[128], g_msg[256], g_name[32] = "Player", g_hint[600];
 static int g_port = SESSION_PORT, g_upnp_done;
-static int g_desync;
+static int g_desync, g_local;
 static Peer g_peer[SESSION_MAX];    /* host: guests 1..3 (by slot); guest: [0] = the host */
 static sock_t g_listen = BADSOCK;
 static int64_t g_rtc;
@@ -401,6 +401,229 @@ static void spawn_hidden(int k) {
     free(env);
 }
 
+/* ---------------------------------------------------------------- the others' consoles on one thread
+ * With the game as a library next to the program (dqixcore.dll / .so), the
+ * other players' DSes run here, in this process, on one thread, each from
+ * its own copy of the library (its own memory), taking turns whenever one
+ * has to wait (hosting.c). A console only waits for microseconds at a time
+ * while the DSes talk, so turns between threads or processes would cost
+ * more than the work; turns between fibers cost almost nothing. Without the
+ * library the consoles are separate processes (spawn_hidden). */
+#ifdef _WIN32
+typedef HMODULE LibHandle;
+#define LIB_EXT ".dll"
+static LibHandle lib_open(const char* p) { return LoadLibraryA(p); }
+static void* lib_sym(LibHandle h, const char* n) { return (void*)GetProcAddress(h, n); }
+#else
+#include <dlfcn.h>
+#include <ucontext.h>
+typedef void* LibHandle;
+#define LIB_EXT ".so"
+static LibHandle lib_open(const char* p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+static void* lib_sym(LibHandle h, const char* n) { return dlsym(h, n); }
+#endif
+
+typedef struct {
+    int k, dead, started;
+    LibHandle lib;
+    int (*core_main)(int, char**);
+    CoreHost host;
+    char* env[12];
+    char envbuf[12][300];
+    char* argv[8];
+    char argbuf[3][300];
+#ifdef _WIN32
+    void* fiber; void* resume;
+#else
+    ucontext_t ctx; void* stack;
+#endif
+} Hosted;
+
+static Hosted g_hosted[SESSION_MAX];
+static int g_nhosted, g_hosted_cur;
+static uint8_t* g_shared_rom; static size_t g_shared_rom_size;
+#ifdef _WIN32
+static void* g_sched_fiber;
+#else
+static ucontext_t g_sched_ctx;
+#endif
+
+static void hosted_yield(void) {
+    Hosted* h = &g_hosted[g_hosted_cur];
+#ifdef _WIN32
+    h->resume = GetCurrentFiber();
+    SwitchToFiber(g_sched_fiber);
+#else
+    swapcontext(&h->ctx, &g_sched_ctx);
+#endif
+}
+static void hosted_exit(int code) {
+    Hosted* h = &g_hosted[g_hosted_cur];
+    h->dead = 1;
+    LOG_WARN("session: player %d's console stopped (%d)\n", h->k + 1, code);
+#ifdef _WIN32
+    SwitchToFiber(g_sched_fiber);
+#else
+    setcontext(&g_sched_ctx);
+#endif
+    for (;;) {}
+}
+#ifdef _WIN32
+static void WINAPI hosted_entry(void* p) {
+#else
+static void hosted_entry(void) {
+    Hosted* p = &g_hosted[g_hosted_cur];
+#endif
+    Hosted* h = (Hosted*)p;
+    int r = h->core_main(6, h->argv);
+    hosted_exit(r);
+}
+
+static int self_dir(char* out, size_t n) {
+#ifdef _WIN32
+    char exe[MAX_PATH]; DWORD l = GetModuleFileNameA(NULL, exe, MAX_PATH);
+    if (!l || l >= MAX_PATH) return 0;
+#else
+    char exe[1024]; ssize_t l = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (l <= 0) return 0;
+    exe[l] = 0;
+#endif
+    char* sl = strrchr(exe, '/');
+#ifdef _WIN32
+    char* bs = strrchr(exe, '\\'); if (bs > sl) sl = bs;
+#endif
+    if (!sl) return 0;
+    *sl = 0;
+    snprintf(out, n, "%s", exe);
+    return 1;
+}
+
+static int copy_file(const char* from, const char* to) {
+    FILE* a = fopen(from, "rb"); if (!a) return 0;
+    FILE* b = fopen(to, "wb"); if (!b) { fclose(a); return 0; }
+    static char buf[1 << 16]; size_t n; int ok = 1;
+    while ((n = fread(buf, 1, sizeof buf, a)) > 0) if (fwrite(buf, 1, n, b) != n) { ok = 0; break; }
+    fclose(a); if (fclose(b) != 0) ok = 0;
+    return ok;
+}
+
+/* set up player k's console from its own copy of the library; 0 = not possible here */
+static int host_console(int k) {
+    char dir[1024], lib[1200], copy[300];
+    if (getenv("DQIX_PROCESSES") || !self_dir(dir, sizeof dir)) return 0;
+    snprintf(lib, sizeof lib, "%s/dqixcore" LIB_EXT, dir);
+    FILE* t = fopen(lib, "rb"); if (!t) return 0; fclose(t);
+    snprintf(copy, sizeof copy, "session/core%d" LIB_EXT, k + 1);
+    if (!copy_file(lib, copy)) return 0;
+#ifdef _WIN32
+    char full[MAX_PATH]; GetFullPathNameA(copy, MAX_PATH, full, NULL);
+#else
+    char full[4096]; if (!realpath(copy, full)) return 0;
+#endif
+    Hosted* h = &g_hosted[g_nhosted];
+    memset(h, 0, sizeof *h);
+    h->k = k;
+    h->lib = lib_open(full);
+    if (!h->lib) { LOG_WARN("session: can't load %s\n", full); return 0; }
+    void (*setup)(const CoreHost*) = (void (*)(const CoreHost*))lib_sym(h->lib, "dqix_core_setup");
+    h->core_main = (int (*)(int, char**))lib_sym(h->lib, "dqix_core_main");
+    if (!setup || !h->core_main) return 0;
+    char save[300], fw[300];
+    snprintf(save, sizeof save, "session/console%d.sav", k + 1);
+    snprintf(fw, sizeof fw, "session/console%d.fw", k + 1);
+    write_file(save, g_con[k].save, g_con[k].save_len);
+    write_file(fw, g_con[k].fw, g_con[k].fw_len);
+    int e = 0;
+    snprintf(h->envbuf[e++], 300, "DQIX_HIDDEN=1");
+    snprintf(h->envbuf[e++], 300, "DQIX_SESSION_SHM=%s", g_shm);
+    snprintf(h->envbuf[e++], 300, "DQIX_CONSOLE=%d", k);
+    snprintf(h->envbuf[e++], 300, "DQIX_COUNT=%d", g_n);
+    snprintf(h->envbuf[e++], 300, "DQIX_RTC=%lld", (long long)g_rtc);
+    snprintf(h->envbuf[e++], 300, "DQIX_FW_FILE=%s", fw);
+    snprintf(h->envbuf[e++], 300, "DQIX_NO_SETTINGS=1");
+    snprintf(h->envbuf[e++], 300, "DQIX_NOWINDOW=1");
+    if (getenv("DQIX_HIDDEN_DUMP") && getenv("DQIX_DUMP_AT")) {            /* tests: the hidden screens too */
+        snprintf(h->envbuf[e++], 300, "DQIX_DUMP=%s%d,1", getenv("DQIX_HIDDEN_DUMP"), k + 1);
+        snprintf(h->envbuf[e++], 300, "DQIX_DUMP_AT=%.280s", getenv("DQIX_DUMP_AT"));
+    }
+    for (int i = 0; i < e; i++) h->env[i] = h->envbuf[i];
+    h->env[e] = NULL;
+    h->host.env = (const char* const*)h->env;
+    h->host.yield = hosted_yield;
+    h->host.exit_console = hosted_exit;
+    h->host.rom = g_shared_rom; h->host.rom_size = g_shared_rom_size;
+    snprintf(h->argbuf[0], 300, "%s", save);
+    h->argv[0] = (char*)"dqix"; h->argv[1] = g_rom_path; h->argv[2] = g_extract_path;
+    h->argv[3] = (char*)"0"; h->argv[4] = (char*)"1"; h->argv[5] = h->argbuf[0]; h->argv[6] = NULL;
+    setup(&h->host);
+    g_nhosted++;
+    return 1;
+}
+
+/* the thread the others' consoles take turns on */
+#ifdef _WIN32
+static DWORD WINAPI hosted_thread(LPVOID u)
+#else
+static void* hosted_thread(void* u)
+#endif
+{
+    (void)u;
+#ifdef _WIN32
+    g_sched_fiber = ConvertThreadToFiber(NULL);
+    for (int i = 0; i < g_nhosted; i++)       /* the game's own code wants a deep stack (64 MB, reserved, not used) */
+        g_hosted[i].fiber = CreateFiberEx(64 * 1024, 64 * 1024 * 1024, FIBER_FLAG_FLOAT_SWITCH, hosted_entry, &g_hosted[i]);
+#else
+    for (int i = 0; i < g_nhosted; i++) {
+        Hosted* h = &g_hosted[i];
+        getcontext(&h->ctx);
+        h->stack = malloc(64u * 1024 * 1024);
+        h->ctx.uc_stack.ss_sp = h->stack; h->ctx.uc_stack.ss_size = 64u * 1024 * 1024; h->ctx.uc_link = NULL;
+        makecontext(&h->ctx, hosted_entry, 0);
+    }
+#endif
+    unsigned idle = 0; double idle_since = 0;
+    for (;;) {
+        uint64_t before = air_progress();
+        int alive = 0;
+        for (int i = 0; i < g_nhosted; i++) {
+            Hosted* h = &g_hosted[i];
+            if (h->dead) continue;
+            alive++;
+            g_hosted_cur = i;
+#ifdef _WIN32
+            SwitchToFiber(h->resume ? h->resume : h->fiber);
+#else
+            swapcontext(&g_sched_ctx, &h->ctx);
+#endif
+        }
+        if (!alive) break;
+        /* nothing moved: everyone waits for this PC's player or the network */
+        if (air_progress() != before) { idle = 0; continue; }
+        if (++idle < 64) continue;
+        if (idle == 64) idle_since = now_ms();
+        if (now_ms() - idle_since < 2.0) {
+#ifdef _WIN32
+            SwitchToThread();
+#else
+            sched_yield();
+#endif
+        } else sleep_ms(1);
+    }
+    return 0;
+}
+
+static int start_hosted(void) {
+    if (!g_nhosted) return 0;
+#ifdef _WIN32
+    HANDLE t = CreateThread(NULL, 1 << 20, hosted_thread, NULL, 0, NULL);
+    if (!t) return 0;
+    SetThreadPriority(t, THREAD_PRIORITY_ABOVE_NORMAL);
+#else
+    pthread_t t; if (pthread_create(&t, NULL, hosted_thread, NULL) != 0) return 0;
+#endif
+    return 1;
+}
+
 #ifndef _WIN32
 static void kill_children(void) { signal(SIGTERM, SIG_IGN); kill(0, SIGTERM); }
 #endif
@@ -415,7 +638,12 @@ static void do_start(void) {
 #ifndef _WIN32
     setpgid(0, 0); atexit(kill_children);
 #endif
-    for (int k = 0; k < g_n; k++) if (k != g_me) spawn_hidden(k);
+    /* the other players' consoles: on one thread here if the game is also a library next to us, else processes */
+    { extern uint8_t* g_rom; extern size_t g_rom_size; g_shared_rom = g_rom; g_shared_rom_size = g_rom_size; }
+    int hosted = 1;
+    for (int k = 0; k < g_n && hosted; k++) if (k != g_me && !host_console(k)) hosted = 0;
+    if (hosted && start_hosted()) LOG_WARN("session: the other players' DSes run on one thread (dqixcore)\n");
+    else { g_nhosted = 0; for (int k = 0; k < g_n; k++) if (k != g_me) spawn_hidden(k); }
     g_running = 1;
     lock(); g_state = 3; unlock();
     news("started: %d players, input delay %d frames (%d ms)", g_n, g_delay, (int)(g_delay * 16.7));
@@ -752,7 +980,7 @@ void session_boot(void) {
         const char* shm = getenv("DQIX_SESSION_SHM");
         g_me = getenv("DQIX_CONSOLE") ? atoi(getenv("DQIX_CONSOLE")) : 0;
         g_n = getenv("DQIX_COUNT") ? atoi(getenv("DQIX_COUNT")) : 1;
-        if (!shm || !air_init(shm, g_me, g_n)) { LOG_WARN("session: hidden console without a session\n"); exit(3); }
+        if (!shm || !air_init(shm, g_me, g_n)) { LOG_WARN("session: hidden console without a session\n"); rt_exit(3); }
         g_running = 1;
         return;
     }
@@ -783,6 +1011,19 @@ void session_boot(void) {
         g_state = 1;
         news("connecting to %s", g_addr);
         if (!start_join(a, port)) { g_state = 5; }
+    } else if (!strncmp(e, "local:", 6)) {
+        /* tests: N consoles on this PC only, the others' buttons from DQIX_INPUT_1..3, each its own MAC */
+        int n = atoi(e + 6); if (n < 2) n = 2; if (n > SESSION_MAX) n = SESSION_MAX;
+        g_host = 1; g_me = 0; g_n = n; g_local = 1;
+        g_rtc = rtc_base();
+        for (int k = 0; k < n; k++) {
+            my_console(&g_con[k]);
+            snprintf(g_con[k].name, sizeof g_con[k].name, "Console %d", k + 1);
+            if (k) { uint8_t mac[6]; memcpy(mac, &g_con[k].fw[0x36], 6); mac[5] ^= (uint8_t)(0x40 + k); firmware_image_set_mac(g_con[k].fw, mac); }
+        }
+        g_delay = 2;
+        do_start();
+        return;
     } else { snprintf(mode, sizeof mode, "%.15s", e); news("unknown DQIX_SESSION %s", mode); return; }
     if (g_state == 5) {
         if (!session_lobby_hook) exit(4);
@@ -813,8 +1054,9 @@ uint32_t session_frame_input(uint64_t frame, uint32_t local) {
     if (!g_running) return local;
     if (frame && frame % HASH_EVERY == 0) air_hash_put(g_me, frame, ram_hash());
     if (!g_hidden) air_input_put(g_me, frame + (uint64_t)g_delay, local);
+    if (g_local) { uint32_t input_script_for(int, uint64_t); for (int k = 1; k < g_n; k++) air_input_put(k, frame + (uint64_t)g_delay, input_script_for(k, frame)); }
     uint32_t v = air_input_get(g_me, frame);
-    if (v == AIR_INPUT_END) { LOG_WARN("session: this console was switched off at frame %llu\n", (unsigned long long)frame); backup_flush(); exit(0); }
+    if (v == AIR_INPUT_END) { LOG_WARN("session: this console was switched off at frame %llu\n", (unsigned long long)frame); backup_flush(); rt_exit(0); }
     return v;
 }
 

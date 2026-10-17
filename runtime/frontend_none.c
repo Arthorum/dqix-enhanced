@@ -38,7 +38,12 @@ void frontend_init(int argc, char** argv) {
 }
 
 /* DQIX_FRAMETIME=from_frame: histogram of host time per frame (performance checks) */
+#ifdef _WIN32
+#include <windows.h>
+static double now_ms(void) { static LARGE_INTEGER f; if (!f.QuadPart) QueryPerformanceFrequency(&f); LARGE_INTEGER c; QueryPerformanceCounter(&c); return (double)c.QuadPart * 1000.0 / (double)f.QuadPart; }
+#else
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+#endif
 static int g_ft = -1; static unsigned long long g_ft_from; static double g_ft_last; static unsigned g_hist[8]; static double g_ft_max; static unsigned long long g_ft_maxf;
 static unsigned g_slow_n; static double g_slow_3d, g_slow_2d, g_slow_tot;
 static void ft_report(void) {

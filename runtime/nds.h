@@ -3,8 +3,23 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "cpu.h"
+
+/* ---- running inside another program (hosting.c) ---- */
+typedef struct {
+    const char* const* env;               /* "NAME=value" settings for this console, NULL-terminated */
+    void (*yield)(void);                  /* waiting: let the other consoles run */
+    void (*exit_console)(int code);       /* this console stops (never returns) */
+    const uint8_t* rom; size_t rom_size;  /* the ROM, already loaded */
+} CoreHost;
+int rt_hosted(void);
+char* rt_getenv(const char* name);        /* getenv, or the host's settings for this console */
+_Noreturn void rt_exit(int code);
+int rt_yield(void);                       /* 1 if the host ran others meanwhile */
+int rt_host_rom(const uint8_t** rom, size_t* size);
+#define getenv(name) rt_getenv(name)
 
 /* ---- logging ---- */
 extern int g_log_level;
@@ -211,6 +226,7 @@ void spi_write_data(uint16_t v);
 void firmware_init(void);
 const uint8_t* firmware_image(uint32_t* size);
 int firmware_load_image(const char* path);
+void firmware_image_set_mac(uint8_t* img, const uint8_t mac[6]);
 /* wifi.c: the wireless chip */
 void wifi_reset(const uint8_t* firmware);
 void firmware_load_wireless(void);

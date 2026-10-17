@@ -67,3 +67,5 @@ int air_hash_get(int console, uint64_t frame, uint64_t* hash);
 extern void (*air_idle_hook)(void);
 /* Another console stopped for good (session ended for it): stop waiting on it. */
 void air_set_gone(int index);
+void air_leave_now(void);                 /* this console stops: nobody waits for it */
+uint64_t air_progress(void);              /* changes whenever any console gets further */

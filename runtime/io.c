@@ -181,7 +181,7 @@ void time_advance_lines(uint32_t lines) {
         g_subline = 0;
         if (++g_vcount >= LINES_PER_FRAME) {
             g_vcount = 0; g_frame++; wfc_frame(); ram_dump_check();
-            if (g_frame_limit && g_frame >= g_frame_limit) exit(0);
+            if (g_frame_limit && g_frame >= g_frame_limit) rt_exit(0);
         }
         if (g_vcount < 192) gpu_render_line((int)g_vcount);
         else if (g_vcount == 192) { gpu_frame_done(); gpu3d_vblank(); frontend_frame(); input_update(); }
