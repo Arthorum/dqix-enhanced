@@ -45,6 +45,7 @@ void gpu3d_render_start(void);           /* scanline 215: draw the 3D frame */
 uint32_t gx_read(uint32_t off);
 int gx_irq_line(void);
 int64_t rtc_base(void);                  /* clock start (local time, seconds) */
+void rtc_set_base(int64_t base);         /* sessions: everyone uses the host's */
 /* reports (report.c) */
 void report_write(const char* reason);
 void report_log_line(const char* line);
@@ -153,6 +154,7 @@ void card_write(Core* k, uint32_t off, uint32_t v, int size);
 uint32_t card_read_data(Core* k);
 void backup_init(const char* save_path);
 void backup_flush(void);
+const uint8_t* backup_image(uint32_t* size);   /* the save as the game will see it */
 int backup_unlock_dlc(void);              /* downloadable quests + special guests (see card.c) */
 void math_div(void);
 void math_sqrt(void);
@@ -207,6 +209,8 @@ void spi_write_cnt(uint16_t v);
 uint16_t spi_read_data(void);
 void spi_write_data(uint16_t v);
 void firmware_init(void);
+const uint8_t* firmware_image(uint32_t* size);
+int firmware_load_image(const char* path);
 /* wifi.c: the wireless chip */
 void wifi_reset(const uint8_t* firmware);
 void firmware_load_wireless(void);

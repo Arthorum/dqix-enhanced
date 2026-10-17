@@ -18,6 +18,15 @@
 #endif
 
 #define RING 128
+#define INRING 8192                               /* frames of inputs kept (2 min 17 s) */
+#define HASHN 64
+
+typedef struct {
+    volatile uint64_t count;                      /* frames written */
+    volatile uint64_t read;                       /* the console's own position (writers don't overtake it by INRING) */
+    uint8_t pad[48];
+    uint32_t v[INRING];
+} AirInput;
 
 typedef struct {
     volatile uint64_t tick;       /* next tick this console processes */
@@ -34,6 +43,9 @@ typedef struct {
     uint8_t pad1[64 - 8 * AIR_MAX % 64];
     volatile uint64_t rd[AIR_MAX][AIR_MAX];       /* rd[receiver][sender]: frames it has taken */
     AirFrame ring[AIR_MAX][RING];
+    AirInput in[AIR_MAX];
+    volatile uint64_t hash_frame[AIR_MAX][HASHN];  /* frame + 1 (0 = empty) */
+    volatile uint64_t hash[AIR_MAX][HASHN];
 } AirShared;
 
 #define AIR_MAGIC 0x52494151u                    /* "QAIR" */
@@ -207,4 +219,50 @@ void air_init_from_env(void) {
     if (!e) return;
     char name[64]; int idx, cnt;
     if (sscanf(e, "%63[^,],%d,%d", name, &idx, &cnt) == 3) air_init(name, idx, cnt);
+}
+
+/* ---------------------------------------------------------------- inputs */
+void air_input_put(int k, uint64_t frame, uint32_t v) {
+    if (!g_air || k < 0 || k >= g_n) return;
+    AirInput* in = &g_air->in[k];
+    uint64_t c = in->count;
+    if (frame < c) return;                                    /* already there */
+    while (c <= frame) {
+        unsigned spins = 0; double last = 0;
+        while (c - ld(&in->read) >= INRING && !g_air->con[k].gone) { relax(&spins); waiting(&last); }
+        in->v[c % INRING] = c == frame ? v : 0;
+        c++;
+        st(&in->count, c);
+    }
+}
+uint64_t air_input_count(int k) { return g_air && k >= 0 && k < g_n ? ld(&g_air->in[k].count) : 0; }
+int air_input_peek(int k, uint64_t frame, uint32_t* v) {
+    if (!g_air || k < 0 || k >= g_n) return 0;
+    AirInput* in = &g_air->in[k];
+    uint64_t c = ld(&in->count);
+    if (frame >= c || c - frame > INRING) return 0;
+    *v = in->v[frame % INRING];
+    return 1;
+}
+uint32_t air_input_get(int k, uint64_t frame) {
+    AirInput* in = &g_air->in[k];
+    unsigned spins = 0; double last = 0;
+    while (ld(&in->count) <= frame) { relax(&spins); waiting(&last); }
+    uint32_t v = in->v[frame % INRING];
+    if (k == g_me) st(&in->read, frame);
+    return v;
+}
+
+/* ---------------------------------------------------------------- fingerprints */
+void air_hash_put(int k, uint64_t frame, uint64_t h) {
+    if (!g_air || k < 0 || k >= g_n) return;
+    int i = (int)((frame / 60) % HASHN);
+    g_air->hash[k][i] = h;
+    st(&g_air->hash_frame[k][i], frame + 1);
+}
+int air_hash_get(int k, uint64_t frame, uint64_t* h) {
+    if (!g_air || k < 0 || k >= g_n) return 0;
+    for (int i = 0; i < HASHN; i++)
+        if (ld(&g_air->hash_frame[k][i]) == frame + 1) { *h = g_air->hash[k][i]; return 1; }
+    return 0;
 }

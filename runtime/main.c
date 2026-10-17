@@ -5,6 +5,7 @@
 #include "nds.h"
 #include "frontend.h"
 #include "dispatch.h"
+#include "session.h"
 
 uint8_t* g_rom;
 size_t g_rom_size;
@@ -84,7 +85,9 @@ int main(int argc, char** argv) {
     rtc_base();                              /* fix the clock start now (reports replay from it) */
     dispatch_init();
     overlays_init(argv[2]);
+    session_pre_boot(argc, argv);            /* a session: wireless online off; another player's console */
     firmware_init();
+    session_boot();                          /* a session: the lobby, then everyone's game starts together */
     boot_firmware();
     vram_remap();
     threads_init();

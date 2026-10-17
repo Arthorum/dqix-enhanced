@@ -11,6 +11,7 @@ uint32_t dispstat_read(Core* k);
 
 /* ================================================================ SPI */
 static uint8_t g_fw[0x20000];             /* firmware flash image (128 KB) */
+static int g_fw_nosave;                    /* a console of a session: its firmware is someone else's */
 static uint8_t g_fw_status;               /* flash status register (bit 1: write enabled) */
 static uint8_t g_pm_regs[8] = { 0x0D, 0x00, 0x01, 0x00, 0x03 };  /* power management */
 static int g_spi_dev = -1, g_spi_pos;
@@ -149,6 +150,20 @@ void firmware_init(void) {
     if (g_wireless.mac_set) firmware_set_mac(g_wireless.mac);
     firmware_set_ap(g_wireless.online, g_wireless.dns);
     net_enable(g_wireless.online);
+    const char* img = getenv("DQIX_FW_FILE");                   /* a session: another player's console */
+    if (img) firmware_load_image(img);
+}
+
+/* The whole flash image (sessions: the other PCs run this console with it). */
+const uint8_t* firmware_image(uint32_t* size) { *size = FW_SIZE; return g_fw; }
+int firmware_load_image(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { LOG_WARN("firmware: cannot read %s\n", path); return 0; }
+    size_t n = fread(g_fw, 1, FW_SIZE, f);
+    fclose(f);
+    g_fw_nosave = 1;
+    wifi_reset(g_fw);
+    return n == FW_SIZE;
 }
 WirelessConfig g_wireless;
 
@@ -176,7 +191,7 @@ void firmware_load_wireless(void) {
     fclose(f);
 }
 static void firmware_save_wireless(void) {
-    if (!g_fw_ap_dirty) return;
+    if (!g_fw_ap_dirty || g_fw_nosave) return;
     g_fw_ap_dirty = 0;
     FILE* f = fopen(WFC_FILE, "wb");
     if (!f) return;
@@ -368,6 +383,7 @@ uint16_t rtc_read_reg(void) {
  * which keeps replays independent of the replaying machine's time zone.
  * DQIX_RTC=<that value> fixes it (replays, tests). */
 static int64_t g_rtc_base = -1;
+void rtc_set_base(int64_t base) { g_rtc_base = base; }
 int64_t rtc_base(void) {
     if (g_rtc_base < 0) {
         const char* e = getenv("DQIX_RTC");

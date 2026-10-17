@@ -41,6 +41,7 @@ static uint64_t g_next_frame, g_perf_freq;
 static int g_fast;
 static uint32_t g_fps_frames; static uint64_t g_fps_t0;
 static int g_headless;          /* DQIX_NOWINDOW: run without a window (still uses SDL audio off) */
+static int g_hidden;            /* another player's console in a session: no window, no sound, no pacing */
 static int g_gl;                /* OpenGL renderer active (else SDL_Renderer + software 3D) */
 static SDL_GLContext g_glctx;
 static int g_scale3d = 2;
@@ -413,6 +414,7 @@ void frontend_init(int argc, char** argv) {
     SDL_SetMainReady();
     g_report_perf = perf_write;
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
+    if (getenv("DQIX_HIDDEN")) { g_hidden = g_headless = 1; return; }
     skins_scan();
     if (!getenv("DQIX_NO_SETTINGS")) {
         settings_load();
@@ -887,6 +889,7 @@ static void handle_events(void) {
 }
 
 void frontend_frame(void) {
+    if (g_hidden) { sound_discard(); return; }
     uint64_t t_start = SDL_GetPerformanceCounter();
     if (!g_perf_end) g_perf_end = t_start;
     PerfRec* pr = &g_perf[g_perf_pos % PERF_N];

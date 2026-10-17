@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include "session.h"
 
 typedef struct { uint64_t frame; uint32_t keys; int touch; int tx, ty; uint32_t len; } Press;
 
@@ -63,6 +64,7 @@ static int cmp_press(const void* a, const void* b) {
 
 static void load_script(void) {
     g_loaded = 1;
+    if (session_hidden()) return;                       /* another player's console: their presses come from the session */
     const char* env = getenv("DQIX_INPUT");
     if (env) parse_script(env);
     const char* path = getenv("DQIX_INPUT_FILE");
@@ -127,6 +129,10 @@ void input_update(void) {
     }
     g_keys_down |= g_fe_keys;
     if (g_fe_touch) { g_touch_down = 1; g_touch_x = g_fe_tx; g_touch_y = g_fe_ty; }
+    if (session_running()) {                            /* lockstep: what was pressed `delay` frames ago, on every PC */
+        uint32_t v = session_frame_input(g_frame, session_pack(g_keys_down, g_touch_down, g_touch_x, g_touch_y));
+        session_unpack(v, &g_keys_down, &g_touch_down, &g_touch_x, &g_touch_y);
+    }
     record(g_keys_down, g_touch_down, g_touch_x, g_touch_y);
 }
 

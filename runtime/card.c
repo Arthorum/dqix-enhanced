@@ -127,6 +127,8 @@ void backup_init(const char* path) {
 int backup_write_boot(FILE* f) { if (!g_backup_existed) return 0; fwrite(g_backup_at_boot, 1, g_backup_size, f); return 1; }
 void backup_write_now(FILE* f) { fwrite(g_backup, 1, g_backup_size, f); }
 
+const uint8_t* backup_image(uint32_t* size) { *size = g_backup_size; return g_backup; }
+
 void backup_flush(void) {
     if (!g_backup_dirty || !g_backup_path[0]) return;
     FILE* f = fopen(g_backup_path, "wb");

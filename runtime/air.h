@@ -51,6 +51,18 @@ void air_skip(uint64_t now);
  * arrived by `now`. */
 int air_take_reply(uint64_t now, uint32_t cmd_id, int aid, AirFrame* out);
 
+/* ---- lockstep inputs (session.c): every console's buttons per frame, the
+ * same on every PC. One ring per console, written by one process (the
+ * player's own game for its console, the network for the others). */
+#define AIR_INPUT_END 0xFFFFFFFFu  /* the console was switched off before this frame */
+void air_input_put(int console, uint64_t frame, uint32_t v);        /* frames in order; gaps become "nothing pressed" */
+uint64_t air_input_count(int console);                               /* frames written */
+uint32_t air_input_get(int console, uint64_t frame);                 /* waits until it is there */
+int air_input_peek(int console, uint64_t frame, uint32_t* v);        /* 0 if not there (yet / any more) */
+/* a fingerprint of a console's memory at a frame, to notice if PCs drift apart */
+void air_hash_put(int console, uint64_t frame, uint64_t hash);
+int air_hash_get(int console, uint64_t frame, uint64_t* hash);
+
 /* Called while waiting on other consoles (keeps a window responsive). */
 extern void (*air_idle_hook)(void);
 /* Another console stopped for good (session ended for it): stop waiting on it. */
