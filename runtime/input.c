@@ -18,16 +18,16 @@ typedef struct { uint64_t frame; uint32_t keys; int touch; int tx, ty; uint32_t 
 static Press* g_script;
 static int g_nscript, g_cap, g_head, g_loaded;
 
-uint16_t g_keys_down;          /* bit set = pressed, KEYINPUT order (bits 0-9) + X=10, Y=11 */
+uint16_t g_keys_down;          /* bit set = pressed, KEYINPUT order (bits 0-9) + X=10, Y=11, lid closed=12 */
 int g_touch_down, g_touch_x, g_touch_y;
 /* set by the frontend (keyboard / mouse / gamepad) */
 uint16_t g_fe_keys;
 int g_fe_touch, g_fe_tx, g_fe_ty;
 
-static const char* const k_names[] = { "A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L", "X", "Y" };
+static const char* const k_names[] = { "A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L", "X", "Y", "LID" };   /* LID = the DS is closed */
 
 static uint32_t key_bit(const char* s, size_t n) {
-    for (int i = 0; i < 12; i++) if (strlen(k_names[i]) == n && !strncmp(k_names[i], s, n)) return 1u << i;
+    for (int i = 0; i < 13; i++) if (strlen(k_names[i]) == n && !strncmp(k_names[i], s, n)) return 1u << i;
     return 0;
 }
 
@@ -101,7 +101,7 @@ static void record(uint32_t keys, int touch, int tx, int ty) {
 static void write_press(FILE* f, const Press* p) {
     fprintf(f, "%llu:", (unsigned long long)p->frame);
     int first = 1;
-    for (int i = 0; i < 12; i++) if (p->keys & (1u << i)) { fprintf(f, "%s%s", first ? "" : "+", k_names[i]); first = 0; }
+    for (int i = 0; i < 13; i++) if (p->keys & (1u << i)) { fprintf(f, "%s%s", first ? "" : "+", k_names[i]); first = 0; }
     if (p->touch) fprintf(f, "%stouch=%d,%d", first ? "" : "+", p->tx, p->ty);
     fprintf(f, ":%u\n", p->len);
 }
@@ -137,6 +137,7 @@ uint16_t input_extkeyin(void) {
     if (g_keys_down & (1 << 10)) v &= ~1;            /* X */
     if (g_keys_down & (1 << 11)) v &= ~2;            /* Y */
     if (g_touch_down) v &= ~0x40;                     /* pen down */
+    if (g_keys_down & (1 << 12)) v |= 0x80;           /* hinge: the DS is closed */
     return v;
 }
 

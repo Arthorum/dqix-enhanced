@@ -178,7 +178,8 @@ static void prof_add(uint32_t addr, int cpu) {
 void prof_report(FILE* f) {
     if (g_prof_state != 1) return;
     fprintf(f, "profile, frames %llu-%llu (function entries):\n", (unsigned long long)g_prof_from, (unsigned long long)g_prof_to);
-    for (int k = 0; k < 50; k++) {
+    int top = getenv("DQIX_PROF_TOP") ? atoi(getenv("DQIX_PROF_TOP")) : 50;   /* how many to list */
+    for (int k = 0; k < top; k++) {
         int best = -1;
         for (int i = 0; i < PROF_N; i++) if (g_prof_cnt[i] && (best < 0 || g_prof_cnt[i] > g_prof_cnt[best])) best = i;
         if (best < 0) break;

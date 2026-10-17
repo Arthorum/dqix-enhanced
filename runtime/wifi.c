@@ -5,8 +5,11 @@
  * Copyright 2016-2026 melonDS team), reduced to what a game needs to go
  * online through an access point: registers, wifi RAM, the microsecond
  * counter and its interrupts, transceiver power, TX slots, RX into the ring
- * buffer, baseband/RF chips (channel selection). Local multiplayer (MP
- * CMD/REPLY/ACK exchanges between consoles) is left out.
+ * buffer, baseband/RF chips (channel selection), and local multiplayer:
+ * frames between consoles and the MP CMD / REPLY / ACK exchanges, through
+ * the air shared with other copies of the game (air.c; deterministic: all
+ * consoles count the same 8 us ticks and a frame carries the tick at which
+ * it arrives).
  *
  * The access point answers probe, auth and association requests, sends a
  * beacon every 128 ms, and passes data frames to and from net.c as Ethernet
@@ -15,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nds.h"
+#include "air.h"
 
 /* registers */
 enum {
@@ -49,7 +53,7 @@ enum {
 #define IOPORT8(x) ((uint8_t*)w_io)[x]
 #define RAM16(a) (*(uint16_t*)&g_ram[(a)])
 
-typedef struct { int valid; uint16_t addr, length; uint8_t rate, phase; int phase_time; uint32_t halfword_mask; } TXSlot;
+typedef struct { int valid, sent; uint16_t addr, length; uint8_t rate, phase; int phase_time; uint32_t halfword_mask; } TXSlot;
 
 static uint8_t g_ram[0x2000];
 static uint16_t w_io[0x1000 >> 1];
@@ -64,6 +68,15 @@ static uint32_t g_rf[0x40];
 static uint32_t g_rf_chan_index[2], g_rf_chan_data[14][2];
 static int g_channel;
 static TXSlot g_tx[6];
+/* local multiplayer */
+static const uint8_t MP_CMD_MAC[6] = { 0x03, 0x09, 0xBF, 0x00, 0x00, 0x00 };
+static const uint8_t MP_REPLY_MAC[6] = { 0x03, 0x09, 0xBF, 0x00, 0x00, 0x10 };
+static const uint8_t MP_ACK_MAC[6] = { 0x03, 0x09, 0xBF, 0x00, 0x00, 0x03 };
+static uint64_t g_tick;                           /* 8 us ticks since the DS was switched on (all consoles agree) */
+static int g_mp_reply_timer;
+static uint16_t g_mp_client_mask, g_mp_client_fail, g_mp_last_seqno = 0xFFFF;
+static uint32_t g_cmd_seq, g_cmd_id;              /* the CMD being sent (host) */
+static uint32_t g_rx_cmd_id;                      /* air id of the frame being received */
 static uint8_t g_txbuf[0x2000];
 static uint8_t g_rxbuf[2048];
 static uint32_t g_rxbuf_ptr;
@@ -270,6 +283,18 @@ static void set_irq14(int source) {                               /* 0 US compar
 static void set_irq15(void) { set_irq(15); if (IOPORT(W_PowerTX) & 1) update_power_status(1); }
 
 static int preamble_len(int rate) { if (rate == 1) return 192; return (IOPORT(W_Preamble) & 4) ? 96 : 192; }
+static int ticks_for(int us) { return (us + TICK - 1) / TICK; }
+static int num_clients(uint16_t mask) { int n = 0; for (int i = 1; i < 16; i++) if (mask & (1 << i)) n++; return n; }
+static void inc_tx_count(const TXSlot* s) { uint8_t n = g_ram[s->addr + 4]; if (n < 0xFF) n++; RAM16(s->addr + 4) = n; }
+
+/* A frame the DS starts to send: other consoles receive it once the
+ * preamble is over. */
+static void air_out(const uint8_t* frame, int len, int kind, uint32_t cmd_id, int preamble_us) {
+    if (!air_active()) return;
+    WLOG("wifi: tick %llu send %s ch %d fc %04x len %d to %02x:%02x:%02x:%02x:%02x:%02x\n", (unsigned long long)g_tick, kind == AIR_REPLY ? "reply" : "frame",
+         frame[9], frame[12] | frame[13] << 8, len, frame[16], frame[17], frame[18], frame[19], frame[20], frame[21]);
+    air_send(g_tick + (uint64_t)ticks_for(preamble_us), kind, IOPORT(W_AIDLow), cmd_id, frame, len);
+}
 
 static void tx_send_frame(TXSlot* s, int num) {
     int noseq = 0;
@@ -290,30 +315,56 @@ static void tx_send_frame(TXSlot* s, int num) {
     if (noseq == 2) g_txbuf[0xD] |= 1 << 3;                        /* retry bit */
     if (g_channel == 0) return;
     g_txbuf[9] = (uint8_t)g_channel;
-    if (num == 0 || num == 2 || num == 3) ap_send(g_txbuf, 12 + len);
-    /* CMD / beacon / reply slots: local multiplayer only, not emulated */
+    int pre = preamble_len(s->rate);
+    switch (num) {
+    case 0: case 2: case 3:
+        air_out(g_txbuf, 12 + len, AIR_FRAME, 0, pre);
+        ap_send(g_txbuf, 12 + len);
+        break;
+    case 1:                                                       /* MP CMD: which clients should answer */
+        g_txbuf[12 + 24 + 2] = (uint8_t)g_mp_client_mask; g_txbuf[12 + 24 + 3] = (uint8_t)(g_mp_client_mask >> 8);
+        g_cmd_id = ((uint32_t)air_index() << 28) | (++g_cmd_seq & 0x0FFFFFFF);
+        air_out(g_txbuf, 12 + len, AIR_FRAME, g_cmd_id, pre);
+        break;
+    case 5:                                                       /* MP reply */
+        inc_tx_count(s);
+        air_out(g_txbuf, 12 + len, AIR_REPLY, g_rx_cmd_id, pre);
+        break;
+    case 4: {                                                     /* beacon: the timestamp when it goes out */
+        uint64_t ts = g_us_counter + (uint64_t)pre;
+        memcpy(&g_txbuf[0xC + 24], &ts, 8);
+        air_out(g_txbuf, 12 + len, AIR_FRAME, 0, pre);
+        break;
+    }
+    }
 }
 
 static void start_tx_loc(int n, int loc) {
     TXSlot* s = &g_tx[n];
-    s->valid = 1;
+    s->valid = 1; s->sent = 0;
     s->addr = (uint16_t)((IOPORT(W_TXSlotLoc1 + loc * 4) & 0x0FFF) << 1);
     s->length = RAM16(s->addr + 0xA) & 0x3FFF;
     s->rate = g_ram[s->addr + 8] == 0x14 ? 2 : 1;
     s->phase = 0; s->phase_time = preamble_len(s->rate);
 }
-static void start_tx_cmd(void) {                                  /* no other consoles: the transfer just times out */
+static void start_tx_cmd(void) {
     TXSlot* s = &g_tx[1];
-    s->valid = 1;
+    s->valid = 1; s->sent = 0;
     s->addr = (uint16_t)((IOPORT(W_TXSlotCmd) & 0x0FFF) << 1);
     s->length = RAM16(s->addr + 0xA) & 0x3FFF;
     s->rate = g_ram[s->addr + 8] == 0x14 ? 2 : 1;
-    s->phase = 13; s->phase_time = g_cmd_counter > 100 ? (int)g_cmd_counter - 100 : TICK;
-    update_power_status(1);
+    g_mp_client_mask = RAM16(s->addr + 12 + 24 + 2) & g_mp_client_fail;
+    g_mp_client_fail &= g_mp_client_mask;
+    uint32_t dur = (uint32_t)preamble_len(s->rate) + s->length * (s->rate == 2 ? 4u : 8u);
+    dur += 112 + (10u + IOPORT(W_CmdReplyTime)) * (uint32_t)num_clients(g_mp_client_mask);
+    dur += 32 * (s->rate == 2 ? 4u : 8u);
+    if (g_cmd_counter > dur + 100) { s->phase = 0; s->phase_time = preamble_len(s->rate); }
+    else { s->phase = 13; s->phase_time = g_cmd_counter > 100 ? (int)g_cmd_counter - 100 : TICK; }
+    update_power_status(1);                                       /* a CMD wakes the transceiver up */
 }
 static void start_tx_beacon(void) {
     TXSlot* s = &g_tx[4];
-    s->valid = 1;
+    s->valid = 1; s->sent = 0;
     s->addr = (uint16_t)((IOPORT(W_TXSlotBeacon) & 0x0FFF) << 1);
     s->length = RAM16(s->addr + 0xA) & 0x3FFF;
     s->rate = g_ram[s->addr + 8] == 0x14 ? 2 : 1;
@@ -332,31 +383,122 @@ static void fire_tx(void) {
     IOPORT(W_TXBusy) = busy | start;
     if (start & 8) { start_tx_loc(3, 2); return; }
     if (start & 4) { start_tx_loc(2, 1); return; }
-    if (start & 2) { start_tx_cmd(); return; }
+    if (start & 2) { g_mp_client_fail = 0xFFFE; start_tx_cmd(); return; }
     if (start & 1) { start_tx_loc(0, 0); return; }
 }
 
+/* An empty MP reply, when the client has nothing ready. */
+static void send_mp_default_reply(void) {
+    uint8_t r[12 + 28];
+    memset(r, 0, sizeof r);
+    put16(r + 0xA, 28);
+    r[8] = 0x14;
+    if (g_channel == 0) return;
+    r[9] = (uint8_t)g_channel;
+    uint8_t* p = r + 0xC;
+    p = put16(p, 0x0158); p = put16(p, 0x00F0);
+    p = put16(p, IOPORT(W_BSSID0)); p = put16(p, IOPORT(W_BSSID1)); p = put16(p, IOPORT(W_BSSID2));
+    p = put16(p, IOPORT(W_MACAddr0)); p = put16(p, IOPORT(W_MACAddr1)); p = put16(p, IOPORT(W_MACAddr2));
+    p = put16(p, 0x0903); p = put16(p, 0x00BF); p = put16(p, 0x1000);
+    p = put16(p, (uint16_t)(IOPORT(W_TXSeqNo) << 4)); put32(p, 0);
+    air_out(r, sizeof r, AIR_REPLY, g_rx_cmd_id, 96);
+}
+
+/* A client received a CMD addressed to it: the prepared reply goes out. */
+static void send_mp_reply(uint16_t clienttime, uint16_t clientmask) {
+    TXSlot* s = &g_tx[5];
+    if (IOPORT(W_TXSlotReply2) & 0x8000) RAM16(s->addr) = 0x0001;
+    s->rate = 2;
+    IOPORT(W_TXSlotReply2) = IOPORT(W_TXSlotReply1);
+    IOPORT(W_TXSlotReply1) = 0;
+    if (!(IOPORT(W_TXSlotReply2) & 0x8000)) s->valid = 0;
+    else {
+        s->valid = 1;
+        s->addr = (uint16_t)((IOPORT(W_TXSlotReply2) & 0x0FFF) << 1);
+        s->length = RAM16(s->addr + 0xA) & 0x3FFF;
+        uint32_t dur = (uint32_t)preamble_len(s->rate) + s->length * 4u;
+        if (dur > clienttime) s->valid = 0;                       /* too long for the reply window: not sent */
+    }
+    if (s->valid) { s->phase = 0; s->sent = 1; tx_send_frame(s, 5); }
+    else { s->phase = 10; s->sent = 1; send_mp_default_reply(); }
+    int clientnum = 0;
+    for (int i = 1; i < IOPORT(W_AIDLow); i++) if (clientmask & (1 << i)) clientnum++;
+    s->phase_time = 16 + (clienttime + 10) * clientnum + preamble_len(s->rate);
+    IOPORT(W_TXBusy) |= 0x0080;
+}
+
+/* The host's acknowledgement after the reply window. */
+static void send_mp_ack(uint16_t cmdcount, uint16_t clientfail) {
+    uint8_t a[12 + 32];
+    memset(a, 0, sizeof a);
+    put16(a + 0xA, 32);
+    a[8] = g_tx[1].rate == 2 ? 0x14 : 0x0A;
+    if (g_channel == 0) return;
+    a[9] = (uint8_t)g_channel;
+    uint8_t* p = a + 0xC;
+    p = put16(p, 0x0218); p = put16(p, 0);
+    p = put16(p, 0x0903); p = put16(p, 0x00BF); p = put16(p, 0x0300);
+    p = put16(p, IOPORT(W_BSSID0)); p = put16(p, IOPORT(W_BSSID1)); p = put16(p, IOPORT(W_BSSID2));
+    p = put16(p, IOPORT(W_MACAddr0)); p = put16(p, IOPORT(W_MACAddr1)); p = put16(p, IOPORT(W_MACAddr2));
+    p = put16(p, (uint16_t)(IOPORT(W_TXSeqNo) << 4));
+    p = put16(p, cmdcount); p = put16(p, clientfail); put32(p, 0);
+    air_out(a, sizeof a, AIR_FRAME, 0, preamble_len(g_tx[1].rate));
+}
+
+static void start_rx(void);
+static void client_reply_rx(const AirFrame* f);
+
 static int process_tx(TXSlot* s, int num) {
+    if (s->phase == 0 && !s->sent && num != 5) { s->sent = 1; tx_send_frame(s, num); }   /* on the air from the start */
     s->phase_time -= TICK;
     if (s->phase_time > 0) {
         if (s->phase == 1 && !(s->phase_time & s->halfword_mask)) IOPORT(W_RXTXAddr)++;
+        else if (s->phase == 2) {                                 /* MP host: the reply window, one slot per client */
+            g_mp_reply_timer -= TICK;
+            if (g_mp_reply_timer <= 0 && g_mp_client_mask) {
+                int n = 1;
+                while (!(g_mp_client_mask & (1 << n))) n++;
+                AirFrame f;
+                if (air_take_reply(g_tick, g_cmd_id, n, &f)) { g_mp_client_fail &= (uint16_t)~(1 << n); client_reply_rx(&f); }
+                g_mp_reply_timer += 10 + IOPORT(W_CmdReplyTime);
+                g_mp_client_mask &= (uint16_t)~(1 << n);
+            }
+        }
         return 0;
     }
     switch (s->phase) {
     case 0: {                                                     /* preamble done */
         set_irq(7);
-        set_status(3);
+        set_status(num == 5 ? 8 : 3);
         uint32_t len = s->length;
         if (s->rate == 2) { len *= 4; s->halfword_mask = 0x7 & TIME_CHECK_MASK; }
         else { len *= 8; s->halfword_mask = 0xF & TIME_CHECK_MASK; }
         s->phase = 1; s->phase_time = (int)len;
         IOPORT(W_RXTXAddr) = s->addr >> 1;
-        tx_send_frame(s, num);
         return 0;
     }
+    case 10:                                                      /* preamble done (empty MP reply) */
+        set_irq(7); set_status(8);
+        s->phase = 11; s->phase_time = 28 * 4; s->halfword_mask = 0xFFFFFFFF;
+        return 0;
     case 1:                                                       /* transmit done */
-        RAM16(s->addr) = 0x0001;
+        if (num != 1 && num != 5) RAM16(s->addr) = 0x0001;
         g_ram[s->addr + 5] = 0;
+        if (num == 1) {                                           /* MP CMD sent: now the replies */
+            if (IOPORT(W_TXStatCnt) & 0x4000) { IOPORT(W_TXStat) = 0x0800; set_irq(1); }
+            set_status(5);
+            g_mp_reply_timer = 16 + preamble_len(s->rate);
+            s->phase = 2;
+            s->phase_time = 112 + (10 + IOPORT(W_CmdReplyTime)) * num_clients(g_mp_client_mask);
+            return 0;
+        }
+        if (num == 5) {
+            if (IOPORT(W_TXStatCnt) & 0x1000) { IOPORT(W_TXStat) = 0x0401; set_irq(1); }
+            set_status(1);
+            IOPORT(W_TXBusy) &= (uint16_t)~0x80;
+            fire_tx();
+            return 1;
+        }
         IOPORT(W_TXBusy) &= (uint16_t)~(1 << num);
         if (num == 0 || num == 2 || num == 3) {
             int k = num ? num - 1 : 0;
@@ -369,7 +511,35 @@ static int process_tx(TXSlot* s, int num) {
         set_status(1);
         fire_tx();
         return 1;
-    case 13:                                                      /* MP CMD: nobody replies */
+    case 11:                                                      /* empty MP reply done */
+        IOPORT(W_TXSeqNo) = (IOPORT(W_TXSeqNo) + 1) & 0x0FFF;
+        IOPORT(W_TXBusy) &= (uint16_t)~0x80;
+        set_status(1);
+        fire_tx();
+        return 1;
+    case 2: {                                                     /* MP host: reply window over, send the ACK */
+        set_irq(7);
+        set_status(8);
+        IOPORT(W_RXTXAddr) = 0xFC0;
+        s->phase_time = 32 * (s->rate == 2 ? 4 : 8);
+        for (int i = 1; i < 16; i++) if (g_mp_client_fail & (1 << i)) IOPORT8(W_CMDStat0 + i)++;
+        send_mp_ack((uint16_t)((g_cmd_counter + 9) / 10), g_mp_client_fail);
+        s->phase = 3;
+        return 0;
+    }
+    case 3:                                                       /* MP host: ACK sent, CMD done */
+        RAM16(s->addr) = g_mp_client_fail ? 0x0005 : 0x0001;
+        RAM16(s->addr + 2) = g_mp_client_fail;                    /* which clients did not answer */
+        if (!g_mp_client_fail) inc_tx_count(s);
+        IOPORT(W_TXSeqNo) = (IOPORT(W_TXSeqNo) + 1) & 0x0FFF;
+        if (IOPORT(W_TXStatCnt) & 0x2000) { IOPORT(W_TXStat) = 0x0B01; set_irq(1); }
+        IOPORT(W_TXBusy) &= (uint16_t)~2;
+        IOPORT(W_TXSlotCmd) &= 0x7FFF;
+        set_status(1);
+        set_irq(12);
+        fire_tx();
+        return 1;
+    case 13:                                                      /* MP CMD: no time left in CMDCOUNT */
         IOPORT(W_TXBusy) &= (uint16_t)~2;
         IOPORT(W_TXSlotCmd) &= 0x7FFF;
         RAM16(s->addr) = 0x0005;
@@ -411,10 +581,12 @@ static void finish_rx(void) {
         else set_status(1);
     }
     uint16_t fc = (uint16_t)(g_rxbuf[12] | g_rxbuf[13] << 8);
+    uint16_t seqno = (uint16_t)(g_rxbuf[12 + 22] | g_rxbuf[12 + 23] << 8);
     const uint8_t* dst = &g_rxbuf[12 + 4];
     if (!(dst[0] & 1) && !mac_eq(dst, (const uint8_t*)&IOPORT(W_MACAddr0))) return;
     if ((fc & (1 << 14)) && !(IOPORT(W_WEPCnt) & (1 << 15))) return;
     uint16_t flags = 0x0010;
+    int cmd_dupe = 0;
     const uint8_t* bssid_reg = (const uint8_t*)&IOPORT(W_BSSID0);
     switch ((fc >> 2) & 3) {
     case 0: {                                                     /* management */
@@ -424,7 +596,12 @@ static void finish_rx(void) {
         else if (sub <= 5 || (sub >= 0xA && sub <= 0xC)) { if (!(flags & 0x8000) && !(IOPORT(W_RXFilter) & (3 << 9))) return; }
         break;
     }
-    case 1: return;                                               /* control frames: not used here */
+    case 1:                                                       /* control: only PS-poll */
+        if ((fc & 0xF0) != 0xA0) return;
+        if (mac_eq(&g_rxbuf[12 + 4], bssid_reg)) flags |= 0x8000;
+        if (!(flags & 0x8000) && !(IOPORT(W_RXFilter) & (1 << 11))) return;
+        flags |= 0x0005;
+        break;
     case 2: {                                                     /* data */
         int fromto = (fc >> 8) & 3;
         if (IOPORT(W_RXFilter2) & (1 << fromto)) return;
@@ -433,13 +610,23 @@ static void finish_rx(void) {
         uint16_t filt = IOPORT(W_RXFilter);
         if (!(flags & 0x8000) && !(filt & (1 << 11))) return;
         if ((fc & (1 << 11)) && !(filt & 1)) return;
-        flags |= 0x0008;
+        /* MP frames: the hardware looks at these addresses */
+        if (mac_eq(&g_rxbuf[12 + 16], MP_REPLY_MAC)) flags |= (fc & 0xF0) == 0x50 ? 0x000F : 0x000E;
+        else if (mac_eq(&g_rxbuf[12 + 4], MP_CMD_MAC)) { if (seqno == g_mp_last_seqno) cmd_dupe = 1; g_mp_last_seqno = seqno; flags |= 0x000C; }
+        else if (mac_eq(&g_rxbuf[12 + 4], MP_ACK_MAC)) flags |= 0x000D;
+        else flags |= 0x0008;
         switch ((fc >> 4) & 0xF) {
         case 0x0: case 0x4: break;
-        case 0x1: if (!(filt & (1 << 1))) return; break;
-        case 0x2: if (!(filt & (1 << 2))) return; break;
+        case 0x1:
+            if ((flags & 0xF) == 0xD) { if (!(filt & (1 << 7))) return; }
+            else if ((flags & 0xF) != 0xE) { if (!(filt & (1 << 1))) return; }
+            break;
+        case 0x2: if ((flags & 0xF) != 0xC && !(filt & (1 << 2))) return; break;
         case 0x3: if (!(filt & (1 << 3))) return; break;
-        case 0x5: if (!(filt & (1 << 4))) return; break;
+        case 0x5:
+            if ((flags & 0xF) == 0xF) { if (!(filt & (1 << 8))) return; }
+            else if (!(filt & (1 << 4))) return;
+            break;
         case 0x6: if (!(filt & (1 << 5))) return; break;
         case 0x7: if (!(filt & (1 << 6))) return; break;
         default: return;
@@ -447,17 +634,23 @@ static void finish_rx(void) {
         break;
     }
     }
-    uint16_t h = (uint16_t)(IOPORT(W_RXBufWriteCursor) << 1);
-    RAM16(h) = flags; inc_rx_addr(&h, 2);
-    RAM16(h) = 0x0040; inc_rx_addr(&h, 4);
-    RAM16(h) = (uint16_t)(g_rxbuf[6] | g_rxbuf[7] << 8); inc_rx_addr(&h, 2);
-    RAM16(h) = (uint16_t)(g_rxbuf[8] | g_rxbuf[9] << 8); inc_rx_addr(&h, 2);
-    RAM16(h) = 0x4080;                                            /* RSSI */
-    uint16_t a = (uint16_t)(IOPORT(W_RXTXAddr) << 1);
-    if (a & 2) inc_rx_addr(&a, 2);
-    IOPORT(W_RXBufWriteCursor) = (uint16_t)((a & ~3u) >> 1);
-    set_irq(0);
-    if ((flags & 0x800F) == 0x8001) {                             /* beacon from our BSS: take its timestamp */
+    if (!cmd_dupe) {
+        uint16_t h = (uint16_t)(IOPORT(W_RXBufWriteCursor) << 1);
+        RAM16(h) = flags; inc_rx_addr(&h, 2);
+        RAM16(h) = 0x0040; inc_rx_addr(&h, 4);
+        RAM16(h) = (uint16_t)(g_rxbuf[6] | g_rxbuf[7] << 8); inc_rx_addr(&h, 2);
+        RAM16(h) = (uint16_t)(g_rxbuf[8] | g_rxbuf[9] << 8); inc_rx_addr(&h, 2);
+        RAM16(h) = 0x4080;                                        /* RSSI */
+        uint16_t a = (uint16_t)(IOPORT(W_RXTXAddr) << 1);
+        if (a & 2) inc_rx_addr(&a, 2);
+        IOPORT(W_RXBufWriteCursor) = (uint16_t)((a & ~3u) >> 1);
+        set_irq(0);
+    }
+    if ((flags & 0x800F) == 0x800C) {                             /* a CMD from our host: reply if asked to */
+        uint16_t clienttime = (uint16_t)(g_rxbuf[0xC + 24] | g_rxbuf[0xC + 25] << 8);
+        uint16_t clientmask = (uint16_t)(g_rxbuf[0xC + 26] | g_rxbuf[0xC + 27] << 8);
+        if (IOPORT(W_AIDLow) && (clientmask & (1 << IOPORT(W_AIDLow)))) send_mp_reply(clienttime, clientmask);
+    } else if ((flags & 0x800F) == 0x8001) {                      /* beacon from our BSS: take its timestamp */
         uint32_t len = (uint32_t)(g_rxbuf[8] | g_rxbuf[9] << 8);
         len *= (g_rxbuf[6] == 0x14) ? 4 : 8;
         len -= 76;
@@ -466,10 +659,55 @@ static void finish_rx(void) {
     }
 }
 
-static int check_rx(void) {
+/* crop a received frame the way RXLENCROP says; the length goes in [8], the rate in [6] */
+static int crop_rx(int flen) {
+    uint16_t fc = (uint16_t)(g_rxbuf[12] | g_rxbuf[13] << 8);
+    uint8_t rate = g_rxbuf[8];
+    if (fc & (1 << 14)) {
+        flen -= (IOPORT(W_RXLenCrop) >> 7) & 0x1FE;
+        if (flen > 24) memmove(&g_rxbuf[12 + 24], &g_rxbuf[12 + 28], (size_t)flen);
+    } else flen -= (IOPORT(W_RXLenCrop) << 1) & 0x1FE;
+    if (flen < 0) flen = 0;
+    g_rxbuf[6] = rate; g_rxbuf[7] = 0;
+    g_rxbuf[8] = (uint8_t)flen; g_rxbuf[9] = (uint8_t)(flen >> 8);
+    return flen;
+}
+
+static int rx_ready(void) {
     if (IOPORT(W_PowerState) & (1 << 9)) return 0;
     if (!(IOPORT(W_RXCnt) & 0x8000)) return 0;
     if (IOPORT(W_RXBufBegin) == IOPORT(W_RXBufEnd)) return 0;
+    return 1;
+}
+
+/* MP host: a client's reply, received in its slot of the reply window */
+static void client_reply_rx(const AirFrame* f) {
+    if (!rx_ready()) return;
+    if (f->len < 12 || f->len > (int)sizeof g_rxbuf) return;
+    memcpy(g_rxbuf, f->data, f->len);
+    int flen = g_rxbuf[10] | g_rxbuf[11] << 8;
+    if (flen > f->len - 12) flen = f->len - 12;
+    crop_rx(flen);
+    g_rx_cmd_id = 0;
+    start_rx();
+}
+
+/* frames from other consoles: every tick; the access point: every 512 us */
+static int check_rx(int ap_too) {
+    if (!rx_ready()) return 0;
+    AirFrame f;
+    while (air_active() && air_recv(g_tick, &f)) {
+        if (f.len < 12 + 24 || f.len > (int)sizeof g_rxbuf) continue;
+        memcpy(g_rxbuf, f.data, f.len);
+        int flen = g_rxbuf[10] | g_rxbuf[11] << 8;
+        if (flen != f.len - 12) continue;
+        if (g_rxbuf[9] != g_channel || g_channel == 0) continue;
+        crop_rx(flen);
+        g_rx_cmd_id = f.cmd_id;
+        start_rx();
+        return 1;
+    }
+    if (!ap_too) return 0;
     for (;;) {
         int n = ap_recv(g_rxbuf);
         if (n <= 0) return 0;
@@ -477,15 +715,8 @@ static int check_rx(void) {
         int flen = g_rxbuf[10] | g_rxbuf[11] << 8;
         if (flen != n - 12) continue;
         if (g_rxbuf[9] != g_channel || g_channel == 0) continue;
-        uint16_t fc = (uint16_t)(g_rxbuf[12] | g_rxbuf[13] << 8);
-        uint8_t rate = g_rxbuf[8];
-        if (fc & (1 << 14)) {
-            flen -= (IOPORT(W_RXLenCrop) >> 7) & 0x1FE;
-            if (flen > 24) memmove(&g_rxbuf[12 + 24], &g_rxbuf[12 + 28], (size_t)flen);
-        } else flen -= (IOPORT(W_RXLenCrop) << 1) & 0x1FE;
-        if (flen < 0) flen = 0;
-        g_rxbuf[6] = rate; g_rxbuf[7] = 0;
-        g_rxbuf[8] = (uint8_t)flen; g_rxbuf[9] = (uint8_t)(flen >> 8);
+        crop_rx(flen);
+        g_rx_cmd_id = 0;
         start_rx();
         return 1;
     }
@@ -522,10 +753,10 @@ static void us_tick(void) {
             if (IOPORT(W_PowerState) & (1 << 9)) { g_com = 0; g_tx_cur = -1; }
             else {
                 g_com = 2;
-                g_tx_cur = (busy & 0x10) ? 4 : (busy & 8) ? 3 : (busy & 4) ? 2 : (busy & 2) ? 1 : 0;
+                g_tx_cur = (busy & 0x80) ? 5 : (busy & 0x10) ? 4 : (busy & 8) ? 3 : (busy & 4) ? 2 : (busy & 2) ? 1 : 0;
             }
         } else {
-            if (!(g_rx_counter & 0x1FF & TIME_CHECK_MASK)) check_rx();
+            check_rx(!(g_rx_counter & 0x1FF & TIME_CHECK_MASK));
             g_rx_counter += TICK;
         }
     }
@@ -533,7 +764,8 @@ static void us_tick(void) {
         if (process_tx(&g_tx[g_tx_cur], g_tx_cur)) {
             if (IOPORT(W_PowerState) & (1 << 9)) { IOPORT(W_TXBusy) = 0; IOPORT(W_TRXPower) = 0; set_status(9); }
             uint16_t busy = IOPORT(W_TXBusy);
-            if (busy & 0x10) g_tx_cur = 4; else if (busy & 8) g_tx_cur = 3; else if (busy & 4) g_tx_cur = 2;
+            if (busy & 0x80) g_tx_cur = 5;
+            else if (busy & 0x10) g_tx_cur = 4; else if (busy & 8) g_tx_cur = 3; else if (busy & 4) g_tx_cur = 2;
             else if (busy & 2) g_tx_cur = 1; else if (busy & 1) g_tx_cur = 0;
             else { g_tx_cur = -1; g_com = 0; g_rx_counter = 0; }
         }
@@ -559,9 +791,18 @@ static void us_tick(void) {
 
 /* Called as emulated time passes (bus cycles at 33.51 MHz). */
 void wifi_advance(uint32_t cycles) {
-    if (!g_power_on) return;
-    g_cycle_acc += cycles * 1000u;                              /* in 1/1000 cycles: 8 us = 268114 */
-    while (g_cycle_acc >= 268112u) { g_cycle_acc -= 268112u; us_tick(); }
+    g_cycle_acc += cycles * 1000u;                              /* in 1/1000 cycles: 8 us = 268112 */
+    if (!air_active()) {
+        while (g_cycle_acc >= 268112u) { g_cycle_acc -= 268112u; g_tick++; if (g_power_on) us_tick(); }
+        return;
+    }
+    while (g_cycle_acc >= 268112u) {
+        g_cycle_acc -= 268112u;
+        air_reach(g_tick, g_power_on);                          /* listening: the others must have caught up */
+        if (g_power_on) us_tick(); else air_skip(g_tick);
+        g_tick++;
+    }
+    air_reach(g_tick, 0);
 }
 
 static void change_channel(void) {
@@ -594,7 +835,6 @@ static void update_power_on(void) {
     int on = g_enabled && !(IOPORT(W_PowerUS) & 1);
     if (on == g_power_on) return;
     g_power_on = on;
-    g_cycle_acc = 0;
     WLOG("wifi: %s\n", on ? "on" : "off");
 }
 
@@ -636,7 +876,10 @@ void wifi_reset(const uint8_t* fw) {
     g_com = 0; g_tx_cur = -1; g_rx_counter = 0;
     g_rxbuf_ptr = 0; g_rx_time = 0; g_rx_halfword_mask = 0xFFFFFFFF;
     g_cmd_counter = 0; g_us_until_power_on = 0;
+    g_tick = 0; g_cycle_acc = 0; g_mp_reply_timer = 0; g_mp_client_mask = g_mp_client_fail = 0; g_mp_last_seqno = 0xFFFF;
+    g_cmd_seq = g_cmd_id = g_rx_cmd_id = 0;
     ap_reset();
+    { void air_init_from_env(void); air_init_from_env(); }
 }
 
 uint16_t wifi_read16(uint32_t addr) {
