@@ -273,6 +273,7 @@ static void settings_load(void) {
             continue;
         }
         if (!strcmp(key, "session_port")) { int v = atoi(val); if (v > 0 && v < 65536) g_session_port = v; continue; }
+        if (!strcmp(key, "session_consoles")) { if (!strcmp(val, "processes")) { static char e[] = "DQIX_PROCESSES=1"; putenv(e); } continue; }
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
         else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
@@ -346,6 +347,8 @@ static void settings_save(void) {
     fprintf(f, "# playing with friends far away: your name, and the port friends connect to when you host\n");
     fprintf(f, "player_name = %s\n", g_player_name);
     fprintf(f, "session_port = %d\n", g_session_port);
+    fprintf(f, "# how your friends' DSes run on this PC: thread (one thread, the usual) or processes (if thread misbehaves)\n");
+    fprintf(f, "session_consoles = %s\n", getenv("DQIX_PROCESSES") ? "processes" : "thread");
     fprintf(f, "# this copy's own MAC address (made up the first time; the servers know you by it)\n");
     if (g_wireless.mac_set)
         fprintf(f, "wireless_mac = %02x:%02x:%02x:%02x:%02x:%02x\n", g_wireless.mac[0], g_wireless.mac[1],
