@@ -35,3 +35,5 @@ setup-history.bat
 /release/
 # bookmarks: copies of saves and settings at each bookmark (private)
 /bookmarks/
+# private working notes (machine paths etc.)
+/docs/PRIVATE-NOTES.md
