@@ -62,6 +62,7 @@ static uint16_t g_random;
 static uint64_t g_us_timestamp, g_us_counter, g_us_compare;
 static int g_block_beacon_irq14;
 static uint32_t g_cmd_counter;
+#define POST_BEACON_EXTRA_MS 24
 static uint8_t g_bb[0x100], g_bb_ro[0x100];
 static uint8_t g_rf_version;
 static uint32_t g_rf[0x40];
@@ -1020,6 +1021,16 @@ void wifi_write16(uint32_t addr, uint16_t val) {
         return;
     case W_RXBufReadAddr: case W_RXBufGapAddr: val &= 0x1FFE; break;
     case W_RXBufGapSize: case W_RXBufCount: case W_RXBufWriteAddr: case W_RXBufReadCursor: val &= 0x0FFF; break;
+    case W_BeaconCount2:
+        /* A host sends management frames (its answers to friends joining)
+         * only between its beacon and the post-beacon interrupt, about 9 ms.
+         * A joining DS answers each step about a frame later than a real one
+         * (the recompiled processors take turns more coarsely), so once a
+         * friend was in, the next one's requests kept missing that window and
+         * the join failed: 3 or 4 players could not get together. On a host
+         * the window is longer. */
+        if ((IOPORT(W_TXSlotBeacon) & 0x8000) && val != 0xFFFF && val < 64) val = (uint16_t)(val + POST_BEACON_EXTRA_MS);
+        break;
     case W_TXReqReset: IOPORT(W_TXReqRead) &= (uint16_t)~val; return;
     case W_TXReqSet: IOPORT(W_TXReqRead) |= val; fire_tx(); return;
     case W_TXSlotReset:

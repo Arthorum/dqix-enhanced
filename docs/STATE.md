@@ -109,9 +109,20 @@ to it: `git checkout bookmark-2026-10-15`.
   the same six on every day, so the daily share is what varies it. UTC
   offset: `rtc_utc_offset`, carried by sessions and reports
   (`DQIX_UTC_OFFSET`; old replays: 0).
-- Not done yet: 3-4 players tested only with one save (DQIX treats copies of
-  the same save as one person: each tags 1); a relay for hosts who can't open
-  a port (virtual LAN for now).
+- **nightly7**: 3-4 players with different saves (Player A, Player B, Player C,
+  Player D; local:N). Tag mode: everyone canvasses everyone (11 of 12 pairs;
+  Player A never gets Player D, in any order or alone with him - most likely
+  something in those saves, every other direction works). Co-op: a second
+  visitor could never join (the host's answers to auth/assoc only go out
+  between its beacon and IRQ13, ~9 ms; a joining DS answers ~1 frame late
+  here, so it timed out: AID never set, then "unexpected communication
+  error"). Fix: a host's post-beacon count (W_BeaconCount2) gets +24 ms.
+  Now 3 and 4 players meet in the host's world. DQVC: two saves on the
+  same day got the same six from the same file (the game doesn't pick per
+  player; the original's "different for each player" was the server).
+- Not done yet: 3-4 players over the internet (tested on one PC, local:N:
+  the same consoles and air as a session); joining a session that has
+  started; a relay for hosts who can't open a port (virtual LAN for now).
 
 ## Later ideas
 
