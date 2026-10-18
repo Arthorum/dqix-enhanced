@@ -140,7 +140,7 @@ void firmware_init(void) {
         g_wireless.builtin = !strcmp(getenv("DQIX_ONLINE"), "builtin");
         snprintf(g_wireless.dns, sizeof g_wireless.dns, "%s", g_wireless.builtin ? "10.64.0.2" : getenv("DQIX_ONLINE"));
     }
-    wfc_enable(g_wireless.online && g_wireless.builtin, getenv("DQIX_WFC_DIR"));
+    wfc_enable(g_wireless.online && g_wireless.builtin, session_requested() ? "session/wfc" : getenv("DQIX_WFC_DIR"));   /* sessions: the host's files */
     const char* m = getenv("DQIX_MAC");                          /* replaying a report: its mac line */
     unsigned b[6];
     if (m && sscanf(m, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {

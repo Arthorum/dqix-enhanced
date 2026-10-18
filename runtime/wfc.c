@@ -31,6 +31,10 @@
 
 static const uint8_t WFC_IP[4] = { 192, 0, 2, 80 };   /* TEST-NET-1: never a real host */
 
+/* the server's own dice: the same on every PC of a session (not the C library's, shared with the rest of the program) */
+static uint32_t g_rand_state = 0x2545F491u;
+static uint32_t wfc_rand(void) { g_rand_state = g_rand_state * 1103515245u + 12345u; return g_rand_state >> 1; }
+
 static char g_dir[512] = "wfc";
 static int g_on;
 void wfc_enable(int on, const char* dir) {
@@ -327,7 +331,7 @@ static char* http(const char* req, int reqlen, int* outlen) {
         for (char* c = action; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
         char dt[20]; now_str(dt);
         char token[100] = "NDS";
-        for (int i = 3; i < 99; i++) token[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(unsigned)rand() % 62];
+        for (int i = 3; i < 99; i++) token[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(unsigned)wfc_rand() % 62];
         token[99] = 0;
         if (!strcmp(action, "acctcreate")) {
             kv(text, "retry", "0"); kv(text, "returncd", "002"); kv(text, "userid", userid[0] ? userid : "1000000000001");
@@ -494,7 +498,7 @@ static int tcp(const uint8_t* q, int len) {
         if (!c) { c = &g_c[0]; free(c->resp); }
         memset(c, 0, sizeof *c);
         c->used = 1; memcpy(c->mac_ds, q + 6, 6); memcpy(c->mac_gw, q, 6); memcpy(c->ip_ds, ip + 12, 4);
-        c->port = sport; c->rcv_nxt = seq + 1; c->iss = (uint32_t)rand() << 8; c->snd_una = c->iss; c->snd_nxt = c->iss + 1;
+        c->port = sport; c->rcv_nxt = seq + 1; c->iss = (uint32_t)wfc_rand() << 8; c->snd_una = c->iss; c->snd_nxt = c->iss + 1;
         c->wnd = wnd; c->last = (int64_t)g_frame;
         tcp_send(c, c->iss, 0x12, NULL, 0);
         return 1;

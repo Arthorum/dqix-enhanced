@@ -239,6 +239,122 @@ char* ask_text(SDL_Window* win, const char* title, const char* prompt) {
     return out;
 }
 
+
+/* ---------------------------------------------------------------- the session window (menu.h) */
+enum { ID_ADDR = 1101, ID_COPY, ID_HINT, ID_LIST, ID_STATUS, ID_START, ID_HEAD };
+static HWND g_ses;
+static int g_ses_action;
+static SessionWindow g_ses_shown;
+
+static void set_text(HWND h, int id, const char* utf8) {
+    wchar_t w[1024];
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, 1024);
+    w[1023] = 0;
+    SetDlgItemTextW(h, id, w);
+}
+
+static void copy_address(HWND h) {
+    int n = GetWindowTextLengthW(GetDlgItem(h, ID_ADDR));
+    if (n <= 0 || !OpenClipboard(h)) return;
+    EmptyClipboard();
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, ((size_t)n + 1) * sizeof(wchar_t));
+    if (mem) {
+        wchar_t* p = GlobalLock(mem);
+        GetDlgItemTextW(h, ID_ADDR, p, n + 1);
+        GlobalUnlock(mem);
+        if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+    }
+    CloseClipboard();
+    SetDlgItemTextW(h, ID_COPY, L"Copied!");
+    SetTimer(h, 1, 2000, NULL);
+}
+
+static INT_PTR CALLBACK ses_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)lp;
+    switch (msg) {
+    case WM_INITDIALOG: return TRUE;
+    case WM_TIMER: KillTimer(h, 1); SetDlgItemTextW(h, ID_COPY, L"Copy"); return TRUE;
+    case WM_CLOSE: g_ses_action = 2; return TRUE;
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case ID_COPY: copy_address(h); return TRUE;
+        case ID_START: if (IsWindowEnabled(GetDlgItem(h, ID_START))) g_ses_action = 1; return TRUE;
+        case IDCANCEL: g_ses_action = 2; return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+int session_window_open(SDL_Window* win) {
+    if (g_ses) return 1;
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(win, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return 0;
+    static WORD buf[4096];
+    memset(buf, 0, sizeof buf);
+    DLGTEMPLATE* d = (DLGTEMPLATE*)align4(buf);
+    d->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    d->cdit = 9; d->x = 0; d->y = 0; d->cx = 270; d->cy = 252;
+    WORD* p = (WORD*)(d + 1);
+    *p++ = 0; *p++ = 0;
+    p = put_str(p, L"Play with friends far away");
+    *p++ = 10; p = put_str(p, L"Segoe UI");
+    p = put_item(p, 0, 8, 8, 254, 10, ID_HEAD, 0x82, L"");
+    p = put_item(p, WS_BORDER | ES_READONLY | ES_AUTOHSCROLL | ES_CENTER, 8, 21, 196, 16, ID_ADDR, 0x81, L"");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 210, 21, 52, 16, ID_COPY, 0x80, L"Copy");
+    p = put_item(p, 0, 8, 42, 254, 66, ID_HINT, 0x82, L"");
+    p = put_item(p, 0, 8, 112, 254, 10, 0xFFFF, 0x82, L"Players:");
+    p = put_item(p, WS_BORDER | WS_VSCROLL | LBS_NOSEL, 8, 124, 254, 54, ID_LIST, 0x83, L"");
+    p = put_item(p, 0, 8, 184, 254, 34, ID_STATUS, 0x82, L"");
+    p = put_item(p, WS_TABSTOP | BS_DEFPUSHBUTTON, 118, 228, 84, 17, ID_START, 0x80, L"Start the game");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 208, 228, 54, 17, IDCANCEL, 0x80, L"Cancel");
+    g_ses = CreateDialogIndirectParamW(GetModuleHandleW(NULL), d, info.info.win.window, ses_proc, 0);
+    if (!g_ses) return 0;
+    /* a bigger, bolder address */
+    HFONT f = CreateFontW(-22, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    if (f) SendDlgItemMessageW(g_ses, ID_ADDR, WM_SETFONT, (WPARAM)f, TRUE);
+    memset(&g_ses_shown, 0, sizeof g_ses_shown);
+    g_ses_shown.can_start = -1;
+    g_ses_action = 0;
+    return 1;
+}
+
+void session_window_update(const SessionWindow* w) {
+    if (!g_ses) return;
+    SessionWindow* o = &g_ses_shown;
+    if (strcmp(o->heading, w->heading)) set_text(g_ses, ID_HEAD, w->heading);
+    if (strcmp(o->address, w->address)) set_text(g_ses, ID_ADDR, w->address);
+    if (strcmp(o->hint, w->hint)) set_text(g_ses, ID_HINT, w->hint);
+    if (strcmp(o->status, w->status)) set_text(g_ses, ID_STATUS, w->status);
+    int list_changed = o->n_players != w->n_players;
+    for (int i = 0; i < w->n_players && !list_changed; i++) list_changed = strcmp(o->players[i], w->players[i]) != 0;
+    if (list_changed) {
+        HWND l = GetDlgItem(g_ses, ID_LIST);
+        SendMessageW(l, LB_RESETCONTENT, 0, 0);
+        for (int i = 0; i < w->n_players; i++) {
+            wchar_t t[128]; MultiByteToWideChar(CP_UTF8, 0, w->players[i], -1, t, 128); t[127] = 0;
+            SendMessageW(l, LB_ADDSTRING, 0, (LPARAM)t);
+        }
+    }
+    int start = w->host && w->can_start && !w->failed;
+    if (o->can_start != start || o->host != w->host || o->failed != w->failed) {
+        EnableWindow(GetDlgItem(g_ses, ID_START), start);
+        ShowWindow(GetDlgItem(g_ses, ID_START), w->host && !w->failed ? SW_SHOW : SW_HIDE);
+        SetDlgItemTextW(g_ses, IDCANCEL, w->failed ? L"Back" : L"Cancel");
+        EnableWindow(GetDlgItem(g_ses, ID_COPY), w->address[0] != 0);
+    }
+    *o = *w;
+    o->can_start = start;
+}
+
+int session_window_action(void) { int a = g_ses_action; g_ses_action = 0; return a; }
+
+void session_window_close(void) {
+    if (!g_ses) return;
+    DestroyWindow(g_ses);
+    g_ses = NULL;
+}
 #else
 char* ask_text(SDL_Window* win, const char* title, const char* prompt) { (void)win; (void)title; (void)prompt; return NULL; }
 float display_mm_per_pixel(SDL_Window* win) { (void)win; return 0; }
@@ -247,4 +363,8 @@ void menu_show(int on) { (void)on; }
 void menu_check(int id, int on) { (void)id; (void)on; }
 void menu_enable(int id, int on) { (void)id; (void)on; }
 int menu_command(const SDL_Event* e) { (void)e; return 0; }
+int session_window_open(SDL_Window* win) { (void)win; return 0; }
+void session_window_update(const SessionWindow* w) { (void)w; }
+int session_window_action(void) { return 0; }
+void session_window_close(void) {}
 #endif

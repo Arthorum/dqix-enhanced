@@ -26,6 +26,19 @@ static void unlock(void) { LeaveCriticalSection(&g_mx); }
 static void sleep_ms(int ms) { Sleep((DWORD)ms); }
 static int sock_err_again(void) { return WSAGetLastError() == WSAEWOULDBLOCK; }
 static void make_dir(const char* p) { _mkdir(p); }
+#include <io.h>
+/* the names in a folder (files or folders) */
+static int list_dir(const char* dir, int want_dirs, char names[][64], int max) {
+    char pat[600]; snprintf(pat, sizeof pat, "%s\\*", dir);
+    struct _finddata_t fd; intptr_t h = _findfirst(pat, &fd); int n = 0;
+    if (h == -1) return 0;
+    do {
+        if (fd.name[0] == '.' || !(fd.attrib & _A_SUBDIR) != !want_dirs || strlen(fd.name) >= 64) continue;
+        if (n < max) snprintf(names[n++], 64, "%s", fd.name);
+    } while (_findnext(h, &fd) == 0);
+    _findclose(h);
+    return n;
+}
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -51,6 +64,21 @@ static void unlock(void) { pthread_mutex_unlock(&g_mx); }
 static void sleep_ms(int ms) { struct timespec t = { ms / 1000, (long)(ms % 1000) * 1000000L }; nanosleep(&t, NULL); }
 static int sock_err_again(void) { return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS; }
 static void make_dir(const char* p) { mkdir(p, 0755); }
+#include <dirent.h>
+static int list_dir(const char* dir, int want_dirs, char names[][64], int max) {
+    DIR* d = opendir(dir); int n = 0;
+    if (!d) return 0;
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.' || strlen(e->d_name) >= 64) continue;
+        char p[700]; snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        struct stat st; if (stat(p, &st)) continue;
+        if (!S_ISDIR(st.st_mode) != !want_dirs) continue;
+        if (n < max) snprintf(names[n++], 64, "%s", e->d_name);
+    }
+    closedir(d);
+    return n;
+}
 #endif
 
 void (*session_lobby_hook)(void);
@@ -197,6 +225,8 @@ static void send_msg(Peer* p, int type, const Buf* b) {
     if (n) put_bytes(p, b->d, n);
 }
 typedef struct { const uint8_t* d; size_t n, pos; int bad; } Rd;
+static Rd g_wfc_rd;                     /* the start message's Wi-Fi files, for do_start */
+static uint8_t* g_wfc_buf;              /* host: its own start message (freed after) */
 static const uint8_t* r_get(Rd* r, size_t n) { if (r->pos + n > r->n) { r->bad = 1; return NULL; } const uint8_t* p = r->d + r->pos; r->pos += n; return p; }
 static uint8_t r_u8(Rd* r) { const uint8_t* p = r_get(r, 1); return p ? p[0] : 0; }
 static uint32_t r_u32(Rd* r) { const uint8_t* p = r_get(r, 4); return p ? (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24 : 0; }
@@ -675,6 +705,8 @@ static int start_hosted(void) {
 static void kill_children(void) { signal(SIGTERM, SIG_IGN); kill(0, SIGTERM); }
 #endif
 
+static void get_wfc(Rd* r);
+static void put_wfc(Buf* b);
 static void do_start(void) {
     make_dir("session");
     if (!g_flog && (g_flog = fopen("session/front.log", "w"))) {
@@ -692,6 +724,8 @@ static void do_start(void) {
     rtc_set_base(g_rtc);
     if (!air_init(g_shm, g_me, g_n)) { news("could not set up the shared memory"); g_state = 5; return; }
     for (int k = 0; k < g_n; k++) air_set_name(k, g_con[k].name);
+    get_wfc(&g_wfc_rd);
+    free(g_wfc_buf); g_wfc_buf = NULL; memset(&g_wfc_rd, 0, sizeof g_wfc_rd);
     for (int k = 0; k < g_n; k++) for (int f = 0; f < g_delay; f++) air_input_put(k, (uint64_t)f, 0);
 #ifndef _WIN32
     setpgid(0, 0); atexit(kill_children);
@@ -713,8 +747,10 @@ static void host_start(void) {
     b_u8(&b, (uint8_t)g_n); b_u8(&b, (uint8_t)g_delay); b_u64(&b, (uint64_t)g_rtc);
     char shm[64]; snprintf(shm, sizeof shm, "%s", ""); (void)shm;
     for (int k = 0; k < g_n; k++) put_console(&b, &g_con[k]);
+    size_t wfc_at = b.n;
+    put_wfc(&b);
     for (int i = 1; i < SESSION_MAX; i++) if (g_peer[i].s != BADSOCK && g_peer[i].hello) send_msg(&g_peer[i], M_START, &b);
-    free(b.d);
+    { Rd own = { b.d + wfc_at, b.n - wfc_at, 0, 0 }; g_wfc_rd = own; g_wfc_buf = b.d; }   /* the same files here (after the log opens) */
     /* push it out before the game starts */
     double t0 = now_ms();
     for (;;) {
@@ -871,6 +907,7 @@ static void handle(int i, int type, Rd* r) {
         for (int k = 0; k < n; k++) get_console(r, &g_con[k]);
         unlock();
         if (r->bad) { news("the start message was damaged"); g_state = 5; break; }
+        g_wfc_rd = *r;
         do_start();
         break;
     }
@@ -1056,11 +1093,81 @@ static int start_join(const char* host, int port) {
     return 1;
 }
 
+/* In a session every console uses the built-in Wi-Fi (DQVC, the downloads)
+ * and nothing else: it answers from inside the program, in the game's own
+ * time, from the same files on every PC (the host's, sent at the start), so
+ * every PC computes the same. Real servers on the internet stay off: their
+ * answers would arrive at different moments on different PCs. */
+static void session_wireless(void) {
+    g_wireless.online = 1;
+    g_wireless.builtin = 1;
+    snprintf(g_wireless.dns, sizeof g_wireless.dns, "10.64.0.2");
+    net_seal(1);
+}
+
+/* The host's built-in Wi-Fi files (wfc/<game>/...: small) go to everyone in
+ * the start message; every PC, the host's included, then uses that copy in
+ * session/wfc. */
+#define WFC_SEND_MAX (8 << 20)
+static void put_wfc(Buf* b) {
+    char games[8][64], files[256][64];
+    int ng = list_dir("wfc", 1, games, 8);
+    size_t count_at = b->n; b_u32(b, 0);
+    uint32_t count = 0; size_t total = 0;
+    for (int g = 0; g < ng; g++) {
+        char dir[200]; snprintf(dir, sizeof dir, "wfc/%s", games[g]);
+        int nf = list_dir(dir, 0, files, 256);
+        for (int i = 0; i < nf; i++) {
+            char path[300]; snprintf(path, sizeof path, "%s/%s", dir, files[i]);
+            FILE* f = fopen(path, "rb"); if (!f) continue;
+            fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+            if (len < 0 || total + (size_t)len > WFC_SEND_MAX) { fclose(f); continue; }
+            uint8_t* d = malloc((size_t)len + 1);
+            if (d && fread(d, 1, (size_t)len, f) == (size_t)len) {
+                char name[128]; snprintf(name, sizeof name, "%s/%s", games[g], files[i]);
+                b_str(b, name, 128); b_u32(b, (uint32_t)len); b_put(b, d, (size_t)len);
+                count++; total += (size_t)len;
+            }
+            free(d); fclose(f);
+        }
+    }
+    b->d[count_at] = (uint8_t)count; b->d[count_at + 1] = (uint8_t)(count >> 8);
+    b->d[count_at + 2] = (uint8_t)(count >> 16); b->d[count_at + 3] = (uint8_t)(count >> 24);
+}
+static int safe_name(const char* n) {
+    if (strstr(n, "..") || strchr(n, '\\') || strchr(n, ':') || n[0] == '/') return 0;
+    const char* sl = strchr(n, '/'); return sl && !strchr(sl + 1, '/');   /* game/file only */
+}
+static void get_wfc(Rd* r) {
+    /* start clean: no files left over from an earlier session */
+    char games[8][64], files[256][64];
+    make_dir("session"); make_dir("session/wfc");
+    int ng = list_dir("session/wfc", 1, games, 8);
+    for (int g = 0; g < ng; g++) {
+        char dir[200]; snprintf(dir, sizeof dir, "session/wfc/%s", games[g]);
+        int nf = list_dir(dir, 0, files, 256);
+        for (int i = 0; i < nf; i++) { char p[300]; snprintf(p, sizeof p, "%s/%s", dir, files[i]); remove(p); }
+    }
+    uint32_t count = r->pos + 4 <= r->n ? r_u32(r) : 0, written = 0;
+    for (uint32_t i = 0; i < count && !r->bad; i++) {
+        char name[128]; r_str(r, name, 128);
+        uint32_t len; uint8_t* d = r_blob(r, &len);
+        if (!d || !safe_name(name)) { free(d); continue; }
+        char dir[200]; snprintf(dir, sizeof dir, "session/wfc/%.*s", (int)(strchr(name, '/') - name), name);
+        make_dir(dir);
+        char path[300]; snprintf(path, sizeof path, "session/wfc/%s", name);
+        FILE* f = fopen(path, "wb");
+        if (f) { fwrite(d, 1, len, f); fclose(f); written++; }
+        free(d);
+    }
+    flog("built-in Wi-Fi: %u files from the host", (unsigned)written);
+}
+
 void session_pre_boot(int argc, char** argv) {
     if (argc > 1) snprintf(g_rom_path, sizeof g_rom_path, "%s", argv[1]);
     if (argc > 2) snprintf(g_extract_path, sizeof g_extract_path, "%s", argv[2]);
-    if (getenv("DQIX_HIDDEN")) { g_hidden = 1; g_wireless.online = 0; return; }
-    if (getenv("DQIX_SESSION")) { g_requested = 1; g_wireless.online = 0; }
+    if (getenv("DQIX_HIDDEN")) { g_hidden = 1; session_wireless(); return; }
+    if (getenv("DQIX_SESSION")) { g_requested = 1; session_wireless(); }
     const char* nm = getenv("DQIX_PLAYER_NAME");
     if (nm && *nm) snprintf(g_name, sizeof g_name, "%s", nm);
 }
@@ -1119,6 +1226,7 @@ void session_boot(void) {
             if (k && (path = getenv(nm))) { FILE* f = fopen(path, "rb"); if (f) { size_t got = fread(g_con[k].fw, 1, g_con[k].fw_len, f); (void)got; fclose(f); } }
         }
         g_delay = 2;
+        { Buf b = { 0 }; put_wfc(&b); Rd own = { b.d, b.n, 0, 0 }; g_wfc_rd = own; g_wfc_buf = b.d; }
         do_start();
         return;
     } else { snprintf(mode, sizeof mode, "%.15s", e); news("unknown DQIX_SESSION %s", mode); return; }

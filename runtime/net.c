@@ -20,6 +20,7 @@ int net_send(const uint8_t* eth, int len) { (void)eth; return len; }
 int net_recv(uint8_t* eth) { (void)eth; return 0; }
 void net_deliver(const uint8_t* f, int len) { (void)f; (void)len; }
 void net_enable(int on) { (void)on; }
+void net_seal(int on) { (void)on; }
 #else
 
 #ifdef _WIN32
@@ -35,6 +36,12 @@ void net_enable(int on) { (void)on; }
 
 static Slirp* g_slirp;
 static int g_on;
+/* Sealed (sessions): the DS reaches only the built-in server (wfc.c) and the
+ * virtual router's address handout (DHCP, ARP), and the router's clock is the
+ * game's - nothing depends on this PC's network or timing, so every PC of
+ * the session computes the same. */
+static int g_sealed;
+void net_seal(int on) { g_sealed = on; }
 
 /* frames from slirp to the DS */
 #define QN 128
@@ -120,6 +127,7 @@ static slirp_ssize_t cb_send(const void* buf, size_t len, void* opaque) {
 static void cb_error(const char* msg, void* opaque) { (void)opaque; NLOG("net: slirp error: %s\n", msg); }
 static int64_t cb_clock(void* opaque) {
     (void)opaque;
+    if (g_sealed) return (int64_t)g_frame * 16715000LL;          /* game time: one DS frame is about 16.715 ms */
 #ifdef _WIN32
     LARGE_INTEGER f, c; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
     return (int64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
@@ -200,6 +208,12 @@ int net_send(const uint8_t* eth, int len) {
     if (g_log > 0) NLOG("net: DS -> %d bytes, type %02x%02x\n", len, eth[12], eth[13]);
     hexlog("TX ", eth, len);
     if (wfc_input(eth, len)) return len;                     /* the built-in server's */
+    if (g_sealed) {                                           /* only ARP and DHCP go to the router */
+        int arp = len >= 14 && eth[12] == 8 && eth[13] == 6;
+        int dhcp = len >= 14 + 20 + 8 && eth[12] == 8 && eth[13] == 0 && eth[14 + 9] == 17 &&
+                   (eth[14 + (eth[14] & 15) * 4 + 2] << 8 | eth[14 + (eth[14] & 15) * 4 + 3]) == 67;
+        if (!arp && !dhcp) { summarize(eth, len, 1); return len; }
+    }
     summarize(eth, len, 1);
     slirp_input(g_slirp, eth, len);
     pump();

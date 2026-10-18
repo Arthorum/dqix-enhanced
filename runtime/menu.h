@@ -30,3 +30,22 @@ float display_mm_per_pixel(SDL_Window* win);
  * (UTF-8, caller frees) or NULL if the box was closed without saving or isn't
  * available on this system. */
 char* ask_text(SDL_Window* win, const char* title, const char* prompt);
+
+/* The session window (Windows): while players gather, a window of its own
+ * with the address to give out (and a Copy button), who has joined, and
+ * Start / Cancel. Elsewhere the lobby on the DS screens does it all. */
+typedef struct {
+    int host;                     /* this PC hosts */
+    int can_start;                /* host: friends are in */
+    int failed;                   /* the session couldn't start: only Back */
+    char heading[96];             /* "Give your friends this address:" / "Connected to:" */
+    char address[128];
+    char hint[700];
+    char players[4][96];
+    int n_players;
+    char status[300];
+} SessionWindow;
+int session_window_open(SDL_Window* win);          /* 1 if it is showing */
+void session_window_update(const SessionWindow* w);
+int session_window_action(void);                    /* 0 nothing, 1 start, 2 cancel (each reported once) */
+void session_window_close(void);

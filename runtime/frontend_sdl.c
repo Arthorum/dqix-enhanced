@@ -259,10 +259,15 @@ static void wireless_mac_new(void) {
     for (int i = 3; i < 6; i++) { r = r * 1103515245u + 12345u; g_wireless.mac[i] = (uint8_t)(r >> 16); }
     g_wireless.mac_set = 1;
 }
+/* the console around the screens until the player picks another: the photo of a real DS Lite */
+static int g_color_chosen;
+static void default_console_color(void) {
+    for (int i = 0; i < g_nskins; i++) if (!strcmp(g_skins[i].file + 6, "dslite_black.png")) g_opt.shell_color = N_DRAWN + i;
+}
 static void settings_load(void) {
     FILE* f = fopen(SETTINGS, "r");
     if (!f) return;
-    char line[200];
+    char line[200], color[64] = "";
     while (fgets(line, sizeof line, f)) {
         char key[64]; char val[64];
         if (line[0] == '#' || sscanf(line, " %63[^= ] = %63s", key, val) != 2) continue;
@@ -286,10 +291,8 @@ static void settings_load(void) {
         else if (!strcmp(key, "backlight")) { for (int i = 1; i <= 4; i++) if (!strcmp(val, BACKLIGHT_NAME[i])) g_opt.backlight = i; }
         else if (!strcmp(key, "screen_gap")) g_opt.gap = atoi(val) != 0;
         else if (!strcmp(key, "console")) g_opt.shell = atoi(val) != 0;
-        else if (!strcmp(key, "console_color")) {
-            for (int i = 0; i < N_DRAWN; i++) if (!strcmp(val, SHELLS[i].key)) g_opt.shell_color = i;
-            for (int i = 0; i < g_nskins; i++) if (!strcmp(val, g_skins[i].file + 6)) g_opt.shell_color = N_DRAWN + i;   /* a photo, by file name */
-        }
+        else if (!strcmp(key, "console_color")) snprintf(color, sizeof color, "%s", val);
+        else if (!strcmp(key, "console_color_chosen")) g_color_chosen = atoi(val) != 0;
         else if (!strcmp(key, "integer_scaling")) g_opt.integer = atoi(val) != 0;
         else if (!strcmp(key, "actual_size")) g_opt.actual = atoi(val) != 0;
         else if (!strcmp(key, "monitor_width_mm")) g_opt.monitor_width_mm = (float)atof(val);
@@ -305,6 +308,11 @@ static void settings_load(void) {
         }
     }
     fclose(f);
+    /* the colour counts once the player picked one (before nightly5 it was saved either way) */
+    if (g_color_chosen) {
+        for (int i = 0; i < N_DRAWN; i++) if (!strcmp(color, SHELLS[i].key)) g_opt.shell_color = i;
+        for (int i = 0; i < g_nskins; i++) if (!strcmp(color, g_skins[i].file + 6)) g_opt.shell_color = N_DRAWN + i;   /* a photo, by file name */
+    }
 }
 static void settings_save(void) {
     if (g_headless || getenv("DQIX_NO_SETTINGS")) return;
@@ -331,6 +339,7 @@ static void settings_save(void) {
     fprintf(f, "# white, black, ice_blue, coral_pink, navy, crimson, or a photo in the skins folder by file name\n");
     fprintf(f, "screen_gap = %d\n", g_opt.gap);
     fprintf(f, "console = %d\n", g_opt.shell);
+    fprintf(f, "console_color_chosen = %d\n", g_color_chosen);
     fprintf(f, "console_color = %s\n", g_opt.shell_color < N_DRAWN ? SHELLS[g_opt.shell_color].key : g_skins[g_opt.shell_color - N_DRAWN].file + 6);
     fprintf(f, "# whole-number scaling only (every DS pixel the same size): 0 or 1\n");
     fprintf(f, "integer_scaling = %d\n", g_opt.integer);
@@ -441,6 +450,7 @@ void frontend_init(int argc, char** argv) {
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
     if (getenv("DQIX_HIDDEN")) { g_hidden = g_headless = 1; return; }
     skins_scan();
+    default_console_color();
     if (!getenv("DQIX_NO_SETTINGS")) {
         settings_load();
         if (!g_wireless.mac_set && !g_headless) { wireless_mac_new(); settings_save(); }
@@ -706,6 +716,7 @@ static void present(void) {
 
 /* ---------------------------------------------------------------- settings changes (keys and menu) */
 static void update_title(double fps) {
+    session_window_close();                                     /* the lobby is over */
     char title[400], ses[300] = "";
     if (session_running()) {
         SessionInfo si; session_info(&si);
@@ -730,7 +741,7 @@ static void menu_sync(void) {
         menu_enable(MI_SES_START, in && si.host && si.state == 2 && si.n >= 2);
         menu_enable(MI_SES_LEAVE, in);
         menu_enable(MI_SES_HOST, !in); menu_enable(MI_SES_JOIN, !in);
-        menu_enable(MI_NET, !in);                            /* a session is offline (the PCs must agree) */
+        menu_enable(MI_NET, !in);                            /* a session uses the built-in Wi-Fi only (the PCs must agree) */
     }
     int stacked = !g_side_by_side;
     menu_check(MI_PAUSE, g_paused);
@@ -774,6 +785,29 @@ static const char* CONTROLS_TEXT =
     "F4 3D resolution   F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
     "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit";
 
+/* A message box whose long lines are wrapped (the system boxes size themselves
+ * to the longest line, which made the help as wide as the screen). */
+static int info_box(Uint32 flags, const char* title, const char* text, SDL_Window* win) {
+    size_t n = strlen(text);
+    char* out = malloc(n * 2 + 1);
+    if (!out) return SDL_ShowSimpleMessageBox(flags, title, text, win);
+    const int W = 76;
+    size_t o = 0; int col = 0, wrapped = 0;
+    for (size_t i = 0; i < n;) {
+        if (text[i] == '\n') { out[o++] = '\n'; col = 0; i++; continue; }
+        size_t j = i; while (j < n && text[j] != ' ' && text[j] != '\n') j++;    /* a word */
+        int len = (int)(j - i);
+        if (col > 0 && col + len > W) { while (o > 0 && out[o - 1] == ' ') o--; out[o++] = '\n'; col = 0; wrapped = 1; }
+        memcpy(out + o, text + i, (size_t)len); o += (size_t)len; col += len; i = j;
+        if (len) wrapped = 0;
+        while (i < n && text[i] == ' ') { if (!(wrapped && col == 0)) { out[o++] = ' '; col++; } i++; }
+    }
+    out[o] = 0;
+    int r = SDL_ShowSimpleMessageBox(flags, title, out, win);
+    free(out);
+    return r;
+}
+
 static int g_menu_peek;          /* fullscreen: the menu bar is showing because the mouse is at the top */
 static void settings_save(void);
 
@@ -782,7 +816,7 @@ static const char SESSION_HELP[] =
     "Tag mode, visiting other worlds and inviting friends (Pavo) need DS systems close to each other. "
     "This lets friends anywhere play those parts together, up to 4 players.\n\n"
     "How: one of you hosts (Wireless > Play with friends far away > Host), the others join with the address "
-    "the host's game shows. When everyone is in, the host presses Enter. All the games restart together, "
+    "the host's game shows. When everyone is in, the host presses Start the game. All the games restart together, "
     "each from its own save, and from then on every PC runs every player's DS: yours in the window, your "
     "friends' unseen. Only the buttons travel between the PCs, so the DSes really are side by side - "
     "on every PC at once.\n\n"
@@ -791,6 +825,7 @@ static const char SESSION_HELP[] =
     "- Everyone needs the same version of this game.\n"
     "- Buttons react a little later than usual (the input delay, a few frames, depending on the distance).\n"
     "- If someone's PC is slow, everyone waits for it while your DSes are talking wirelessly.\n"
+    "- The built-in Wi-Fi works as usual (DQVC, the downloads), with the host's files for everyone. Other online servers are off during a session.\n"
     "- Your game saves to your own save as always. Leaving (or closing the game) switches your DS off for the others.\n\n"
     "Getting in: the host's game asks the home router to let friends in. If the router won't, forward TCP port "
     "27900 to the host's PC, or all of you use a free virtual LAN such as Tailscale, ZeroTier or Radmin VPN and "
@@ -868,7 +903,7 @@ static void session_action(int id) {
         break;
     case MI_SES_START: session_start_now(); break;
     case MI_SES_NAME: ask_name(); break;
-    case MI_SES_HELP: SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Playing with friends far away", SESSION_HELP, g_win); break;
+    case MI_SES_HELP: info_box(SDL_MESSAGEBOX_INFORMATION, "Playing with friends far away", SESSION_HELP, g_win); break;
     }
 }
 
@@ -921,6 +956,38 @@ static void lobby_draw(void) {
     present();
 }
 
+/* Windows: the same in a window of its own, with buttons */
+static void lobby_window(void) {
+    SessionInfo si; session_info(&si);
+    if (!g_win || si.state == 3 || si.state == 4 || !session_window_open(g_win)) { session_window_close(); return; }
+    SessionWindow w; memset(&w, 0, sizeof w);
+    w.host = si.host; w.failed = si.state == 5; w.can_start = si.host && si.state == 2 && si.n >= 2;
+    if (si.host) {
+        snprintf(w.heading, sizeof w.heading, "%s", si.ready ? "Give your friends this address (they choose Join a friend and paste it):" : "Finding your address...");
+        if (si.ready) snprintf(w.address, sizeof w.address, "%s", si.address);
+        snprintf(w.hint, sizeof w.hint, "%s", si.ready ? si.hint : "");
+    } else {
+        snprintf(w.heading, sizeof w.heading, "%s", si.state == 1 ? "Connecting to:" : "Connected to:");
+        snprintf(w.address, sizeof w.address, "%s", si.address);
+        snprintf(w.hint, sizeof w.hint, "%s", si.state == 2 ? "You're in. The game starts when the host presses Start." : "");
+    }
+    for (int k = 0; k < si.n && si.state >= 2 && k < 4; k++) {
+        if (k == si.me) snprintf(w.players[k], sizeof w.players[k], "%d.   %s   (you)", k + 1, si.names[k]);
+        else if (si.host && k > 0) snprintf(w.players[k], sizeof w.players[k], "%d.   %s   (ping %d ms)", k + 1, si.names[k], si.ping_ms[k]);
+        else snprintf(w.players[k], sizeof w.players[k], "%d.   %s%s", k + 1, si.names[k], k == 0 ? "   (host)" : "");
+        w.n_players = k + 1;
+    }
+    if (si.state == 5) snprintf(w.status, sizeof w.status, "%s", si.message);
+    else if (si.host) snprintf(w.status, sizeof w.status, "%s%s%s", si.message, si.message[0] ? "\n" : "",
+                               si.n >= 2 ? "When everyone is here, press Start the game." : "Waiting for friends to join (up to 3)...");
+    else snprintf(w.status, sizeof w.status, "%s", si.message);
+    session_window_update(&w);
+    switch (session_window_action()) {
+    case 1: if (w.can_start) session_start_now(); break;
+    case 2: if (si.state == 5) restart_with(NULL); else if (ask_yes("Cancel", "Stop and play alone? The game restarts.", "Stop")) restart_with(NULL); break;
+    }
+}
+
 static void lobby_hook(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -936,6 +1003,7 @@ static void lobby_hook(void) {
     }
     menu_sync();
     lobby_draw();
+    lobby_window();
     SDL_Delay(30);
 }
 
@@ -964,7 +1032,7 @@ static void do_action(int id) {
     case MI_TURBO: g_turbo = !g_turbo; break;
     case MI_DLC:
         g_opt.dlc = !g_opt.dlc;
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Downloadable content", g_opt.dlc ?
+        info_box(SDL_MESSAGEBOX_INFORMATION, "Downloadable content", g_opt.dlc ?
             "The 64 downloadable quests and the 23 special guests will be switched on in your save the next "
             "time the game starts (they come with the save, as if downloaded from Nintendo Wi-Fi Connection).\n\n"
             "Close the game and start it again, load your adventure log, and save once in the game to keep them.\n\n"
@@ -975,7 +1043,7 @@ static void do_action(int id) {
     case MI_NET:
         g_net_want = !g_net_want;
         wireless_apply(0);
-        if (g_net_want) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Wireless",
+        if (g_net_want) info_box(SDL_MESSAGEBOX_INFORMATION, "Wireless",
             "Connected mode is on. In the game, talk to Sellma at the DQVC counter in Stornway's Quester's Rest "
             "and the DS will connect through this PC "
             "to the server chosen under Wireless > Server.\n\n"
@@ -987,7 +1055,7 @@ static void do_action(int id) {
         break;
     case MI_SRV_CUSTOM: break;
     case MI_NET_HELP:
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Wireless",
+        info_box(SDL_MESSAGEBOX_INFORMATION, "Wireless",
             "Nintendo Wi-Fi Connection closed in 2014. Fans run replacement servers (AltWFC, Wiimmfi) that a "
             "real DS reaches by changing its DNS setting; this game does the same.\n\n"
             "The PC plays the part of a wireless access point called DQIX-PC and passes the DS's traffic to the "
@@ -1044,7 +1112,7 @@ static void do_action(int id) {
         g_opt.actual = !g_opt.actual; relayout = 1;
         update_actual();
         if (g_opt.actual && g_actual_sc <= 0)
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Actual size",
+            info_box(SDL_MESSAGEBOX_INFORMATION, "Actual size",
                 "Your monitor didn't say how big it is, so the real size can't be worked out.\n\n"
                 "Measure the width of its picture area in millimetres and put it in settings.ini\n"
                 "(next to the game) as monitor_width_mm, e.g. monitor_width_mm = 597", g_win);
@@ -1056,16 +1124,16 @@ static void do_action(int id) {
         SDL_SetWindowFullscreen(g_win, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
         relayout = !g_fullscreen;
         break;
-    case MI_CONTROLS: SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Controls", CONTROLS_TEXT, g_win); break;
+    case MI_CONTROLS: info_box(SDL_MESSAGEBOX_INFORMATION, "Controls", CONTROLS_TEXT, g_win); break;
     case MI_ABOUT:
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "About",
+        info_box(SDL_MESSAGEBOX_INFORMATION, "About",
             "Dragon Quest IX for PC, " DQIX_VERSION " (" DQIX_VERSION_DATE "), built " __DATE__ "\n\n"
             "Classic draws the game exactly like the DS; Enhanced draws its 3D\n"
             "on the graphics card at up to 4x.\n\n"
             "DS Lite screen colours: Pokefan531's measured DS Lite profile.", g_win);
         break;
     default:
-        if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) { g_opt.shell_color = id - MI_SHELLC0; relayout = 1; }
+        if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) { g_opt.shell_color = id - MI_SHELLC0; g_color_chosen = 1; relayout = 1; }
         else return;
     }
     if (relayout && g_win) layout_window();

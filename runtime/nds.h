@@ -240,6 +240,7 @@ void wfc_frame(void);
 void wfc_poll(void);
 int wfc_input(const uint8_t* frame, int len);               /* the Wi-Fi settings area (reports) */
 void net_enable(int on);
+void net_seal(int on);                       /* sessions: only the built-in server, in game time */
 typedef struct { int online; char dns[32]; uint8_t mac[6]; int mac_set; int builtin; } WirelessConfig;   /* builtin: wfc.c answers */
 extern WirelessConfig g_wireless;                  /* set by the frontend before boot */
 void wifi_set_power(int on);

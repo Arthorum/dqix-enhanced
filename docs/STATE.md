@@ -89,6 +89,16 @@ to it: `git checkout bookmark-2026-10-15`.
   title bar says what it's waiting for, build fingerprints in HELLO/WELCOME
   (log only), sessions no longer write `wireless.bin`, build-pc.bat builds
   dqixcore.dll too.
+- **nightly5**: the built-in Wi-Fi (DQVC, downloads) works in sessions, for
+  every console: the host's `wfc/` files go out in the start message and
+  every PC uses them from `session/wfc`; the virtual network is sealed
+  (`net_seal`: only the built-in server, DHCP and ARP; the router's clock is
+  game time; the server's random numbers are its own). Tested: a DQVC
+  purchase in a 2-PC session, 70/70 sync checks the same, the guest without
+  any files of its own. Other servers stay off in sessions. Also: a host /
+  join window on Windows (address with Copy, players, Start the game,
+  Cancel), the DS Lite photo is the default console until one is picked
+  (`console_color_chosen`), long message boxes are wrapped.
 - Not done yet: 3-4 players tested only with one save (DQIX treats copies of
   the same save as one person: each tags 1); a relay for hosts who can't open
   a port (virtual LAN for now).
