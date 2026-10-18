@@ -14,11 +14,29 @@ ROM="$1"
 [ -f "$ROM" ] || { echo "No ROM given (or it doesn't exist): $ROM"; exit 1; }
 
 echo "== Checking the ROM"
-SUM=$(sha1sum "$ROM" | cut -d' ' -f1)
+# read through stdin: no file name in the output to escape; keep errors to show them
+OUT=$(sha1sum < "$ROM" 2>&1) || true
+SUM=$(printf '%s' "$OUT" | cut -d' ' -f1)
+case "$SUM" in
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+*) # sha1sum missing or failing: try Python before giving up
+   PY=python3; command -v $PY >/dev/null 2>&1 || PY=python
+   SUM=$($PY -c 'import hashlib,sys; h=hashlib.sha1(); f=open(sys.argv[1],"rb"); [h.update(b) for b in iter(lambda: f.read(1<<20), b"")]; print(h.hexdigest())' "$ROM" 2>&1) || true
+   case "$SUM" in
+   [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+   *) echo "   Couldn't read the ROM file: $ROM"
+      echo "   ($OUT)"
+      echo "   ($SUM)"
+      echo "   Is it still being copied, or open in another program? Is it a OneDrive file that isn't downloaded"
+      echo "   (right-click it, Always keep on this device)? Then run this again."
+      exit 1 ;;
+   esac ;;
+esac
 case "$SUM" in
 c7c3014c237900c8281289b8bc76a781969b6278) echo "   Dragon Quest IX (USA): OK" ;;
 *) echo "   This isn't the Dragon Quest IX ROM this build supports."
-   echo "   Expected the USA version (SHA-1 c7c3014c237900c8281289b8bc76a781969b6278), got $SUM."
+   echo "   Expected the USA version (SHA-1 c7c3014c237900c8281289b8bc76a781969b6278), got $SUM"
+   echo "   (file: $ROM, $(wc -c < "$ROM" 2>/dev/null) bytes)."
    echo "   Dump it from your own cartridge; the European and Japanese versions are not supported yet."
    exit 1 ;;
 esac
