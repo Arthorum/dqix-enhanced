@@ -99,6 +99,16 @@ to it: `git checkout bookmark-2026-10-15`.
   join window on Windows (address with Copy, players, Start the game,
   Cancel), the DS Lite photo is the default console until one is picked
   (`console_color_chosen`), long message boxes are wrapped.
+- **nightly6**: DQVC like the original service: each year's cycle starts on
+  the Friday nearest 15 July and every sale keeps its offset from it (2011
+  dates, so sales start on Fridays), days start at 08:00 UTC, and each day
+  serves 12 of the sale's items picked by the date (the original changed
+  daily; its daily picks aren't recorded), serial = 1000 + days since
+  2010-07-01 (the game refuses serials past 16 bits: "I don't seem to have
+  DQVC's latest product information"). With the same pool the game showed
+  the same six on every day, so the daily share is what varies it. UTC
+  offset: `rtc_utc_offset`, carried by sessions and reports
+  (`DQIX_UTC_OFFSET`; old replays: 0).
 - Not done yet: 3-4 players tested only with one save (DQIX treats copies of
   the same save as one person: each tags 1); a relay for hosts who can't open
   a port (virtual LAN for now).

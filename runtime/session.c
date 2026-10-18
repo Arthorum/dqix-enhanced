@@ -225,6 +225,7 @@ static void send_msg(Peer* p, int type, const Buf* b) {
     if (n) put_bytes(p, b->d, n);
 }
 typedef struct { const uint8_t* d; size_t n, pos; int bad; } Rd;
+static int64_t g_utc_off;               /* the host's time zone (rtc_utc_offset) */
 static Rd g_wfc_rd;                     /* the start message's Wi-Fi files, for do_start */
 static uint8_t* g_wfc_buf;              /* host: its own start message (freed after) */
 static const uint8_t* r_get(Rd* r, size_t n) { if (r->pos + n > r->n) { r->bad = 1; return NULL; } const uint8_t* p = r->d + r->pos; r->pos += n; return p; }
@@ -420,21 +421,22 @@ static void spawn_hidden(int k) {
     write_file(save, g_con[k].save, g_con[k].save_len);
     write_file(fw, g_con[k].fw, g_con[k].fw_len);
     /* environment: ours without DQIX_* (tests' scripts, dumps), plus the session's */
-    char extra[8][200];
+    char extra[9][200];
     snprintf(extra[0], 200, "DQIX_HIDDEN=1");
     snprintf(extra[1], 200, "DQIX_SESSION_SHM=%s", g_shm);
     snprintf(extra[2], 200, "DQIX_CONSOLE=%d", k);
     snprintf(extra[3], 200, "DQIX_COUNT=%d", g_n);
     snprintf(extra[4], 200, "DQIX_RTC=%lld", (long long)g_rtc);
     snprintf(extra[5], 200, "DQIX_FW_FILE=%s", fw);
-    snprintf(extra[6], 200, "DQIX_NO_SETTINGS=1");
+    snprintf(extra[6], 200, "DQIX_UTC_OFFSET=%lld", (long long)g_utc_off);
     snprintf(extra[7], 200, "DQIX_NOWINDOW=1");
+    snprintf(extra[8], 200, "DQIX_NO_SETTINGS=1");
     char** cur = env_list();
     int ne = 0; for (char** e = cur; *e; e++) ne++;
     char** env = calloc((size_t)ne + 10, sizeof(char*));
     int m = 0;
     for (char** e = cur; *e; e++) if (strncmp(*e, "DQIX_", 5) && **e != '=') env[m++] = *e;
-    for (int i = 0; i < 8; i++) env[m++] = extra[i];
+    for (int i = 0; i < 9; i++) env[m++] = extra[i];
     env[m] = NULL;
 #ifdef _WIN32
     char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH);
@@ -506,7 +508,7 @@ typedef struct {
     int (*core_main)(int, char**);
     CoreHost host;
     char* env[12];
-    char envbuf[12][300];
+    char envbuf[14][300];
     char* argv[8];
     char argbuf[3][300];
 #ifdef _WIN32
@@ -618,6 +620,7 @@ static int host_console(int k) {
     snprintf(h->envbuf[e++], 300, "DQIX_RTC=%lld", (long long)g_rtc);
     snprintf(h->envbuf[e++], 300, "DQIX_FW_FILE=%s", fw);
     snprintf(h->envbuf[e++], 300, "DQIX_NO_SETTINGS=1");
+    snprintf(h->envbuf[e++], 300, "DQIX_UTC_OFFSET=%lld", (long long)g_utc_off);
     snprintf(h->envbuf[e++], 300, "DQIX_NOWINDOW=1");
     if (getenv("DQIX_HIDDEN_DUMP") && getenv("DQIX_DUMP_AT")) {            /* tests: the hidden screens too */
         snprintf(h->envbuf[e++], 300, "DQIX_DUMP=%s%d,1", getenv("DQIX_HIDDEN_DUMP"), k + 1);
@@ -722,6 +725,7 @@ static void do_start(void) {
     snprintf(g_shm, sizeof g_shm, "%08x%04x", (unsigned)(g_rtc ^ (int64_t)(now_ms() * 1000)), (unsigned)rand() & 0xFFFF);
     if (!g_host) { /* the host chose the name */ }
     rtc_set_base(g_rtc);
+    rtc_set_utc_offset(g_utc_off);
     if (!air_init(g_shm, g_me, g_n)) { news("could not set up the shared memory"); g_state = 5; return; }
     for (int k = 0; k < g_n; k++) air_set_name(k, g_con[k].name);
     get_wfc(&g_wfc_rd);
@@ -744,7 +748,8 @@ static void do_start(void) {
 static void host_start(void) {
     g_delay = compute_delay();
     Buf b = { 0 };
-    b_u8(&b, (uint8_t)g_n); b_u8(&b, (uint8_t)g_delay); b_u64(&b, (uint64_t)g_rtc);
+    g_utc_off = rtc_utc_offset();
+    b_u8(&b, (uint8_t)g_n); b_u8(&b, (uint8_t)g_delay); b_u64(&b, (uint64_t)g_rtc); b_u64(&b, (uint64_t)g_utc_off);
     char shm[64]; snprintf(shm, sizeof shm, "%s", ""); (void)shm;
     for (int k = 0; k < g_n; k++) put_console(&b, &g_con[k]);
     size_t wfc_at = b.n;
@@ -900,7 +905,7 @@ static void handle(int i, int type, Rd* r) {
         break;
     }
     case M_START: {
-        int n = r_u8(r), d = r_u8(r); int64_t rtc = (int64_t)r_u64(r);
+        int n = r_u8(r), d = r_u8(r); int64_t rtc = (int64_t)r_u64(r); g_utc_off = (int64_t)r_u64(r);
         if (n < 1 || n > SESSION_MAX) break;
         lock();
         g_n = n; g_delay = d; g_rtc = rtc;
@@ -1213,7 +1218,7 @@ void session_boot(void) {
         /* tests: N consoles on this PC only, the others' buttons from DQIX_INPUT_1..3, each its own MAC */
         int n = atoi(e + 6); if (n < 2) n = 2; if (n > SESSION_MAX) n = SESSION_MAX;
         g_host = 1; g_me = 0; g_n = n; g_local = 1;
-        g_rtc = rtc_base();
+        g_rtc = rtc_base(); g_utc_off = rtc_utc_offset();
         for (int k = 0; k < n; k++) {
             my_console(&g_con[k]);
             snprintf(g_con[k].name, sizeof g_con[k].name, "Console %d", k + 1);

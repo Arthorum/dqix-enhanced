@@ -61,6 +61,8 @@ uint32_t gx_read(uint32_t off);
 int gx_irq_line(void);
 int64_t rtc_base(void);                  /* clock start (local time, seconds) */
 void rtc_set_base(int64_t base);         /* sessions: everyone uses the host's */
+int64_t rtc_utc_offset(void);             /* local time - UTC, seconds (DQIX_UTC_OFFSET) */
+void rtc_set_utc_offset(int64_t off);
 /* reports (report.c) */
 void report_write(const char* reason);
 void report_log_line(const char* line);

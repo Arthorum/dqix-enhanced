@@ -96,6 +96,7 @@ void report_write(const char* reason) {
         fprintf(f, "reason: %s\n", reason);
         fprintf(f, "frame: %llu\n", (unsigned long long)g_frame);
         fprintf(f, "rtc_base: %lld\n", (long long)rtc_base());
+        fprintf(f, "utc_offset: %lld\n", (long long)rtc_utc_offset());
         fprintf(f, "boot_save: %s\n", had_boot_save ? "yes" : "no (new game)");
         fprintf(f, "version: %s (%s)\n", DQIX_VERSION, DQIX_VERSION_DATE);
         fprintf(f, "built: %s %s\n", __DATE__, __TIME__);
@@ -104,8 +105,8 @@ void report_write(const char* reason) {
         if (g_wireless.mac_set) fprintf(f, "mac: %02x:%02x:%02x:%02x:%02x:%02x\n", g_wireless.mac[0], g_wireless.mac[1],
                                         g_wireless.mac[2], g_wireless.mac[3], g_wireless.mac[4], g_wireless.mac[5]);
         fprintf(f, "\nreplay: copy boot.sav (if any) to a save file, then run\n"
-                   "  DQIX_RTC=%lld DQIX_INPUT_FILE=input.txt dqix <rom> <extract> %llu 1 <save file>\n",
-                (long long)rtc_base(), (unsigned long long)g_frame + 1);
+                   "  DQIX_RTC=%lld DQIX_UTC_OFFSET=%lld DQIX_INPUT_FILE=input.txt dqix <rom> <extract> %llu 1 <save file>\n",
+                (long long)rtc_base(), (long long)rtc_utc_offset(), (unsigned long long)g_frame + 1);
         fprintf(f, "  in this folder (it reads wireless.bin from here)%s\n", g_wireless.mac_set ? ", with DQIX_MAC set to the mac line" : "");
         fclose(f);
     }

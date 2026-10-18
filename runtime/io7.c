@@ -406,6 +406,27 @@ int64_t rtc_base(void) {
     }
     return g_rtc_base;
 }
+/* how far local time (the DS's clock) is ahead of UTC, in seconds: things the
+ * original services did at a fixed UTC time (DQVC's new stock at 08:00 UTC)
+ * use it. Replays and sessions carry it along (DQIX_UTC_OFFSET), so they
+ * don't depend on the time zone of the PC that runs them. */
+static int64_t g_utc_off = INT64_MIN;
+void rtc_set_utc_offset(int64_t off) { g_utc_off = off; }
+int64_t rtc_utc_offset(void) {
+    if (g_utc_off == INT64_MIN) {
+        const char* e = getenv("DQIX_UTC_OFFSET");
+        if (e) g_utc_off = strtoll(e, NULL, 10);
+        else if (getenv("DQIX_RTC")) g_utc_off = 0;                    /* an older replay: no zone known */
+        else {
+            time_t now = time(NULL);
+            struct tm lt = *localtime(&now);
+            struct tm gt = *gmtime(&now);
+            lt.tm_isdst = 0; gt.tm_isdst = 0;
+            g_utc_off = (int64_t)difftime(mktime(&lt), mktime(&gt));
+        }
+    }
+    return g_utc_off;
+}
 
 /* ================================================================ registers */
 static uint32_t reg7_read32(uint32_t off) {

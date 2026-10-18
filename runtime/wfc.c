@@ -139,12 +139,15 @@ static int dns(const uint8_t* q, int len) {
  *          shows six of them, picked per player
  *   "YYYY/MM/DD hh:mm:ss\0" "YYMMDD\0", 0xFF to 32 bytes, then the 4 bytes
  *
- * wfc/<game>/dqvc.txt, when present, rotates the stock every week, on the
- * same calendar as the original service (which ran the same 52 sales every
- * year from July 2010 to 2014):
- *   week MM/DD <title>      a new week, starting on that date every year
+ * wfc/<game>/dqvc.txt, when present, rotates the stock like the original
+ * service (which ran the same 52 sales every year from July 2010 to 2014):
+ *   week MM/DD <title>      a sale and the date it started in 2011-12
  *   <item id> <price> <quantity> <name...>
- * The DS's clock (your PC's) picks the week that started most recently.
+ * Each year's cycle starts on the Friday nearest 15 July, every sale keeps
+ * its distance from that start (so they start on Fridays), and the stock
+ * changes every day at 08:00 UTC: a share of the sale's items picked by the
+ * date (DQVC_DAILY_ITEMS), from which the game shows six. The DS's clock
+ * (your PC's) decides which day it is.
  */
 static void rc4(const uint8_t* key, int kl, uint8_t* d, int n) {
     uint8_t S[256]; int i, j = 0;
@@ -169,34 +172,58 @@ static int seal(uint8_t* d, int n) {
 }
 static void put32le(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 
+/* days since 1970-01-01 for a date (proleptic Gregorian) */
+static int64_t civil_days(int y, int m, int d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+static int64_t floor_div(int64_t a, int64_t b) { return a / b - ((a % b != 0) && ((a < 0) != (b < 0))); }
+static int civil_year(int64_t day) { int y = (int)(1970 + day / 366); while (civil_days(y + 1, 1, 1) <= day) y++; return y; }
+/* the Friday nearest 15 July of year y (1970-01-01 was a Thursday) */
+static int64_t cycle_start(int y) {
+    int64_t d = civil_days(y, 7, 15);
+    int dow = (int)(((d + 4) % 7 + 7) % 7);                 /* 0 Sunday .. 5 Friday */
+    int delta = 5 - dow; if (delta > 3) delta -= 7; if (delta < -3) delta += 7;
+    return d + delta;
+}
+
 static char* load_file(const char* path, int* size);
 typedef struct { uint32_t id, price, qty; } StockItem;
+#define DQVC_DAILY_ITEMS 12             /* of the week's pool, per day */
 /* This week's stock for the game, built from dqvc.txt: a malloc'd file and
  * its name, or NULL (no schedule). */
 static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len, char* title, int titlecap) {
     char p[700]; snprintf(p, sizeof p, "%s/%s/dqvc.txt", g_dir, gamecd);
     int n = 0; char* txt = load_file(p, &n);
     if (!txt) return NULL;
-    /* each week's start (month/day) */
-    static const int DOY[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    /* each sale's start, as days after the first one (the dates are from the
+     * 2011-12 cycle: July-December 2011, January-July 2012) */
     int starts[128]; int weeks = 0;
     for (char* l = txt; l && *l; ) {
         char* e = strchr(l, '\n');
         int mo, d;
-        if (!strncmp(l, "week", 4) && weeks < 128) starts[weeks++] = sscanf(l + 4, " %d/%d", &mo, &d) == 2 && mo >= 1 && mo <= 12 ? DOY[mo - 1] + d - 1 : -1;
+        if (!strncmp(l, "week", 4) && weeks < 128)
+            starts[weeks++] = sscanf(l + 4, " %d/%d", &mo, &d) == 2 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31
+                              ? (int)(civil_days(mo >= 7 ? 2011 : 2012, mo, d) - civil_days(2011, 7, 15)) : -1;
         l = e ? e + 1 : NULL;
     }
-    if (!weeks || starts[0] < 0) { free(txt); return NULL; }
-    /* today, on the DS's clock (local time) */
-    time_t now = (time_t)rtc_base() + (time_t)(g_frame / 60);
-    struct tm* t = gmtime(&now);                             /* rtc_base is already local time */
-    int today = DOY[t->tm_mon] + t->tm_mday - 1;
-    if (t->tm_mon == 1 && t->tm_mday == 29) today = DOY[1] + 27;  /* 29 Feb counts as 28 Feb */
-    int pos = (today - starts[0] + 365) % 365;               /* days since this cycle's first week */
+    if (!weeks || starts[0] != 0) { free(txt); return NULL; }
+    /* Now, in UTC, with days starting at 08:00 UTC: when the original service
+     * put out each day's stock. Each year's cycle starts on the Friday nearest
+     * 15 July (the sales started on Fridays at 08:00 GMT). */
+    time_t now = (time_t)rtc_base() + (time_t)(g_frame / 60);               /* the DS's clock (local time) */
+    int64_t day = floor_div((int64_t)now - rtc_utc_offset() - 8 * 3600, 86400);   /* days since 1970, by 08:00 UTC */
+    int y = civil_year(day);
+    int64_t cycle = cycle_start(y);
+    if (day < cycle) cycle = cycle_start(--y);
     int w = 0;
-    for (int i = 0; i < weeks; i++) if (starts[i] >= 0 && (starts[i] - starts[0] + 365) % 365 <= pos) w = i;
-    int cycle_year = t->tm_year + 1900 - (today < starts[0] ? 1 : 0);
-    int64_t abs_week = (int64_t)(cycle_year - 2010) * weeks + w;
+    for (int i = 0; i < weeks; i++) if (starts[i] >= 0 && starts[i] <= day - cycle) w = i;
+    int64_t abs_week = (int64_t)(y - 2010) * weeks + w;
+    int64_t abs_day = day - civil_days(2010, 7, 1);         /* a new stock file every day */
     /* the items of week w */
     StockItem items[200]; int ni = 0; int cur = -1;
     title[0] = 0;
@@ -212,9 +239,22 @@ static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len,
     }
     free(txt);
     if (!ni) return NULL;
+    /* Each day's stock: the original changed daily within the week's theme
+     * (which items it chose each day isn't recorded), so each day takes its
+     * own share of the week's pool, picked by the date; the game then shows
+     * six of them. */
+    int full = ni;
+    if (ni > DQVC_DAILY_ITEMS) {
+        uint32_t r = 0x9E3779B9u ^ (uint32_t)abs_day * 2654435761u;
+        int pick[200]; for (int i = 0; i < ni; i++) pick[i] = i;
+        for (int i = ni - 1; i > 0; i--) { r = r * 1103515245u + 12345u; int j = (int)((r >> 8) % (uint32_t)(i + 1)); int t = pick[i]; pick[i] = pick[j]; pick[j] = t; }
+        int keep[200] = { 0 }; for (int i = 0; i < DQVC_DAILY_ITEMS; i++) keep[pick[i]] = 1;
+        int o = 0; for (int i = 0; i < ni; i++) if (keep[i]) items[o++] = items[i];     /* in the list's order */
+        ni = o;
+    }
     int body = 16 + 8 + 8 + 16 + ni * 20;
     uint8_t* f = calloc(1, (size_t)body + 32 + 4);
-    uint32_t serial = 1000 + (uint32_t)abs_week;           /* new every week, so the game takes it as new */
+    uint32_t serial = 1000 + (uint32_t)abs_day;            /* new every day, so the game takes it as new (it refuses numbers past 16 bits) */
     put32le(f, serial); put32le(f + 4, (uint32_t)body); put32le(f + 8, 27); put32le(f + 12, 2);
     uint8_t* q = f + 16;
     static const uint8_t t65[] = { 0x65, 0, 1, 0, 0, 0, 0, 0 }, t64[] = { 0x64, 0, 1, 0, 20, 0, 0, 0 };
@@ -229,8 +269,8 @@ static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len,
       strftime(ds, sizeof ds, "%y%m%d", g); memcpy(q + 20, ds, 7);
       memset(q + 27, 0xFF, 5); }
     *len = seal(f, body + 32);
-    snprintf(name, (size_t)namecap, "dqvc_w%04d.bin", (int)abs_week);
-    ev("wfc: DQVC week %d of %d (%s): %d items\n", w + 1, weeks, title, ni);
+    snprintf(name, (size_t)namecap, "dqvc_d%05d.bin", (int)abs_day);
+    ev("wfc: DQVC week %d of %d (%s, sale %lld), day %lld: %d of its %d items\n", w + 1, weeks, title, (long long)abs_week, (long long)abs_day, ni, full);
     return f;
 }
 
@@ -379,7 +419,7 @@ static char* http(const char* req, int reqlen, int* outlen) {
         else if (!strcmp(action, "contents")) {
             int okn = name[0] && !strstr(name, "..") && !strchr(name, '/') && !strchr(name, '\\');
             snprintf(p, sizeof p, "%s/%s/%s", g_dir, okcd ? gamecd : "none", name);
-            if (okn && okcd && !strncmp(name, "dqvc_w", 6)) {
+            if (okn && okcd && !strncmp(name, "dqvc_", 5)) {
                 char wn[64], wt[128]; int wl = 0;
                 bin = (char*)dqvc_week(gamecd, wn, sizeof wn, &wl, wt, sizeof wt);
                 if (bin && strcmp(wn, name)) { free(bin); bin = NULL; }     /* a week that is over */
