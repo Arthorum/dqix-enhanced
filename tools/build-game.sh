@@ -27,7 +27,7 @@ PY=python3; command -v $PY >/dev/null 2>&1 || PY=python
 echo "== Extracting the game's code"
 $PY tools/extract_rom.py "$ROM" build/extract
 echo "== Recompiling it to C (about a minute)"
-$PY recomp/build.py --extract build/extract --config config/usa/arm9 --out build/recomp --hle hle.txt --interpret interpret.txt --patch patches.txt
+$PY recomp/build.py --extract build/extract --config config/usa/arm9 --out build/recomp --hle hle.txt --interpret interpret.txt --patch patches.txt --tags tags.txt
 $PY recomp/arm7.py --extract build/extract --out build/recomp7 --hle hle7.txt
 
 # The program's icon: the game's own (the one the DS menu shows), made from the

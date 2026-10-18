@@ -17,10 +17,11 @@ bottom with the version they arrived in.
 
 Optional ways to play the DS never had, all off by default (Modern menu).
 
-- [ ] **Widescreen**: the 3D field drawn wider than the DS screen, with the
-      2D parts (text boxes, menus) kept in place. Experimental at first:
-      characters and objects the game thinks are off screen may pop in at
-      the edges until that's worked out.
+- [ ] **Widescreen, finishing touches**: things the game thinks are off
+      screen can appear a moment late at the far edges; find where the game
+      decides what's on screen and widen it (only for the picture). In
+      battles the sky picture is only as wide as the DS's screen, so the far
+      sides show the game's paler backup sky.
 - [ ] **A free camera**: turn the camera with the right stick (and maybe
       tilt and zoom, where the game's areas allow it).
 - [ ] Check the analog stick in battles and every kind of menu.
@@ -64,6 +65,8 @@ the same room.
 
 ## Done
 
+- [x] Widescreen: the world drawn wider, the top screen as a minimap; the
+      stylus arrow hidden while walking with the stick (v27-nightly13).
 - [x] The game's own icon for dqix.exe and its window, made from the ROM;
       dqix.exe starts the game when double-clicked (v27-nightly12).
 - [x] Modern options: walk in any direction with the left stick; the top

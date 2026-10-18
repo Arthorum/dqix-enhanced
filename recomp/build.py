@@ -176,6 +176,7 @@ class Recompiler:
         self.mods = mods
         self.by_name = {m.name: m for m in mods}
         self.stats = defaultdict(int)
+        self.tags = {}             # (module, call address) -> tag: see --tags
         self.problems = []
         self.pending = []
 
@@ -488,6 +489,9 @@ class Recompiler:
                 s = branch(i.target, a)
             elif i.flow == CALL:
                 s = f"c->r[14] = {h(ret_addr)}; " + self.call_stmt(mod, a, i.target, i.target_thumb)
+                tag = self.tags.get((mod.name, a))
+                if tag:                # what this call draws carries the tag (runtime: g_gx_tag)
+                    s = f"{{ int gt = gx_tag_begin({tag}); {s} gx_tag_end(gt); }}"
             elif i.flow == RET:
                 s = (i.body + " " if i.body else "") + "return;"
             elif i.flow == EXC_RET:
@@ -570,12 +574,18 @@ def main():
     ap.add_argument("--hle", help="file listing '<module> <addr>' functions the runtime provides instead")
     ap.add_argument("--interpret", help="file listing '<module> <addr>' functions to run in the interpreter (code that changes at run time)")
     ap.add_argument("--patch", help="file listing '<module> <addr> <new 32-bit ARM word>' instruction overrides (e.g. removing anti-piracy traps)")
+    ap.add_argument("--tags", help="file listing '<module> <call addr> <tag>': the 3D drawn during these calls carries the tag (e.g. the stylus arrow, hidden while walking with a stick); the game's code is unchanged")
     args = ap.parse_args()
 
     mods = load_modules(args.extract, args.config)
     if args.patch:
         apply_patches(mods, args.patch)
     rc = Recompiler(mods)
+    if args.tags:
+        for line in open(args.tags):
+            line = line.split("#")[0].split()
+            if len(line) == 3:
+                rc.tags[(line[0], int(line[1], 16))] = int(line[2], 0)
     interp = set()
     if args.interpret:
         for line in open(args.interpret):

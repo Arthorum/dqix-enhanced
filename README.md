@@ -32,10 +32,14 @@ exactly like the original, and it can also do things the DS never could.
 
 **Modern options** (all off at first; with them off, the game is the original)
 - **Walk in any direction with the left stick**: the stick steers like the
-  DS stylus while you walk around, instead of the D-pad's 8 directions.
-- **Top screen in the corner**: the field fills a widescreen window or
-  monitor, with the map and party small in the corner.
-- Coming: full widescreen and a free camera (see the roadmap).
+  DS stylus while you walk around, instead of the D-pad's 8 directions
+  (without the stylus's arrow on the screen).
+- **Widescreen**: the world drawn wider than the DS's screen, so you see
+  more of it left and right, with the map and party small in the corner like
+  a minimap. Menus slide over to make room; in battles the commands sit in
+  the corner. 16:9 in a window, as wide as your monitor in fullscreen.
+- **Top screen in the corner**: the same, with the field as on the DS.
+- Coming: a free camera (see the roadmap).
 
 **Multiplayer, from anywhere**
 - **Tag mode** (canvassing for guests) and **co-op** (visiting and inviting

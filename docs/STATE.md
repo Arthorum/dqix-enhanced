@@ -181,6 +181,30 @@ to it: `git checkout bookmark-2026-10-15`.
   console is freed (output to last-run.log; restarts use CREATE_NO_WINDOW).
   Tested: the icon read back from the exe's resources and from the X window;
   no-argument start on Linux. Not tested: the Windows no-console start.
+- **nightly13**: *Widescreen* (Modern / View, `layout = wide`, Enhanced
+  only). gpu3d.c: with g_wide_side = S > 0 every polygon is also clipped a
+  second time with x scaled by 256 / (256 + 2S) (wide_submit, after the
+  facing test, from tmp_vtx), screen x mapped onto 0..256+2S; polygons with a
+  smaller viewport are copied unwidened, shifted by S. Its own banks and
+  y-sorted list (wrender_list), used by gl_frame when the whole frame was
+  made with the same S; the normal list, polygon counts, box tests and the
+  software renderer are untouched (checked: same save and 135 identical 2D
+  frames with the stacked and wide layouts). gl_render.c: 3D buffers and
+  the composed picture (256+2S)*scale wide; FS_COMP continues the 3D at the
+  sides on lines where the 8 edge columns show 3D (with that pixel's blend /
+  fade), black otherwise; the other screen composed in the middle.
+  Frontend: the 3D screen big and wide, the other a third in the top left
+  (minimap); when 2D covers that corner (>5% of it: menus, title) it eases
+  to the corner layout (g_wide_mix); 3D on the top screen (battles): the
+  touch screen at half size bottom left; a black small screen isn't drawn.
+  S = 43 (16:9), fullscreen: the monitor's aspect (max 128).
+  *Stylus arrow hidden while stick-walking*: tags.txt + recomp --tags wrap
+  the 4 draw calls of func_02096c38 with gx_tag_begin/end; the game queues
+  its GX commands (0x0210CF78 -> count + 192 words, sent later), so
+  gx_tag_end notes the TEXIMAGE_PARAMs queued during the call and polygons
+  with those textures that frame carry the tag; hidden (HPoly.hidden) only in
+  what's drawn, while analog walk is on and the mouse isn't held. Checked:
+  only the arrow's pixels differ, save identical.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

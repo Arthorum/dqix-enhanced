@@ -192,6 +192,11 @@ void input_update(void) {
             if (getenv("DQIX_ANALOG")) g_analog_walk = 1; }
         for (int i = 0; i < nst; i++) if ((long long)g_frame >= st[i][0] && (long long)g_frame < st[i][1]) { g_fe_stick_x = (int)st[i][2]; g_fe_stick_y = (int)st[i][3]; }
     }
+    {   /* the stylus arrow (tags.txt, tag 1): hidden while walking with the stick, back for the mouse.
+         * Only the picture: the game draws it either way. */
+        extern int g_gx_hide;
+        g_gx_hide = g_analog_walk && !g_fe_touch ? (g_gx_hide | 1) : (g_gx_hide & ~1);
+    }
     if (g_fe_touch) { g_touch_down = 1; g_touch_x = g_fe_tx; g_touch_y = g_fe_ty; g_walk_frames = 0; }
     else { int tx, ty;
         if (!g_touch_down && stick_walk(&tx, &ty)) { g_touch_down = 1; g_touch_x = tx; g_touch_y = ty; }

@@ -14,6 +14,8 @@ typedef struct {
     int win_w, win_h;
     float ox, oy, sc, cw, ch;
     float top[4], bot[4];                             /* screen rects on the canvas: x, y, w, h */
+    float topx[2], botx[2];                           /* each screen in the composed picture: x offset, width (DS pixels) */
+    int front;                                        /* screens overlapping: 1 = the bottom one in front */
     int lcd, lcd_color, grid, ghost;                  /* DS Lite screen filter and its parts */
     float backlight;                                  /* 0..1 */
     int shell;                                        /* draw the console around the screens */
@@ -24,6 +26,7 @@ typedef struct {
 void gl_set_skin(const uint8_t* rgba, int w, int h);
 void gl_present(const GlPresent* v);
 uint8_t* gl_read_window(int w, int h);
+int gl_wide_shown(int* side);                         /* widescreen: the screen composed wide (0 top, 1 bottom, -1 none) */
 uint8_t* gl_read_full(int* w, int* h);
 void gl_read_screens(uint32_t out[2][256 * 192]);
 int gl_read_3d(uint8_t* out, int* w, int* h);

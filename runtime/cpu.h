@@ -150,6 +150,10 @@ void recomp_trace_enter(uint32_t addr);
 #else
 #define RECOMP_TRACE_HOOK(a) ((void)0)
 #endif
+/* Around calls listed in tags.txt: the 3D polygons drawn by the call carry
+ * the tag (gpu3d.c), so the renderers can leave them out. */
+int gx_tag_begin(int tag);
+void gx_tag_end(int previous);
 #define RECOMP_CYC(n) (g_cyc += (n))
 #define RECOMP_ENTER(a) do { if (__builtin_expect(g_cyc >= CYC_SYNC, 0)) recomp_budget_expired(c); RECOMP_TRACE_HOOK(a); } while (0)
 #define RECOMP_LOOP() do { if (__builtin_expect(g_cyc >= CYC_SYNC, 0)) recomp_loop_expired(c); } while (0)

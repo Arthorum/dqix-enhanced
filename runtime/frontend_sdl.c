@@ -46,6 +46,9 @@ static SDL_Texture* g_tex;
 static SDL_AudioDeviceID g_audio;
 static SDL_GameController* g_pad;
 static int g_side_by_side, g_corner, g_scale = 2, g_fullscreen;   /* g_corner: the top screen small, beside the bottom one */
+static int g_wide;                                                /* widescreen: the 3D screen wider than the DS's, the other small in its corner */
+static float g_wide_mix = 1.0f;                                   /* widescreen: 1 = the field wide, 0 = beside the small screen (2D under its corner) */
+static int g_small_blank;                                         /* widescreen: the small screen shows nothing (all black): not drawn */
 static uint64_t g_next_frame, g_perf_freq;
 static int g_fast;
 static uint32_t g_fps_frames; static uint64_t g_fps_t0;
@@ -179,11 +182,50 @@ static const char* BACKLIGHT_NAME[5] = { "", "low", "medium", "high", "max" };
 /* Canvas (in DS pixels) for the current layout, and where the screens sit on it.
  * The DS Lite: 0.24 mm per pixel; the lid and base are 133 mm wide; the
  * screens are 90 pixels (21.5 mm) apart. */
+/* Widescreen: DS pixels to add left and right of the 3D picture. 16:9 in a
+ * window; in fullscreen, as wide as the monitor (up to 2:1 more). */
+static int wide_side_target(void) {
+    if (!(g_gl && g_wide && !g_side_by_side)) return 0;
+    int side = 43;                                                /* (192 * 16 / 9 - 256) / 2 */
+    if (g_fullscreen && g_win) {
+        int w, h; SDL_GetWindowSize(g_win, &w, &h);
+        if (h > 0) side = (int)lroundf(((float)w / (float)h * 192.0f - 256.0f) / 2.0f);
+    }
+    return side < 0 ? 0 : side > 128 ? 128 : side;
+}
+
 static void canvas_layout(GlPresent* v, int ww, int wh) {
     memset(v, 0, sizeof *v);
-    int corner = g_gl && g_corner && !g_side_by_side;
-    int shell = g_gl && g_opt.shell && !g_side_by_side && !corner;
-    if (corner) {
+    int wide = g_gl && g_wide && !g_side_by_side;
+    int corner = g_gl && g_corner && !g_side_by_side && !wide;
+    int shell = g_gl && g_opt.shell && !g_side_by_side && !corner && !wide;
+    int side = 0, which = -1;
+    if (g_gl) which = gl_wide_shown(&side);                       /* how the last picture was composed */
+    v->topx[0] = v->botx[0] = (float)side; v->topx[1] = v->botx[1] = 256;
+    if (wide) {
+        /* Modern: the screen with the 3D (the field) fills the window, wider than
+         * the DS's; the other screen sits small in the top left corner, like a
+         * minimap. When the game shows 2D there (menus, the title), the field
+         * slides over to make room: the corner layout, in the same window
+         * (g_wide_mix, from wide_update()).
+         * With the 3D on the top screen (battles), the touch screen (the
+         * commands) sits at half size in the bottom left corner instead. */
+        float S = (float)wide_side_target();
+        float t = which == 0 ? 1.0f : g_wide_mix * g_wide_mix * (3 - 2 * g_wide_mix);   /* eased */
+        v->cw = 256 + 2 * S; v->ch = 192;
+        float* big = which == 0 ? v->top : v->bot, *small = which == 0 ? v->bot : v->top;
+        float* bigx = which == 0 ? v->topx : v->botx;
+        float wx0 = S, wtx0 = (float)side, ww = 256;              /* wide: the field (or, without 3D, the DS's picture) */
+        if (which >= 0) { wx0 = S - (float)side; wtx0 = 0; ww = 256 + 2 * (float)side; }
+        float cx0 = v->cw - 256, ctx0 = (float)side, cww = 256;   /* corner: the DS's picture at the right */
+        big[0] = cx0 + (wx0 - cx0) * t; big[2] = cww + (ww - cww) * t;
+        bigx[0] = ctx0 + (wtx0 - ctx0) * t; bigx[1] = big[2];
+        big[1] = 0; big[3] = 192;
+        if (which == 0) { small[2] = 128; small[3] = 96; small[0] = 2; small[1] = 192 - 96 - 2; }
+        else { small[0] = small[1] = 2 * t; small[2] = 256.0f / 3; small[3] = 64; }
+        if (g_small_blank && t > 0.99f) small[2] = small[3] = 0;   /* black (battle intros, fades): leave the field whole */
+        v->front = which == 0;                                   /* the small one in front */
+    } else if (corner) {
         /* Modern: the bottom screen (the field) as big as the window allows, the
          * top screen (map, party) a third of its size in the top left corner:
          * the canvas is 16:9 */
@@ -208,7 +250,7 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
         v->cw = 256; v->ch = (float)(384 + gap);
         v->top[0] = v->bot[0] = 0; v->top[1] = 0; v->bot[1] = (float)(192 + gap);
     }
-    v->top[2] = v->bot[2] = 256; v->top[3] = v->bot[3] = 192;
+    if (!wide) { v->top[2] = v->bot[2] = 256; v->top[3] = v->bot[3] = 192; }
     if (corner) { v->top[2] = 256.0f / 3; v->top[3] = 64; }
     v->win_w = ww; v->win_h = wh;
     float sc = fminf((float)ww / v->cw, (float)wh / v->ch);
@@ -295,7 +337,7 @@ static void settings_load(void) {
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
         else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
-        else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); }
+        else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); g_wide = !strcmp(val, "wide"); }
         else if (!strcmp(key, "analog_walk")) g_analog_walk = atoi(val) != 0;
         else if (!strcmp(key, "fullscreen")) g_fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "dslite_filter")) g_opt.lcd = atoi(val) != 0;
@@ -340,7 +382,7 @@ static void settings_save(void) {
     fprintf(f, "# window size: 1 to 8 times the DS screens (F3)\n");
     fprintf(f, "window_scale = %d\n", g_scale);
     fprintf(f, "# stacked, side_by_side or corner (the top screen small in the corner; F2)\n");
-    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : g_corner ? "corner" : "stacked");
+    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : g_wide ? "wide" : g_corner ? "corner" : "stacked");
     fprintf(f, "# Modern: the left stick walks in any direction (0 or 1)\n");
     fprintf(f, "analog_walk = %d\n", g_analog_walk);
     fprintf(f, "# 0 or 1 (F11)\n");
@@ -608,7 +650,12 @@ static int to_touch(int wx, int wy, int* tx, int* ty, int clamp) {
         canvas_layout(&v, ww, wh);
         lx = ((float)wx + 0.5f - v.ox) / v.sc; ly = ((float)wy + 0.5f - v.oy) / v.sc;
     } else { canvas_layout(&v, 1, 1); SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly); }
-    int x = (int)floorf(lx - v.bot[0]), y = (int)floorf(ly - v.bot[1]);
+    if (v.front == 0 && v.top[2] < 256 && lx >= v.top[0] && lx < v.top[0] + v.top[2] && ly >= v.top[1] && ly < v.top[1] + v.top[3])
+        return 0;                                                 /* on the small top screen in front of it */
+    int side = 0; if (g_gl) gl_wide_shown(&side);
+    if (g_gl && v.bot[2] <= 0) return 0;                         /* not shown */
+    float bw = v.bot[2] > 0 ? v.bot[2] : 256, bh = v.bot[3] > 0 ? v.bot[3] : 192, bx = v.botx[1] > 0 ? v.botx[1] : 256;
+    int x = (int)floorf((lx - v.bot[0]) * bx / bw + (g_gl ? v.botx[0] - (float)side : 0)), y = (int)floorf((ly - v.bot[1]) * 192.0f / bh);
     if (clamp) { x = x < 0 ? 0 : x > 255 ? 255 : x; y = y < 0 ? 0 : y > 191 ? 191 : y; }
     if (x < 0 || x > 255 || y < 0 || y > 191) return 0;
     *tx = x; *ty = y;
@@ -732,9 +779,48 @@ static void window_shot_hook(int w, int h) {
     free(rgb);
 }
 
+/* Widescreen: is there 2D (a menu, the title) where the small screen sits on
+ * the big one? Then slide to the corner layout, and back when it's only the
+ * field again. From the 3D screen's last picture: pixels where no 2D layer
+ * covers the 3D are the field. */
+extern uint8_t g_comp_info[256 * 192 * 4];
+extern int g_comp_has3d;
+extern uint32_t g_engine_out[2][256 * 192];
+static void wide_update(int a_on_top) {
+    if (!g_wide) { g_wide_mix = 1.0f; return; }
+    int side = 0, which = gl_wide_shown(&side);
+    {   /* the small screen: the one without the 3D (engine B), or the top one */
+        int small_top = which != 0;
+        int eng = small_top == a_on_top ? 0 : 1;
+        const uint32_t* px = g_engine_out[eng];
+        int blank = 1;
+        for (int i = 0; i < 256 * 192 && blank; i += 7) if (px[i] & 0xFFFFFF) blank = 0;
+        g_small_blank = blank;
+    }
+    int covered = 1;
+    if (which == 0) covered = 0;                                  /* 3D on the top screen: no sliding */
+    else if (which == 1 && g_comp_has3d) {
+        int n2d = 0, n = 0;
+        for (int y = 2; y < 66; y += 2)
+            for (int x = 0; x < 46; x += 2) { n++; if ((g_comp_info[(y * 256 + x) * 4] & 3) == 0) n2d++; }
+        covered = n2d * 20 > n;                                   /* more than 5% */
+    }
+    static int frames;                                            /* how long it has been like this */
+    static int last = -1;
+    if (covered != last) { last = covered; frames = 0; } else frames++;
+    float target = g_wide_mix;
+    if (covered && frames >= 1) target = 0.0f;                   /* make room quickly */
+    if (!covered && frames >= 20) target = 1.0f;                  /* back to wide once it stays clear */
+    float step = 1.0f / 12.0f;
+    if (g_wide_mix < target) g_wide_mix = fminf(target, g_wide_mix + step);
+    else if (g_wide_mix > target) g_wide_mix = fmaxf(target, g_wide_mix - step);
+}
+
 static void present_gl(void) {
+    g_wide_side = g_classic ? 0 : wide_side_target();            /* the next 3D frames (only the picture changes) */
     uint16_t pow; memcpy(&pow, &g_io[0x304], 2);
     gl_compose((pow >> 15) & 1, pow & 1);
+    wide_update((pow >> 15) & 1);
     gl_dump_hook();
     test_hooks();
     int w, h; SDL_GL_GetDrawableSize(g_win, &w, &h);
@@ -799,7 +885,7 @@ static void menu_sync(void) {
         menu_enable(MI_SES_HOST, !in); menu_enable(MI_SES_JOIN, !in);
         menu_enable(MI_NET, !in);                            /* a session uses the built-in Wi-Fi only (the PCs must agree) */
     }
-    int stacked = !g_side_by_side && !(g_corner && g_gl);
+    int stacked = !g_side_by_side && !((g_corner || g_wide) && g_gl);
     menu_check(MI_PAUSE, g_paused);
     menu_check(MI_UPDATE_AUTO, g_update_auto);
     menu_check(MI_TURBO, g_turbo);
@@ -822,7 +908,8 @@ static void menu_sync(void) {
     for (int i = 0; i < N_SHELLS; i++) { menu_check(MI_SHELLC0 + i, g_opt.shell_color == i); menu_enable(MI_SHELLC0 + i, g_gl && stacked && g_opt.shell); }
     menu_check(MI_GAP, g_opt.gap || g_opt.shell); menu_enable(MI_GAP, g_gl && stacked && !g_opt.shell);
     menu_check(MI_STACKED, stacked); menu_check(MI_SIDE, g_side_by_side);
-    menu_check(MI_CORNER, g_corner && !g_side_by_side); menu_enable(MI_CORNER, g_gl);
+    menu_check(MI_CORNER, g_corner && !g_wide && !g_side_by_side); menu_enable(MI_CORNER, g_gl);
+    menu_check(MI_WIDE, g_wide && !g_side_by_side); menu_enable(MI_WIDE, g_gl);
     menu_check(MI_ANALOG, g_analog_walk);
     for (int i = 0; i < 4; i++) { menu_check(MI_SIZE1 + i, g_scale == i + 1); menu_enable(MI_SIZE1 + i, !g_opt.actual); }
     menu_check(MI_INTEGER, g_opt.integer); menu_enable(MI_INTEGER, !g_opt.actual);
@@ -1230,8 +1317,9 @@ static void do_action(int id) {
     case MI_BL1: case MI_BL2: case MI_BL3: case MI_BL4: g_opt.backlight = id - MI_BL1 + 1; break;
     case MI_SHELL: if (g_gl && !g_side_by_side) { g_opt.shell = !g_opt.shell; relayout = 1; } break;
     case MI_GAP: if (g_gl) { g_opt.gap = !g_opt.gap; relayout = 1; } break;
-    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; g_corner = 0; relayout = 1; break;
-    case MI_CORNER: if (g_gl) { g_corner = !(g_corner && !g_side_by_side); g_side_by_side = 0; relayout = 1; } break;
+    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; g_corner = g_wide = 0; relayout = 1; break;
+    case MI_CORNER: if (g_gl) { g_corner = !(g_corner && !g_wide && !g_side_by_side); g_wide = g_side_by_side = 0; relayout = 1; } break;
+    case MI_WIDE: if (g_gl) { g_wide = !(g_wide && !g_side_by_side); g_corner = g_side_by_side = 0; relayout = 1; } break;
     case MI_ANALOG: g_analog_walk = !g_analog_walk; break;
     case MI_MODERN_HELP:
         info_box(SDL_MESSAGEBOX_INFORMATION, "Modern",
@@ -1239,8 +1327,12 @@ static void do_action(int id) {
             "Walk in any direction with the left stick: on the DS the D-pad walks in 8 directions and only the stylus walks in any. With this on, "
             "a controller's left stick steers like the stylus while you walk around (the game's own stylus walking). In menus, dialogue and "
             "battles the stick stays a D-pad. Friends in a session don't need it on.\n\n"
-            "Top screen in the corner: the field (the bottom screen) fills a widescreen window or monitor, and the top screen (map and party) "
-            "sits small in the corner. Also under View; F2 goes through the layouts.", g_win);
+            "Widescreen: the field is drawn wider than the DS's screen, so you see more of the world left and right, and the top screen "
+            "(map and party) sits small in the corner like a minimap. In a window it is 16:9; in fullscreen it fills the monitor. Text, menus "
+            "and the touch screen's buttons stay in the middle, as on the DS. The game only expects to show what fits on the DS's screen, so "
+            "now and then something at the far edges may appear a moment late. Enhanced mode only (the 3D on the graphics card).\n\n"
+            "Top screen in the corner: the same layout with the field as on the DS (4:3).\n\n"
+            "Both are also under View; F2 goes through the layouts.", g_win);
         break;
     case MI_SIZE1: case MI_SIZE2: case MI_SIZE3: case MI_SIZE4: g_scale = id - MI_SIZE1 + 1; relayout = 1; break;
     case MI_INTEGER: g_opt.integer = !g_opt.integer; break;
@@ -1292,7 +1384,7 @@ static void handle_events(void) {
             SDL_Scancode k = e.key.keysym.scancode;
             if (k == SDL_SCANCODE_ESCAPE) { if (g_fullscreen) do_action(MI_FULL); else exit(0); break; }
             if (k == SDL_SCANCODE_F11 || (k == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) { do_action(MI_FULL); break; }
-            if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? (g_gl ? MI_CORNER : MI_STACKED) : (g_corner && g_gl) ? MI_STACKED : MI_SIDE);   /* stacked -> side by side -> corner */
+            if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? (g_gl ? MI_CORNER : MI_STACKED) : (g_corner && g_gl) ? MI_WIDE : (g_wide && g_gl) ? MI_STACKED : MI_SIDE);   /* stacked -> side by side -> corner -> widescreen */
             if (k == SDL_SCANCODE_F3) do_action(MI_SIZE1 + g_scale % 4);
             if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) do_action(MI_RES1 + g_scale3d % 4);
             if (k == SDL_SCANCODE_F5 && g_gl) do_action(g_classic ? MI_ENHANCED : MI_CLASSIC);

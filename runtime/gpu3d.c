@@ -53,7 +53,57 @@ typedef struct {
     u32 vtop, vbot;
     s32 ytop, ybot, xtop, xbot;
     u32 sortkey;
+    int hidden;            /* drawn under a hidden tag (g_gx_hide): left out of the picture only */
 } HPoly;
+
+/* Tags (tags.txt): the recompiled code calls gx_tag_begin/end around calls
+ * whose drawing can be hidden. Polygons drawn under a tag in g_gx_hide are
+ * kept (the polygon count, everything the game can read) but not drawn.
+ *
+ * The game doesn't always send its 3D commands at once: DQIX collects them in
+ * a small queue (SubmitCommandToGeometryFifo: the pointer at 0x0210CF78 ->
+ * { u32 count; u32 words[192]; }) that goes to the 3D chip later. So at the
+ * end of a tagged call, the textures it queued (TEXIMAGE_PARAM) are noted,
+ * and until the next frame, polygons with exactly those textures carry the
+ * tag too. */
+int g_gx_tag;
+int g_gx_hide;
+#define GXQ_PTR 0x0210CF78u
+#define TAGTEX_MAX 16
+static u32 tagtex[TAGTEX_MAX]; static int tagtex_tag[TAGTEX_MAX], n_tagtex;
+static u32 tag_q, tag_count;
+static const uint8_t param_count[256];
+
+int gx_tag_begin(int tag) {
+    int prev = g_gx_tag;
+    g_gx_tag = tag;
+    tag_q = mem_read32(GXQ_PTR);
+    tag_count = tag_q ? mem_read32(tag_q) : 0;
+    return prev;
+}
+
+void gx_tag_end(int previous) {
+    u32 q = mem_read32(GXQ_PTR);
+    if (q && q == tag_q && g_gx_tag) {
+        u32 end = mem_read32(q), i = end >= tag_count ? tag_count : 0;     /* emptied during the call: from the start */
+        if (end > 192) end = 192;
+        while (i < end) {
+            u32 w = mem_read32(q + 4 + i * 4); i++;
+            for (int k = 0; k < 4 && (w >> (8 * k)); k++) {
+                uint8_t cmd = (uint8_t)(w >> (8 * k));
+                if (cmd == 0x2A && i < end && n_tagtex < TAGTEX_MAX) { tagtex[n_tagtex] = mem_read32(q + 4 + i * 4); tagtex_tag[n_tagtex++] = g_gx_tag; }
+                i += param_count[cmd];
+            }
+        }
+    }
+    g_gx_tag = previous;
+}
+
+static int poly_tag(u32 tp) {
+    int t = g_gx_tag;
+    for (int i = 0; i < n_tagtex; i++) if (tagtex[i] == tp) t |= tagtex_tag[i];
+    return t;
+}
 
 /* ---------------------------------------------------------------- geometry state */
 static s32 m_proj[16], m_pos[16], m_vec[16], m_tex[16], m_clip[16];
@@ -196,6 +246,90 @@ static int clip_coords_equal(const Vtx* a, const Vtx* b) {
     return a->pos[0] == b->pos[0] && a->pos[1] == b->pos[1] && a->pos[2] == b->pos[2] && a->pos[3] == b->pos[3];
 }
 
+/* ---------------------------------------------------------------- widescreen (render only)
+ * With g_wide_side > 0 (the GPU renderer's widescreen), every polygon is also
+ * clipped against a wider view: x scaled by 256 / (256 + 2 * side) before
+ * clipping, so the DS's picture fills the middle 256 pixels and the sides
+ * show what lies beyond its edges. These polygons only go to the renderer;
+ * the normal list (the polygon count, everything the game can read, the
+ * software renderer) is unchanged. A polygon drawn with a smaller viewport
+ * (a 3D picture inside a menu) is copied unwidened, in the middle. */
+int g_wide_side;
+#define WPOLY_MAX 6144
+#define WVTX_MAX (WPOLY_MAX * 6)
+static HPoly wpram[WPOLY_MAX * 2];
+static Vtx wvram[WVTX_MAX * 2];
+static HPoly* wcur_pram = wpram; static Vtx* wcur_vram = wvram;
+static u32 n_wpoly, n_wvtx;
+static HPoly* wrender_list[WPOLY_MAX];
+static u32 wrender_n, n_wopaque;
+static int wbank, w_frame_side = -1, w_render_side;       /* the side every polygon of this frame was made with (-1: none yet, -2: mixed) */
+static int poly_tag(u32 tp);
+
+static void wide_screen_pos(Vtx* v, int side, int widen) {
+    s64 w = v->pos[3];
+    if (w == 0) { v->hpos[0] = v->hpos[1] = 0; return; }
+    s64 W = 256 + 2 * side;
+    if (widen) v->hpos[0] = (s32)((((s64)v->pos[0] + w) * W * 16) / (2 * w));
+    else v->hpos[0] = (s32)((((((s64)v->pos[0] + w) * viewport[4]) << 4) / (w << 1)) + ((viewport[0] + side) << 4));
+    v->hpos[1] = (s32)((((((s64)-v->pos[1] + w) * viewport[5]) << 4) / (w << 1)) + (viewport[3] << 4));
+}
+
+static void wide_submit(int nverts, int facing) {
+    int side = g_wide_side;
+    if (w_frame_side == -1) w_frame_side = side; else if (w_frame_side != side) w_frame_side = -2;
+    if (n_wpoly >= WPOLY_MAX || n_wvtx + 10 > WVTX_MAX) return;
+    int widen = viewport[0] == 0 && viewport[4] == 256;
+    Vtx cv[10];
+    for (int i = 0; i < nverts; i++) {
+        cv[i] = tmp_vtx[i];
+        if (widen) cv[i].pos[0] = (s32)(((s64)cv[i].pos[0] * 256) / (256 + 2 * side));
+    }
+    int n = clip_polygon(cv, nverts, 0, 1);
+    if (n == 0) return;
+    HPoly* p = &wcur_pram[n_wpoly++];
+    memset(p, 0, sizeof *p);
+    p->attr = cur_poly_attr; p->texparam = tex_param; p->texpal = tex_pal;
+    p->facing = facing;
+    p->hidden = g_gx_hide && (poly_tag(tex_param) & g_gx_hide) != 0;
+    u32 texfmt = (tex_param >> 26) & 7, polyalpha = (cur_poly_attr >> 16) & 0x1F;
+    p->translucent = (texfmt == 1 || texfmt == 6) || (polyalpha > 0 && polyalpha < 31);
+    if (!p->translucent) n_wopaque++;
+    s32 ytop = 1 << 20, ybot = -(1 << 20);
+    u32 wsize = 0;
+    for (int i = 0; i < n; i++) {
+        Vtx* v = &wcur_vram[n_wvtx++];
+        *v = cv[i];
+        v->pos[3] &= 0x00FFFFFF;
+        wide_screen_pos(v, side, widen);
+        for (int k = 0; k < 3; k++) { s32 c = v->col[k] >> 12; v->fcol[k] = c ? ((c << 4) + 0xF) : 0; }
+        p->v[i] = v; p->n++;
+        s32 y = v->hpos[1] >> 4;
+        if (y < ytop) ytop = y;
+        if (y > ybot) ybot = y;
+        u32 w = (u32)v->pos[3];
+        if (w == 0) p->degenerate = 1;
+        while (wsize < 32 && (w >> wsize)) wsize += 4;
+    }
+    if (ybot > 192) p->degenerate = 1;
+    if (ytop < 0) ytop = 0;
+    p->sortkey = ((u32)(ybot & 0xFF) << 8) | (u32)(ytop & 0xFF);
+    if (p->translucent) p->sortkey |= 0x10000;
+    p->wbuf = (flush_attr & 2) != 0;
+    for (int i = 0; i < n; i++) {
+        Vtx* v = p->v[i];
+        s32 w, wsh;
+        if (wsize < 16) { w = v->pos[3] << (16 - wsize); wsh = w >> (16 - wsize); }
+        else { w = v->pos[3] >> (wsize - 16); wsh = w << (wsize - 16); }
+        s32 z;
+        if (flush_attr & 2) z = wsh;
+        else if (v->pos[3]) z = (s32)(((((s64)v->pos[2] * 0x4000) / v->pos[3]) + 0x3FFF) * 0x200);
+        else z = 0x7FFE00;
+        if (z < 0) z = 0; else if (z > 0xFFFFFF) z = 0xFFFFFF;
+        p->z[i] = z; p->w[i] = w;
+    }
+}
+
 /* ---------------------------------------------------------------- polygon setup */
 static void submit_polygon(void) {
     Vtx cv[10];
@@ -213,6 +347,8 @@ static void submit_polygon(void) {
     int facing = dot <= 0;
     if (dot < 0) { if (!(cur_poly_attr & (1 << 7))) { last_strip = NULL; return; } }
     else if (dot > 0) { if (!(cur_poly_attr & (1 << 6))) { last_strip = NULL; return; } }
+    if (g_wide_side > 0 && g_renderer3d) wide_submit(nverts, facing);
+    else if (w_frame_side != -1) w_frame_side = -2;              /* widescreen switched off during the frame */
 
     /* strips: share two unclipped vertices with the previous polygon */
     if (poly_mode >= 2 && last_strip) {
@@ -275,6 +411,7 @@ static void submit_polygon(void) {
     memset(p, 0, sizeof *p);
     p->attr = cur_poly_attr; p->texparam = tex_param; p->texpal = tex_pal;
     p->facing = facing;
+    p->hidden = g_gx_hide && (poly_tag(tex_param) & g_gx_hide) != 0;
     u32 texfmt = (tex_param >> 26) & 7, polyalpha = (cur_poly_attr >> 16) & 0x1F;
     p->translucent = (texfmt == 1 || texfmt == 6) || (polyalpha > 0 && polyalpha < 31);
     p->shadowmask = (cur_poly_attr & 0x3F000030) == 0x00000030;
@@ -509,7 +646,7 @@ static void exec(uint8_t cmd, const u32* p) {
         cur_vtx[2] = (s16)(cur_vtx[2] + ((s16)((p[0] & 0x3FF00000) >> 14) >> 6));
         submit_vertex(); break;
     case 0x29: poly_attr = p[0]; break;
-    case 0x2A: tex_param = p[0]; break;
+    case 0x2A: tex_param = p[0]; if (g_gx_tag && n_tagtex < TAGTEX_MAX) { tagtex[n_tagtex] = p[0]; tagtex_tag[n_tagtex++] = g_gx_tag; } break;
     case 0x2B: tex_pal = p[0] & 0x1FFF; break;
     case 0x30:
         for (int k = 0; k < 3; k++) { mat_dif[k] = (p[0] >> (5 * k)) & 0x1F; mat_amb[k] = (p[0] >> (16 + 5 * k)) & 0x1F; }
@@ -1343,7 +1480,7 @@ static void render_frame(void) {
     clear_buffers();
     int j = 0;
     for (u32 i = 0; i < render_n; i++) {
-        if (render_list[i]->degenerate) continue;
+        if (render_list[i]->degenerate || render_list[i]->hidden) continue;
         setup_polygon(&rpolys[j++], render_list[i]);
     }
     prev_shadowmask = 0;
@@ -1370,9 +1507,11 @@ static Poly g_gl_polys[POLY_MAX];
 static const Poly* g_gl_order[POLY_MAX];
 static void gl_frame(void) {
     int n = 0, nop = 0;
-    for (u32 i = 0; i < render_n; i++) {
-        HPoly* h = render_list[i];
-        if (h->degenerate) continue;
+    HPoly** list = render_list; u32 count = render_n;
+    if (w_render_side > 0) { list = wrender_list; count = wrender_n; }
+    for (u32 i = 0; i < count; i++) {
+        HPoly* h = list[i];
+        if (h->degenerate || h->hidden) continue;
         Poly* q = &g_gl_polys[n];
         q->n = (int)h->n; q->attr = h->attr; q->teximg = h->texparam; q->pltt = h->texpal; q->translucent = h->translucent;
         q->ymin = 1e9f; q->ymax = -1e9f;
@@ -1393,7 +1532,8 @@ static void gl_frame(void) {
     }
     Frame3D f;
     f.order = g_gl_order; f.n = n; f.n_opaque = nop;
-    f.wbuf = render_n ? render_list[0]->wbuf : 0;
+    f.wbuf = count ? list[0]->wbuf : 0;
+    f.width = 256 + 2 * (w_render_side > 0 ? w_render_side : 0);
     g_renderer3d->render(&f);
     g_3d_have_frame = 1;
 }
@@ -1411,6 +1551,14 @@ void gpu3d_vblank(void) {
         qsort(render_list, nsort, sizeof render_list[0], ysort_cmp);
         render_n = n_poly;
         new_list = 1;
+        /* the widescreen list, if the whole frame was made with it */
+        w_render_side = w_frame_side > 0 && g_wide_side == w_frame_side ? w_frame_side : 0;
+        if (w_render_side) {
+            u32 wo = 0, wt = n_wopaque;
+            for (u32 i = 0; i < n_wpoly; i++) { HPoly* p = &wcur_pram[i]; if (p->translucent) wrender_list[wt++] = p; else wrender_list[wo++] = p; }
+            qsort(wrender_list, (flush_attr & 1) ? n_wopaque : n_wpoly, sizeof wrender_list[0], ysort_cmp);
+            wrender_n = n_wpoly;
+        }
         static int lg = -1; if (lg < 0) lg = getenv("DQIX_SWAPLOG") != NULL;
         if (lg) fprintf(stderr, "swap %llu\n", (unsigned long long)g_frame);
     }
@@ -1425,6 +1573,10 @@ void gpu3d_vblank(void) {
     r_fogtab[0] = r_fogtab[1]; r_fogtab[33] = r_fogtab[32];
     r_clear1 = IO32_(0x350); r_clear2 = IO32_(0x354);
     if (flush_request) {
+        n_tagtex = 0;                                               /* tagged textures: per frame */
+        wbank ^= 1;
+        wcur_pram = &wpram[wbank ? WPOLY_MAX : 0]; wcur_vram = &wvram[wbank ? WVTX_MAX : 0];
+        n_wpoly = n_wvtx = n_wopaque = 0; w_frame_side = -1;
         cur_bank ^= 1;
         cur_vram = &vram_bank_v[cur_bank ? VTX_MAX : 0];
         cur_pram = &pram[cur_bank ? POLY_MAX : 0];
