@@ -9,33 +9,27 @@ param([switch]$Test)
 
 $ErrorActionPreference = 'Stop'
 $Project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)   # the folder with BUILD.bat
-$UsaSha1 = 'c7c3014c237900c8281289b8bc76a781969b6278'
 $AppName = 'Dragon Quest IX'
 $FolderName = 'DQIX-Enhanced'
 $UninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DQIX-Enhanced'
 
 # ---------------------------------------------------------------- checks (no window needed)
 
-# Is this the right ROM? Returns @{ Ok; Text }.
+# Which ROM is this? Returns @{ Ok; Warn; Text }. Any readable file can be
+# tried: only the USA version is known to work, the others get a warning.
 function Test-Rom([string]$Path) {
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Ok = $false; Text = 'Choose your ROM file (it ends in .nds).' } }
-    $len = (Get-Item -LiteralPath $Path).Length
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Ok = $false; Warn = $false; Text = 'Choose your ROM file (it ends in .nds).' } }
     $code = ''
     try {
         $fs = [IO.File]::OpenRead($Path)
-        try { $buf = New-Object byte[] 16; [void]$fs.Read($buf, 0, 16); $code = [Text.Encoding]::ASCII.GetString($buf, 12, 4) } finally { $fs.Close() }
-    } catch { return @{ Ok = $false; Text = "This file can't be read: $($_.Exception.Message)" } }
+        try { $buf = New-Object byte[] 16; [void]$fs.Read($buf, 0, 16); $code = [Text.Encoding]::ASCII.GetString($buf, 12, 4) -replace '[^A-Za-z0-9]', '' } finally { $fs.Close() }
+    } catch { return @{ Ok = $false; Warn = $false; Text = "This file can't be read: $($_.Exception.Message)" } }
     switch ($code) {
-        'YDQJ' { return @{ Ok = $false; Text = 'This is the Japanese version of Dragon Quest IX. Only the USA version works for now.' } }
-        'YDQP' { return @{ Ok = $false; Text = 'This is the European version of Dragon Quest IX. Only the USA version works for now.' } }
-        'YDQE' { }
-        default { return @{ Ok = $false; Text = "This isn't a Dragon Quest IX ROM. Choose the .nds file made from your Dragon Quest IX cartridge (USA)." } }
+        'YDQE' { return @{ Ok = $true; Warn = $false; Text = 'Dragon Quest IX (USA).' } }
+        'YDQJ' { return @{ Ok = $true; Warn = $true; Text = "Dragon Quest IX (Japan). Only the USA version is tested: this one may not build or may not run, but you can try." } }
+        'YDQP' { return @{ Ok = $true; Warn = $true; Text = "Dragon Quest IX (Europe). Only the USA version is tested: this one may not build or may not run, but you can try." } }
+        default { return @{ Ok = $true; Warn = $true; Text = "This doesn't look like a Dragon Quest IX ROM (game code '$code'). It will most likely not build, but you can try." } }
     }
-    $sha = (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToLower()
-    if ($sha -ne $UsaSha1) {
-        return @{ Ok = $false; Text = "This is Dragon Quest IX (USA), but not an exact copy of the cartridge (it may be patched, trimmed or damaged; size $([math]::Round($len / 1MB)) MB). Make the copy again from your cartridge." }
-    }
-    return @{ Ok = $true; Text = 'Dragon Quest IX (USA): the right file.' }
 }
 
 function Get-DefaultFolder { return (Join-Path ([Environment]::GetFolderPath('MyDocuments')) $FolderName) }
@@ -239,7 +233,7 @@ function Show-Welcome {
     $title.Text = "Welcome to $AppName for PC"
     $subtitle.Text = 'This setup turns your own copy of the game into a PC game.'
     [void](New-Label ("You'll need:`n" +
-        "  - a copy (ROM, a .nds file) of your own Dragon Quest IX cartridge - the USA version`n" +
+        "  - a copy (ROM, a .nds file) of your own Dragon Quest IX cartridge (the USA version is the tested one)`n" +
         "  - an internet connection, and about 4 GB of free space`n" +
         "  - 10 to 20 minutes the first time (the build tools are installed once)") 0 (S 100))
     [void](New-Label ("What happens: you choose your ROM and where to put the game, then setup downloads free build " +
@@ -265,19 +259,18 @@ function Show-Rom {
         $r = Test-Rom $path
         $state.RomOk = $r.Ok
         $status.Text = $r.Text
-        if ($r.Ok) { $status.ForeColor = [System.Drawing.Color]::DarkGreen } else { $status.ForeColor = [System.Drawing.Color]::DarkRed }
+        if (-not $r.Ok) { $status.ForeColor = [System.Drawing.Color]::DarkRed } elseif ($r.Warn) { $status.ForeColor = [System.Drawing.Color]::DarkOrange } else { $status.ForeColor = [System.Drawing.Color]::DarkGreen }
         $btnNext.Enabled = $r.Ok
     }.GetNewClosure()
     $browse.Add_Click({
         $d = New-Object System.Windows.Forms.OpenFileDialog
-        $d.Filter = 'DS ROM (*.nds)|*.nds|All files (*.*)|*.*'; $d.Title = 'Choose your Dragon Quest IX ROM (USA)'
+        $d.Filter = 'DS ROM (*.nds)|*.nds|All files (*.*)|*.*'; $d.Title = 'Choose your Dragon Quest IX ROM'
         if ($d.ShowDialog($form) -eq 'OK') { & $check $d.FileName }
     }.GetNewClosure())
     $script:dropCheck = $check
     [void](New-Label "Only a ROM you made from your own cartridge. It's copied into the game's folder, so updates can rebuild the game later." (S 170) (S 50))
     $btnBack.Enabled = $true; $btnNext.Text = 'Next >'; $btnNext.Enabled = $state.RomOk
-    if ($state.Rom -and -not $state.RomOk) { & $check $state.Rom }
-    elseif ($state.RomOk) { $status.Text = 'Dragon Quest IX (USA): the right file.'; $status.ForeColor = [System.Drawing.Color]::DarkGreen }
+    if ($state.Rom) { & $check $state.Rom }
 }
 
 function Show-Folder {

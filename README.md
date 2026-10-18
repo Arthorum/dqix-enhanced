@@ -67,8 +67,8 @@ original)
 
 ## Getting started
 
-You need your own Dragon Quest IX cartridge's ROM (USA version, `.nds`),
-Windows 10 or 11 (64-bit), about 3 GB of free space, and the internet the
+You need your own Dragon Quest IX cartridge's ROM (`.nds`; the USA version
+is the tested one, others can be tried), Windows 10 or 11 (64-bit), about 3 GB of free space, and the internet the
 first time.
 
 1. Download the latest **stable** release from the
@@ -76,7 +76,7 @@ first time.
    (*Source code (zip)*) and unzip it. The **Nightly** release there is the
    newest work, less tested.
 2. Double-click **`Install Dragon Quest IX.bat`**. A setup window walks you
-   through it: choose your ROM (it checks it's the right one), where to put
+   through it: choose your ROM (it says which version it is), where to put
    the game (your Documents by default), and shortcuts on the desktop and in
    the Start menu. It then installs the free build tools (MSYS2) and builds
    the game: 10-20 minutes the first time. Press **Play now** at the end.

@@ -254,7 +254,7 @@ to it: `git checkout bookmark-2026-10-15`.
   their text (update window, bug report). Send a bug report: report_zip
   (stored zip, saves optional) + a prefilled GitHub issue
   (.github/ISSUE_TEMPLATE). Setup: `Install Dragon Quest IX.bat` ->
-  tools/setup-wizard.ps1 (WinForms, PowerShell 5.1: SHA-1 ROM check, folder
+  tools/setup-wizard.ps1 (WinForms, PowerShell 5.1: ROM version from the header (no checksum; any ROM can be tried), folder
   checks, robocopy, Unblock-File, BUILD.bat with DQIX_NOPAUSE, shortcuts,
   HKCU Uninstall entry -> tools/uninstall.ps1). apply.bat starts
   game\dqix.exe. Earlier versions: annotated tags v17-v25,

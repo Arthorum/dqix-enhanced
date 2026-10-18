@@ -1,5 +1,5 @@
 @echo off
-rem Dragon Quest IX for PC: turns your own DQIX ROM (USA) into the PC game.
+rem Dragon Quest IX for PC: turns your own DQIX ROM into the PC game (the USA version is the tested one).
 rem Double-click this. The first time it installs the free MSYS2 build tools
 rem (a few minutes, needs the internet); after that it only rebuilds.
 rem The result goes in the "game" folder next to this file.
@@ -15,8 +15,8 @@ rem the ROM chosen last time (updates build without asking again)
 if exist "%~dp0rom\last-rom.txt" set /p ROM=<"%~dp0rom\last-rom.txt"
 if defined ROM if exist "%ROM%" goto have_rom
 set "ROM="
-echo Choose your Dragon Quest IX ROM (USA) in the window that opens...
-for /f "usebackq delims=" %%i in (`powershell -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = 'DS ROM (*.nds)|*.nds'; $d.Title = 'Choose your Dragon Quest IX ROM (USA)'; if ($d.ShowDialog() -eq 'OK') { $d.FileName }"`) do set "ROM=%%i"
+echo Choose your Dragon Quest IX ROM in the window that opens...
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = 'DS ROM (*.nds)|*.nds'; $d.Title = 'Choose your Dragon Quest IX ROM'; if ($d.ShowDialog() -eq 'OK') { $d.FileName }"`) do set "ROM=%%i"
 if defined ROM goto have_rom
 echo No ROM chosen. Put your ROM in the "rom" folder (or choose it) and run this again.
 if not defined DQIX_NOPAUSE pause

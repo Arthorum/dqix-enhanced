@@ -23,7 +23,8 @@ natively, plus the runtime that stands in for the DS hardware.
 
 ## Getting started (Windows)
 
-You need your own Dragon Quest IX cartridge's ROM (the USA version), Windows
+You need your own Dragon Quest IX cartridge's ROM (the USA version is the
+tested one; the build tries any version), Windows
 10 or 11 (64-bit), about 3 GB of free space, and the internet the first time.
 
 The easy way is **`Install Dragon Quest IX.bat`**: a setup window that does
@@ -336,7 +337,7 @@ build.mk               makefile (make -f build.mk)
 tools/where.sh         run, then show where the game is
 tests/                 decoder check vs LLVM; behaviour tests for recompiler + interpreter
 recomp.bat             regenerate the ARM9 C on Windows (developer build)
-Install Dragon Quest IX.bat  the setup window (tools/setup-wizard.ps1): ROM check, folder,
+Install Dragon Quest IX.bat  the setup window (tools/setup-wizard.ps1): ROM version, folder,
                        shortcuts, Apps entry (tools/uninstall.ps1), then BUILD.bat
 BUILD.bat              the one-click build: your ROM -> the game folder
 tools/build-game.sh    what BUILD.bat runs (inside MSYS2; also works on Linux)

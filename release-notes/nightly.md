@@ -3,7 +3,7 @@ adventure; try this one in its own folder with a copy of your save.
 
 **New since stable v26**
 - **Easy setup**: double-click `Install Dragon Quest IX.bat` and a window
-  walks you through it: choose your ROM (it checks it's the right one),
+  walks you through it: choose your ROM (it says which version it is),
   where to put the game (Documents by default; it warns about OneDrive and
   folders Windows protects), shortcuts on the desktop and in the Start menu,
   then it builds the game with a progress bar and a Play now button. The
@@ -17,6 +17,8 @@ adventure; try this one in its own folder with a copy of your save.
   ready-made report on GitHub with the zip to drag into it. It says first
   exactly what's included, since the report is public; your save is only
   included if you tick the box.
+- **Any version of the ROM can be tried**: no more checksum check. The USA
+  version is the tested one; others get a warning and are built anyway.
 - **Clearer windows**: the update window's buttons fit their text
   ("Update to v27", "Skip this version", "Later"), and when a new stable
   version is offered, a button to install the newest nightly instead.
