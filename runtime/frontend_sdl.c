@@ -1195,14 +1195,24 @@ static void update_go(const char* branch, const char* version) {
 /* at start: a newer stable version */
 static void update_offer(const UpdateInfo* u) {
     if (!u->ok || !update_newer(u->stable, DQIX_VERSION) || !strcmp(u->stable, g_update_skip) || session_requested()) return;
-    char text[400];
-    snprintf(text, sizeof text, "Dragon Quest IX %s is available (you have %s).\n\nUpdate now? (Help > Check for updates "
-             "also has the nightly version, with the newest work.)", u->stable, DQIX_VERSION);
-    char upd[64]; snprintf(upd, sizeof upd, "Update to %s", u->stable);
-    const char* b[3] = { upd, "Skip this version", "Later" };
-    int r = choose("Update available", text, b, 3, 0, 2);
-    if (r == 0) update_go("stable", u->stable);
-    else if (r == 1) { snprintf(g_update_skip, sizeof g_update_skip, "%s", u->stable); settings_save(); }
+    /* the nightly too, when it's newer still: an optional second choice */
+    int nightly = u->nightly[0] && strcmp(u->nightly, u->stable) && update_newer(u->nightly, u->stable);
+    char text[500];
+    snprintf(text, sizeof text, "Dragon Quest IX %s is available (you have %s).\n\nUpdate now?%s", u->stable, DQIX_VERSION,
+             nightly ? "\n\nOr try the nightly version: the newest work, but less tested." : "");
+    char upd[64], ngt[64];
+    snprintf(upd, sizeof upd, "Update to %s", u->stable);
+    snprintf(ngt, sizeof ngt, "Install nightly %s", u->nightly);
+    const char* b[4]; int id[4], nb = 0;
+    id[nb] = 1; b[nb++] = upd;
+    if (nightly) { id[nb] = 2; b[nb++] = ngt; }
+    id[nb] = 3; b[nb++] = "Skip this version";
+    id[nb] = 0; b[nb++] = "Later";
+    int r = choose("Update available", text, b, nb, 0, nb - 1);
+    if (r < 0 || r >= nb) return;
+    if (id[r] == 1) update_go("stable", u->stable);
+    else if (id[r] == 2) update_go("main", u->nightly);
+    else if (id[r] == 3) { snprintf(g_update_skip, sizeof g_update_skip, "%s", u->stable); settings_save(); }
 }
 
 /* Help > Check for updates */
@@ -1232,6 +1242,7 @@ static void update_menu(void) {
     if (strcmp(u.nightly, DQIX_VERSION) && strcmp(u.nightly, u.stable)) { id[nb] = 2; b[nb++] = bn; }
     id[nb] = 0; b[nb++] = "Close";
     int r = choose("Updates", text, b, nb, nb - 1, nb - 1);
+    if (r < 0 || r >= nb) return;
     if (id[r] == 1) update_go("stable", u.stable);
     else if (id[r] == 2) update_go("main", u.nightly);
 }
