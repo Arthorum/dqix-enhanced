@@ -26,6 +26,7 @@ static void lock(void) { EnterCriticalSection(&g_mx); }
 static void unlock(void) { LeaveCriticalSection(&g_mx); }
 static void sleep_ms(int ms) { Sleep((DWORD)ms); }
 static int sock_err_again(void) { return WSAGetLastError() == WSAEWOULDBLOCK; }
+static int sock_errno(void) { return WSAGetLastError(); }
 static void make_dir(const char* p) { _mkdir(p); }
 #include <io.h>
 /* the names in a folder (files or folders) */
@@ -64,6 +65,7 @@ static void lock(void) { pthread_mutex_lock(&g_mx); }
 static void unlock(void) { pthread_mutex_unlock(&g_mx); }
 static void sleep_ms(int ms) { struct timespec t = { ms / 1000, (long)(ms % 1000) * 1000000L }; nanosleep(&t, NULL); }
 static int sock_err_again(void) { return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS; }
+static int sock_errno(void) { return errno; }
 static void make_dir(const char* p) { mkdir(p, 0755); }
 #include <dirent.h>
 static int list_dir(const char* dir, int want_dirs, char names[][64], int max) {
@@ -86,6 +88,7 @@ void (*session_lobby_hook)(void);
 
 static double now_ms(void);
 static void flog(const char* fmt, ...);
+static uint64_t build_id(void);
 /* message types */
 enum { M_HELLO = 1, M_WELCOME, M_LOBBY, M_START, M_INPUT, M_HASH, M_LEAVE, M_PING, M_PONG, M_REFUSE };
 #define MAGIC "DQIXMP01"
@@ -144,6 +147,25 @@ static void flog(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
     fprintf(g_flog, "[%9.3f] %s\n", (now_ms() - g_flog_t0) / 1000.0, line);
     fflush(g_flog);
+}
+
+/* open session\\front.log as soon as hosting or joining begins, so a session that never
+ * gets going can be looked into too (it is written line by line: it can be read while it happens) */
+static void flog_open(const char* mode) {
+    if (g_flog) return;
+    make_dir("session");
+    if (!(g_flog = fopen("session/front.log", "w"))) return;
+    g_flog_t0 = now_ms();
+    time_t t = time(NULL);
+    char when[64]; strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", localtime(&t));
+    flog("Dragon Quest IX %s, build %016llx, %s, %s", DQIX_VERSION, (unsigned long long)build_id(), when, mode);
+}
+static const char* addr_text(const struct sockaddr* a, char* out, size_t n) {
+    char h[INET6_ADDRSTRLEN + 1] = "?", sv[16] = "?";
+    getnameinfo(a, a->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in), h, sizeof h, sv, sizeof sv,
+                NI_NUMERICHOST | NI_NUMERICSERV);
+    snprintf(out, n, a->sa_family == AF_INET6 ? "[%s]:%s" : "%s:%s", h, sv);
+    return out;
 }
 
 static void news(const char* fmt, ...) {
@@ -352,8 +374,10 @@ static void host_send_lobby(void) {
 static void host_accept(void) {
     if (g_listen == BADSOCK) return;
     for (;;) {
-        sock_t s = accept(g_listen, NULL, NULL);
+        struct sockaddr_storage from; socklen_t fl = sizeof from;
+        sock_t s = accept(g_listen, (struct sockaddr*)&from, &fl);
         if (s == BADSOCK) return;
+        { char t[80]; flog("someone connected from %s", addr_text((struct sockaddr*)&from, t, sizeof t)); }
         sock_nonblock(s);
         int slot = -1;
         for (int i = 1; i < SESSION_MAX; i++) if (g_peer[i].s == BADSOCK) { slot = i; break; }
@@ -373,6 +397,8 @@ static void host_hello(Peer* p, Rd* r) {
     Console c = { 0 };
     get_console(r, &c);
     uint64_t theirs = r->pos + 8 <= r->n ? r_u64(r) : 0;
+    flog("they say hello: %s, version %s, build %016llx%s", r->bad ? "(unreadable)" : c.name, ver, (unsigned long long)theirs,
+         strcmp(magic, MAGIC) ? " (not a DQIX session program)" : "");
     Buf b = { 0 };
     if (r->bad || strcmp(magic, MAGIC)) { b_str(&b, "That isn't a Dragon Quest IX PC session.", 96); send_msg(p, M_REFUSE, &b); free(b.d); peer_io(p); peer_close(p); return; }
     if (strcmp(ver, DQIX_VERSION)) {
@@ -732,12 +758,8 @@ static void kill_children(void) { signal(SIGTERM, SIG_IGN); kill(0, SIGTERM); }
 static void get_wfc(Rd* r);
 static void put_wfc(Buf* b);
 static void do_start(void) {
-    make_dir("session");
-    if (!g_flog && (g_flog = fopen("session/front.log", "w"))) {
-        g_flog_t0 = now_ms();
-        time_t t = time(NULL);
-        char when[64]; strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", localtime(&t));
-        flog("Dragon Quest IX %s, build %016llx, %s", DQIX_VERSION, (unsigned long long)build_id(), when);
+    flog_open("starting");
+    {
         flog("I am player %d of %d (%s), input delay %d", g_me + 1, g_n, g_host ? "hosting" : "joined", g_delay);
         for (int k = 0; k < g_n; k++)
             flog("player %d: %s, ping %d ms%s", k + 1, g_con[k].name, g_ping[k],
@@ -949,6 +971,7 @@ static void handle(int i, int type, Rd* r) {
 static void peer_lost(int i) {
     Peer* p = &g_peer[i];
     int k = p->index;
+    flog("connection %d (player %d) closed or broke (socket error %d)", i, k + 1, sock_errno());
     peer_close(p);
     if (g_host) {
         if (k <= 0) return;
@@ -1116,6 +1139,7 @@ static void host_reachability(void) {
         snprintf(line, sizeof line, "session: reachable at %s: %s\n", g_addr, g_hint);
         LOG_WARN("%s", line);
         report_log_line(line);
+        flog("reachable at %s: %s", g_addr, g_hint);
     }
     unlock();
     g_upnp_done = 1;
@@ -1182,9 +1206,19 @@ static int start_host(int port) {
 static int start_join(const char* host, int port) {
     struct sockaddr_storage a; socklen_t al;
     if (!resolve(host, port, &a, &al)) { news("can't find %s", host); return 0; }
+    { char t[80]; flog("connecting to %s ...", addr_text((struct sockaddr*)&a, t, sizeof t)); }
     sock_t s = socket(a.ss_family, SOCK_STREAM, 0);
-    if (s == BADSOCK) return 0;
-    if (connect(s, (struct sockaddr*)&a, al) != 0) { closesock(s); news("can't connect to %s:%d (is the host waiting, and its port open?)", host, port); return 0; }
+    if (s == BADSOCK) { flog("no socket (error %d)", sock_errno()); return 0; }
+    double t0 = now_ms();
+    if (connect(s, (struct sockaddr*)&a, al) != 0) {
+        int e = sock_errno();
+        flog("connect failed after %.1f s, socket error %d (%s)", (now_ms() - t0) / 1000.0, e,
+             e == 10060 || e == 110 ? "timed out: nothing answered - the host's port is closed or a firewall drops it" :
+             e == 10061 || e == 111 ? "refused: the host's PC answered, but nothing listens on that port" :
+             e == 10065 || e == 10051 || e == 113 || e == 101 ? "no route to that address" : "see the number");
+        closesock(s); news("can't connect to %s:%d (is the host waiting, and its port open?)", host, port); return 0;
+    }
+    flog("connected after %.1f s; saying hello (version %s)", (now_ms() - t0) / 1000.0, DQIX_VERSION);
     sock_nonblock(s);
     memset(&g_peer[0], 0, sizeof g_peer[0]);
     g_peer[0].s = s; g_peer[0].index = 0;
@@ -1299,6 +1333,7 @@ void session_boot(void) {
         my_console(&g_con[0]);
         g_rtc = rtc_base();
         g_auto_players = players;
+        flog_open("hosting");
         if (!start_host(port)) { news("can't wait for players on port %d (is another game hosting?)", port); g_state = 5; return; }
         snprintf(g_addr, sizeof g_addr, "(finding your address...)");
         atexit(close_ports);
@@ -1311,6 +1346,7 @@ void session_boot(void) {
         else if (strchr(s, ':') != strrchr(s, ':')) snprintf(a, sizeof a, "%s", s);   /* a bare IPv6 address (several colons): the usual port */
         else { const char* c = strrchr(s, ':'); if (c) { snprintf(a, sizeof a, "%.*s", (int)(c - s), s); port = atoi(c + 1); } else snprintf(a, sizeof a, "%s", s); }
         snprintf(g_addr, sizeof g_addr, "%s:%d", a, port);
+        flog_open("joining");
         g_state = 1;
         news("connecting to %s", g_addr);
         if (!start_join(a, port)) { g_state = 5; }
