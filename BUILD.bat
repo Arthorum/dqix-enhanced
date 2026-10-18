@@ -11,15 +11,21 @@ rem ---- the ROM: the first .nds in the "rom" folder, or ask for it
 set "ROM="
 for %%f in ("%~dp0rom\*.nds") do if not defined ROM set "ROM=%%~ff"
 if defined ROM goto have_rom
+rem the ROM chosen last time (updates build without asking again)
+if exist "%~dp0rom\last-rom.txt" set /p ROM=<"%~dp0rom\last-rom.txt"
+if defined ROM if exist "%ROM%" goto have_rom
+set "ROM="
 echo Choose your Dragon Quest IX ROM (USA) in the window that opens...
 for /f "usebackq delims=" %%i in (`powershell -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = 'DS ROM (*.nds)|*.nds'; $d.Title = 'Choose your Dragon Quest IX ROM (USA)'; if ($d.ShowDialog() -eq 'OK') { $d.FileName }"`) do set "ROM=%%i"
 if defined ROM goto have_rom
 echo No ROM chosen. Put your ROM in the "rom" folder (or choose it) and run this again.
-pause
+if not defined DQIX_NOPAUSE pause
 exit /b 1
 
 :have_rom
 echo ROM: "%ROM%"
+if not exist "%~dp0rom" mkdir "%~dp0rom"
+>"%~dp0rom\last-rom.txt" echo %ROM%
 
 rem ---- the build tools (MSYS2)
 set "MSYSROOT=C:\msys64"
@@ -29,7 +35,7 @@ winget install --id MSYS2.MSYS2 -e --accept-source-agreements --accept-package-a
 if exist "%MSYSROOT%\usr\bin\bash.exe" goto have_msys
 echo MSYS2 could not be installed automatically. Install it from https://www.msys2.org
 echo (default folder C:\msys64), then run this again.
-pause
+if not defined DQIX_NOPAUSE pause
 exit /b 1
 
 :have_msys
@@ -44,11 +50,11 @@ set "DQIX_ROM=%ROM%"
 if errorlevel 1 goto failed
 echo.
 echo Finished. Play with game\play.bat (you can make a shortcut to it).
-pause
+if not defined DQIX_NOPAUSE pause
 exit /b 0
 
 :failed
 echo.
 echo BUILD FAILED. The text above says why.
-pause
+if not defined DQIX_NOPAUSE pause
 exit /b 1

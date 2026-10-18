@@ -18,5 +18,5 @@ echo Installing build tools ^(first time only^)...
 set MSYSTEM=UCRT64
 set CHERE_INVOKING=1
 "%MSYSROOT%\usr\bin\bash.exe" -lc "./build-windows.sh"
-if errorlevel 1 (echo BUILD FAILED - send Claude the text above.) else (echo Build finished: ..\build\pc\play.bat)
+if errorlevel 1 (echo BUILD FAILED - the text above says why.) else (echo Build finished: ..\build\pc\play.bat)
 pause

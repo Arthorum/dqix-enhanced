@@ -135,6 +135,19 @@ to it: `git checkout bookmark-2026-10-15`.
   Player D was deaf). Fix: waiting consoles drop the frames they could
   never hear (`drain_deaf` in air.c). Then: all four in Player C's world on
   every PC, 206-235 sync checks each, all the same.
+- **nightly9**: going public as github.com/sackchief/dqix-enhanced
+  (GPL-3.0-or-later: wifi.c and gpu3d.c translate melonDS code). README for
+  players (features, getting started, multiplayer, updating); the old
+  README is docs/TECHNICAL.md. In-game updates (`runtime/update.c`,
+  Windows/WinHTTP): at start, the stable branch's runtime/version.h vs this
+  version (asks: Update / Skip this version / Later; `update_check`,
+  `update_skip` in settings.ini); Help > Check for updates offers stable and
+  nightly (main). Installing downloads the branch zip from codeload into
+  `update\`, writes `update\apply.bat` (waits for the game to exit, copies
+  the project files to `update\previous`, unpacks with tar, copies over,
+  runs BUILD.bat with DQIX_NOPAUSE=1, starts game\play.bat) and
+  `update\rollback.bat`. BUILD.bat remembers the ROM (rom\last-rom.txt).
+  Only works in a BUILD.bat project (game\ one below BUILD.bat).
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

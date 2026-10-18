@@ -30,6 +30,7 @@
 #include "version.h"
 #include "session.h"
 #include "air.h"
+#include "update.h"
 #include "text.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -232,6 +233,8 @@ static const struct { const char* key; const char* dns; } WFC[] = {
 static char g_wfc_server[64] = "builtin";       /* a key above or a DNS address */
 static char g_player_name[32] = "";              /* sessions: what friends see */
 static int g_session_port = SESSION_PORT;
+static int g_update_auto = 1;                    /* look for a new stable version at start */
+static char g_update_skip[32];                   /* ...but not this one (the player said so) */
 static int g_net_want;                         /* the menu's "connect" check */
 static const char* wfc_dns(void) {
     for (unsigned i = 0; i < sizeof WFC / sizeof WFC[0]; i++) if (!strcmp(g_wfc_server, WFC[i].key)) return WFC[i].dns;
@@ -277,6 +280,8 @@ static void settings_load(void) {
             g_player_name[strcspn(g_player_name, "\r\n")] = 0;
             continue;
         }
+        if (!strcmp(key, "update_check")) { g_update_auto = atoi(val) != 0; continue; }
+        if (!strcmp(key, "update_skip")) { snprintf(g_update_skip, sizeof g_update_skip, "%s", val); continue; }
         if (!strcmp(key, "session_port")) { int v = atoi(val); if (v > 0 && v < 65536) g_session_port = v; continue; }
         if (!strcmp(key, "session_consoles")) { if (!strcmp(val, "processes")) { static char e[] = "DQIX_PROCESSES=1"; putenv(e); } continue; }
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
@@ -355,6 +360,9 @@ static void settings_save(void) {
     fprintf(f, "wfc_server = %s\n", g_wfc_server);
     fprintf(f, "# playing with friends far away: your name, and the port friends connect to when you host\n");
     fprintf(f, "player_name = %s\n", g_player_name);
+    fprintf(f, "# updates: look for a new stable version when the game starts (Help menu); a version not to offer again\n");
+    fprintf(f, "update_check = %d\n", g_update_auto);
+    fprintf(f, "update_skip = %s\n", g_update_skip[0] ? g_update_skip : "-");
     fprintf(f, "session_port = %d\n", g_session_port);
     fprintf(f, "# how your friends' DSes run on this PC: thread (one thread, the usual) or processes (if thread misbehaves)\n");
     fprintf(f, "session_consoles = %s\n", getenv("DQIX_PROCESSES") ? "processes" : "thread");
@@ -483,6 +491,7 @@ void frontend_init(int argc, char** argv) {
         for (int i = 0; i < N_DRAWN; i++) names[i] = SHELLS[i].name;
         for (int i = 0; i < g_nskins; i++) names[N_DRAWN + i] = g_skins[i].name;
         menu_init(g_win, names, N_SHELLS);
+        if (g_update_auto && !session_requested() && update_project_dir()) update_check_async();
         update_actual();
         menu_sync();
         layout_window();
@@ -715,7 +724,9 @@ static void present(void) {
 }
 
 /* ---------------------------------------------------------------- settings changes (keys and menu) */
+static void update_offer(const UpdateInfo* u);
 static void update_title(double fps) {
+    { UpdateInfo u; if (update_poll(&u)) update_offer(&u); }
     session_window_close();                                     /* the lobby is over */
     char title[400], ses[300] = "";
     if (session_running()) {
@@ -745,6 +756,7 @@ static void menu_sync(void) {
     }
     int stacked = !g_side_by_side;
     menu_check(MI_PAUSE, g_paused);
+    menu_check(MI_UPDATE_AUTO, g_update_auto);
     menu_check(MI_TURBO, g_turbo);
     menu_check(MI_DLC, g_opt.dlc);
     menu_check(MI_NET, g_net_want);
@@ -905,6 +917,72 @@ static void session_action(int id) {
     case MI_SES_NAME: ask_name(); break;
     case MI_SES_HELP: info_box(SDL_MESSAGEBOX_INFORMATION, "Playing with friends far away", SESSION_HELP, g_win); break;
     }
+}
+
+/* ---------------------------------------------------------------- updates (update.c) */
+static void update_go(const char* branch, const char* version) {
+    if (session_requested()) { info_box(SDL_MESSAGEBOX_INFORMATION, "Update", "Leave the session first (Wireless menu), then update.", g_win); return; }
+    if (!update_project_dir()) {
+        info_box(SDL_MESSAGEBOX_INFORMATION, "Update", "This copy of the game wasn't made with BUILD.bat, so it can't update itself. "
+                 "Download the new version from https://github.com/" UPDATE_REPO " instead.", g_win);
+        return;
+    }
+    char text[700];
+    snprintf(text, sizeof text, "Update to %s?\n\nThe game closes, downloads %s, builds it from your ROM again (a few minutes; "
+             "a window shows how far it is) and starts again. Your saves, settings and extras are kept, and the current "
+             "version is kept in the update folder in case you want to go back (update\\rollback.bat).", version, version);
+    if (!ask_yes("Update", text, "Update")) return;
+    backup_flush();
+    settings_save();
+    if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - downloading the update...");
+    char err[200] = "";
+    if (update_install(branch, version, err, sizeof err)) exit(0);
+    char m[400]; snprintf(m, sizeof m, "The update couldn't be downloaded: %s.", err);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Update", m, g_win);
+}
+
+/* at start: a newer stable version */
+static void update_offer(const UpdateInfo* u) {
+    if (!u->ok || !update_newer(u->stable, DQIX_VERSION) || !strcmp(u->stable, g_update_skip) || session_requested()) return;
+    char text[400];
+    snprintf(text, sizeof text, "Dragon Quest IX %s is available (you have %s).\n\nUpdate now? (Help > Check for updates "
+             "also has the nightly version, with the newest work.)", u->stable, DQIX_VERSION);
+    const SDL_MessageBoxButtonData b[3] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Update" }, { 0, 2, "Skip this version" },
+                                            { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Later" } };
+    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, "Update available", text, 3, b, NULL };
+    int r = 0;
+    if (SDL_ShowMessageBox(&d, &r) != 0) return;
+    if (r == 1) update_go("stable", u->stable);
+    else if (r == 2) { snprintf(g_update_skip, sizeof g_update_skip, "%s", u->stable); settings_save(); }
+}
+
+/* Help > Check for updates */
+static void update_menu(void) {
+    if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - checking for updates...");
+    UpdateInfo u; update_check_now(&u);
+    if (!u.ok) {
+        char m[300]; snprintf(m, sizeof m, "Couldn't check for updates: %s.", u.error[0] ? u.error : "no answer");
+        info_box(SDL_MESSAGEBOX_INFORMATION, "Updates", m, g_win);
+        return;
+    }
+    char text[700];
+    snprintf(text, sizeof text,
+             "This copy: %s\n\nStable: %s%s\nTested; recommended for everyone.\n\nNightly: %s%s\nThe newest work: new features "
+             "and fixes first, but less tested.\n\nFriends playing together need the same version.",
+             DQIX_VERSION, u.stable, update_newer(u.stable, DQIX_VERSION) ? " (newer)" : !strcmp(u.stable, DQIX_VERSION) ? " (this one)" : "",
+             u.nightly, update_newer(u.nightly, DQIX_VERSION) ? " (newer)" : !strcmp(u.nightly, DQIX_VERSION) ? " (this one)" : "");
+    char bs[48], bn[48];
+    snprintf(bs, sizeof bs, "Install stable %s", u.stable);
+    snprintf(bn, sizeof bn, "Install nightly %s", u.nightly);
+    SDL_MessageBoxButtonData b[3]; int nb = 0;
+    if (strcmp(u.stable, DQIX_VERSION)) b[nb++] = (SDL_MessageBoxButtonData){ 0, 1, bs };
+    if (strcmp(u.nightly, DQIX_VERSION) && strcmp(u.nightly, u.stable)) b[nb++] = (SDL_MessageBoxButtonData){ 0, 2, bn };
+    b[nb++] = (SDL_MessageBoxButtonData){ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Close" };
+    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, "Updates", text, nb, b, NULL };
+    int r = 0;
+    if (SDL_ShowMessageBox(&d, &r) != 0) return;
+    if (r == 1) update_go("stable", u.stable);
+    else if (r == 2) update_go("main", u.nightly);
 }
 
 /* the lobby: until everyone is in */
@@ -1125,6 +1203,8 @@ static void do_action(int id) {
         relayout = !g_fullscreen;
         break;
     case MI_CONTROLS: info_box(SDL_MESSAGEBOX_INFORMATION, "Controls", CONTROLS_TEXT, g_win); break;
+    case MI_UPDATE: update_menu(); break;
+    case MI_UPDATE_AUTO: g_update_auto = !g_update_auto; settings_save(); break;
     case MI_ABOUT:
         info_box(SDL_MESSAGEBOX_INFORMATION, "About",
             "Dragon Quest IX for PC, " DQIX_VERSION " (" DQIX_VERSION_DATE "), built " __DATE__ "\n\n"

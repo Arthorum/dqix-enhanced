@@ -105,6 +105,9 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
 
     HMENU help = sub(g_bar, L"&Help");
     item(help, MI_CONTROLS, L"&Controls");
+    item(help, MI_UPDATE, L"Check for &updates...");
+    item(help, MI_UPDATE_AUTO, L"Check for updates at &start");
+    sep(help);
     item(help, MI_ABOUT, L"&About");
 
     SetMenu(g_hwnd, g_bar);
