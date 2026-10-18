@@ -285,7 +285,7 @@ static char g_player_name[32] = "";              /* sessions: what friends see *
 static int g_session_port = SESSION_PORT;
 static int g_update_auto = 1;                    /* look for a new stable version at start */
 static char g_update_skip[32];                   /* ...but not this one (the player said so) */
-static int g_net_want;                         /* the menu's "connect" check */
+static int g_net_want = 1;                     /* the menu's "connect" check: on for a new install (settings.ini keeps each player's choice) */
 static const char* wfc_dns(void) {
     for (unsigned i = 0; i < sizeof WFC / sizeof WFC[0]; i++) if (!strcmp(g_wfc_server, WFC[i].key)) return WFC[i].dns;
     return g_wfc_server;

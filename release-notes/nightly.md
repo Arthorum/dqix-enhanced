@@ -49,6 +49,8 @@ adventure; try this one in its own folder with a copy of your save.
 - **New installs start with the DS Lite look**: the DS Lite screen filter
   and the screens inside the photo of a real DS Lite (F6 and F7 switch them).
   Updating doesn't change your settings.
+- **New installs start with Wireless > Connected mode on**, so Sellma's
+  downloads and DQVC work straight away (switch it off in the Wireless menu).
 - The photo of a real DS Lite is the default console; tidier help windows.
 - **The right stick turns the camera** while you walk around (like L and R,
   slower with a light push). In fullscreen, **double-click** outside the
