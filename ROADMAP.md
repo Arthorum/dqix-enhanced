@@ -32,8 +32,8 @@ The original game never had these, because its wireless only reached DSes in
 the same room.
 
 - [ ] **Join a session that has already started.**
-- [ ] **A way in for friends whose router won't open the port**, without
-      everyone installing a virtual LAN (hole punching with invite codes).
+- [ ] **Hole punching**: with a code, try a direct connection first and use
+      the relay only when that fails (a little less delay).
 - [ ] **Check NAT-PMP, PCP and IPv6 on real routers** (tested so far against
       a stand-in router only).
 - [ ] **Lower input delay when the DSes aren't talking wirelessly**, so walking
@@ -67,6 +67,7 @@ the same room.
 
 ## Done
 
+- [x] Join with a code through a relay, on any internet (v28-nightly2).
 - [x] **v27 released as stable** (from v27-nightly21).
 - [x] A setup window (`Install Dragon Quest IX.bat`) with shortcuts and an
       uninstaller; NAT-PMP, PCP and IPv6 for multiplayer; Send a bug report (v27-nightly21).

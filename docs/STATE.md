@@ -262,6 +262,14 @@ The one before: `v26` / `bookmark-2026-10-15`. To go back: `git checkout v26`.
 - **v27 stable** (2026-10-18): v27-nightly21 promoted (version "v27",
   release-notes/v27.md; `stable` = `main`). Nightly is the same until
   v28-nightly1.
+- **v28-nightly1/2**: session/front.log from hosting/joining on (live).
+  Relay: tools/relay/worker.js (Cloudflare Worker + SQLite Durable Object
+  per code, free plan; deploy-relay.bat), runtime/relay.c (WinHTTP
+  WebSocket on Windows, own ws:// client for tests; host: each friend =
+  a TCP connection to 127.0.0.1:port; friend: a local port to connect to;
+  30 ms coalescing, keepalive 25 s), relay_url.h. Host window by reach
+  (direct / code / home only). connect_within 10 s; home_address warning.
+  Tested with a Node stand-in for the Workers runtime.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

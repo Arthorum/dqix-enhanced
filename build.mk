@@ -82,6 +82,7 @@ $(OBJ)/rt/frontend_sdl.o: runtime/frontend_sdl.c runtime/nds.h runtime/frontend.
 
 # Sessions need every PC to compute exactly the same: no stack garbage in uninitialised variables.
 DETERMINISM ?= -ftrivial-auto-var-init=zero
+$(OBJ)/rt/relay.o: runtime/relay.h runtime/relay_url.h
 $(OBJ)/rt/%.o: runtime/%.c runtime/nds.h runtime/cpu.h runtime/coro.h runtime/frontend.h runtime/version.h runtime/air.h runtime/session.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter $(PIC) $(DETERMINISM) $(DEFS) -Iruntime -I$(GEN) -c $< -o $@

@@ -2,17 +2,24 @@
 adventure; try this one in its own folder with a copy of your save.
 
 **New since stable v27**
-- **A connection log for playing with friends far away**: as soon as you host
-  or join, the game writes `game\session\front.log`, line by line: the
-  router's answer, who connected from where, their version, and why a
-  connection failed (timed out, refused, no route). If a session won't get
-  going, send that file (it holds your and your friends' internet addresses,
-  so send it privately, not in a public bug report).
+- **Join friends with a code, on any internet**: hosting now shows a short
+  code like `DQ-7KF2-QM4P` (copied for you). Friends choose Wireless > Play
+  with friends far away > Join a friend and type it. It works even when
+  neither router lets anyone in (apartment and mobile internet): the games
+  then meet through a small relay on the internet, with a little more delay.
+  Where your router does let friends in, the host window also shows the
+  direct address.
+- **Clearer host window**: when friends far away can't get in, it says so,
+  instead of showing an address that only works inside your home.
+- **Joining gives up after 10 seconds** with a reason (no answer, refused,
+  a home-network address) instead of waiting much longer.
+- **A connection log** for playing with friends: `game\session\front.log`,
+  written as it happens (it holds internet addresses: send it privately).
 - Fixed: the in-game updater could fail with "'BUILD.bat' is not recognized"
   when the game had been started by some launchers.
 
-**Playing with friends**: everyone needs the same version. To test this
-nightly together, all of you install it.
+**Playing with friends**: everyone needs the same version, so all of you
+install this nightly to try it together.
 
 **How to install**: download *Source code (zip)* below, unzip it and
 double-click `Install Dragon Quest IX.bat`. Already playing? Use Help >
