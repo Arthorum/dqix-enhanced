@@ -90,13 +90,14 @@ folder. **Don't share the `game` or `build` folders**: they contain the game.
 |---|---|---|
 | D-pad | arrow keys | D-pad / left stick |
 | A / B / X / Y | X / Z / S / A | right / bottom / top / left button (by position, on any controller) |
-| L / R | Q / W | shoulder buttons |
+| L / R (turn the camera) | Q / W | shoulder buttons, or the right stick while walking |
 | START / SELECT | Enter / Right Shift | Start / Back |
 | touch screen | left mouse button on the bottom screen | |
 
 Every setting is in the **menu bar** at the top of the window. Handy keys:
 Tab (hold) fast forward, P pause, F5 Classic / Enhanced, F6 DS Lite screen,
-F7 DS Lite console, F11 fullscreen, F12 screenshot, F10 bug report.
+F7 DS Lite console, F11 fullscreen (double-click to leave it), F12
+screenshot, F10 bug report.
 
 ## Playing with friends
 

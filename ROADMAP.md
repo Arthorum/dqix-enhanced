@@ -22,8 +22,9 @@ Optional ways to play the DS never had, all off by default (Modern menu).
       decides what's on screen and widen it (only for the picture). In
       battles the sky picture is only as wide as the DS's screen, so the far
       sides show the game's paler backup sky.
-- [ ] **A free camera**: turn the camera with the right stick (and maybe
-      tilt and zoom, where the game's areas allow it).
+- [ ] **A free camera**: turning further than the game allows in each place,
+      and maybe tilt and zoom (the right stick already turns the camera as
+      far as the game allows).
 - [ ] Check the analog stick in battles and every kind of menu.
 
 ## Multiplayer
@@ -65,6 +66,8 @@ the same room.
 
 ## Done
 
+- [x] The right stick turns the camera; double-click leaves fullscreen
+      (v27-nightly18).
 - [x] Widescreen: the world drawn wider, the top screen as a minimap; the
       stylus arrow hidden while walking with the stick (v27-nightly13).
 - [x] The game's own icon for dqix.exe and its window, made from the ROM;

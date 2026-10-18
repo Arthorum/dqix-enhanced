@@ -19,5 +19,6 @@ extern int g_fe_touch, g_fe_tx, g_fe_ty;
 /* the gamepad's left stick (-32768..32767) and the D-pad directions it means
  * (kept apart: with "walk in any direction" on, the stick walks instead) */
 extern int g_fe_stick_x, g_fe_stick_y;
+extern int g_fe_rstick_x;                 /* the right stick, left/right: turns the camera (input.c) */
 extern uint16_t g_fe_stick_keys;
 extern int g_analog_walk;                 /* Modern > walk in any direction (settings.ini analog_walk) */

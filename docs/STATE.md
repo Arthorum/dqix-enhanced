@@ -225,6 +225,13 @@ to it: `git checkout bookmark-2026-10-15`.
   Nintendo controllers by label by default: A/B and X/Y were swapped on
   Switch controllers); Joy-Con pairs combined. Not tested with real pads
   here.
+- **nightly18**: the right stick (x) presses L / R while the walk flag is 1
+  and neither is held (input.c stick_camera): the game turns the camera
+  while L/R is held, as far as each area allows (towns and rooms ~45 deg
+  each way, the world map not at all), and keeps it on release; duty 25% to
+  100% by how far the stick is pushed, so a light push turns slowly
+  (checked: full push = holding L). DQIX_RSTICK=from,to,x for tests.
+  Double-click in fullscreen = leave it.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

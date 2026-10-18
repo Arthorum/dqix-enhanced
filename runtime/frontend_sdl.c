@@ -621,7 +621,7 @@ static uint16_t key_bits(const Uint8* ks) {
 }
 
 static uint16_t pad_bits(void) {
-    if (!g_pad) { g_fe_stick_x = g_fe_stick_y = 0; g_fe_stick_keys = 0; return 0; }
+    if (!g_pad) { g_fe_stick_x = g_fe_stick_y = g_fe_rstick_x = 0; g_fe_stick_keys = 0; return 0; }
     uint16_t k = 0;
     SDL_GameController* p = g_pad;
     /* positions: east = A, south = B, north = X, west = Y (like a DS) */
@@ -642,6 +642,7 @@ static uint16_t pad_bits(void) {
     if (lx > 16000) s |= 1 << 4; if (lx < -16000) s |= 1 << 5;
     if (ly < -16000) s |= 1 << 6; if (ly > 16000) s |= 1 << 7;
     g_fe_stick_x = lx; g_fe_stick_y = ly; g_fe_stick_keys = s;
+    g_fe_rstick_x = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_RIGHTX);
     return k;
 }
 
@@ -929,13 +930,15 @@ static const char* CONTROLS_TEXT =
     "A / B          X / Z                 right / bottom button\n"
     "X / Y          S / A                 top / left button\n"
     "L / R          Q / W                 shoulder buttons\n"
+    "               (turn the camera)     or the right stick, while walking\n"
     "START          Enter                 Start\n"
     "SELECT         Right Shift           Back\n"
     "Touch screen   left mouse button on the bottom screen\n\n"
     "Tab (hold) fast forward   P pause   F5 Classic / Enhanced\n"
     "F6 DS Lite screen   F7 DS Lite console   F8 actual size   F2 layout   F3 window size\n"
     "F4 3D resolution   F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
-    "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit";
+    "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit\n"
+    "In fullscreen, double-click to go back to the window.";
 
 /* A message box whose long lines are wrapped (the system boxes size themselves
  * to the longest line, which made the help as wide as the screen). */
@@ -1402,6 +1405,10 @@ static void handle_events(void) {
             if (k == SDL_SCANCODE_P || k == SDL_SCANCODE_PAUSE) do_action(MI_PAUSE);
             break;
         }
+        case SDL_MOUSEBUTTONDOWN:
+            /* fullscreen: a double click anywhere goes back to the window */
+            if (g_fullscreen && e.button.button == SDL_BUTTON_LEFT && e.button.clicks == 2) do_action(MI_FULL);
+            break;
         case SDL_MOUSEMOTION:
             /* fullscreen: the menu bar appears while the mouse is at the top edge */
             if (g_fullscreen) {

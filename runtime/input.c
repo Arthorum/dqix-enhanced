@@ -26,6 +26,7 @@ int g_touch_down, g_touch_x, g_touch_y;
 uint16_t g_fe_keys;
 int g_fe_touch, g_fe_tx, g_fe_ty;
 int g_fe_stick_x, g_fe_stick_y;
+int g_fe_rstick_x;
 uint16_t g_fe_stick_keys;
 int g_analog_walk;
 
@@ -53,6 +54,25 @@ static int stick_walk(int* tx, int* ty) {
     *tx = WALK_X + dx; *ty = WALK_Y + dy;
     if (*tx < 0) *tx = 0; if (*tx > 255) *tx = 255; if (*ty < 0) *ty = 0; if (*ty > 191) *ty = 191;
     return 1;
+}
+
+/* ---------------------------------------------------------------- the right stick turns the camera
+ * The game turns the camera while L or R is held (as far as each place
+ * allows) and leaves it where it is on release. The right stick presses them:
+ * left = L, right = R, more often the further it is pushed, so a light push
+ * turns the camera slowly. Only while the hero is free to walk (in menus and
+ * battles L and R do other things); not while L or R is pressed itself. To
+ * the game it is just L and R. */
+#define CAM_DEAD 9000
+static uint32_t stick_camera(uint32_t keys) {
+    static int acc;                                     /* presses owed, in 1/1000 */
+    int x = g_fe_rstick_x, m = x < 0 ? -x : x;
+    if (m < CAM_DEAD || g_main_ram[WALK_FLAG] != 1 || (keys & (3u << 8))) { acc = 0; return 0; }
+    int duty = 250 + 750 * (m - CAM_DEAD) / (32767 - CAM_DEAD);   /* a quarter of the frames .. every frame */
+    acc += duty;
+    if (acc < 1000) return 0;
+    acc -= 1000;
+    return x > 0 ? 1u << 8 : 1u << 9;                   /* R : L */
 }
 
 static const char* const k_names[] = { "A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L", "X", "Y", "LID" };   /* LID = the DS is closed */
@@ -191,7 +211,12 @@ void input_update(void) {
                 q = strchr(q, ';'); if (q) q++; }
             if (getenv("DQIX_ANALOG")) g_analog_walk = 1; }
         for (int i = 0; i < nst; i++) if ((long long)g_frame >= st[i][0] && (long long)g_frame < st[i][1]) { g_fe_stick_x = (int)st[i][2]; g_fe_stick_y = (int)st[i][3]; }
+        static long long rs[3] = { -1, -1, 0 }; static int rinit;      /* DQIX_RSTICK=from,to,x: the right stick */
+        if (!rinit) { rinit = 1; const char* e = getenv("DQIX_RSTICK"); if (e) sscanf(e, "%lld,%lld,%lld", &rs[0], &rs[1], &rs[2]); }
+        if ((long long)g_frame >= rs[0] && (long long)g_frame < rs[1]) g_fe_rstick_x = (int)rs[2];
+        else if (rs[0] >= 0) g_fe_rstick_x = 0;
     }
+    g_keys_down |= (uint16_t)stick_camera(g_keys_down);
     if (g_fe_touch) { g_touch_down = 1; g_touch_x = g_fe_tx; g_touch_y = g_fe_ty; g_walk_frames = 0; }
     else { int tx, ty;
         if (!g_touch_down && stick_walk(&tx, &ty)) { g_touch_down = 1; g_touch_x = tx; g_touch_y = ty; }
