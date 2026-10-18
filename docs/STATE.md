@@ -1,15 +1,15 @@
 # Where the project stands
 
-Git tag `v27` (and `bookmark-2026-10-18`) marks the current stable version.
-The one before: `v26` / `bookmark-2026-10-15`. To go back: `git checkout v26`.
+Git tag `v28` (and `bookmark-2026-10-18b`) marks the current stable version.
+The ones before: `v27`, `v26`. To go back: `git checkout v27`.
 
 ## Stable and nightly
 
-- **Stable** = git branch `stable` (now v27, tag `v27`): the
+- **Stable** = git branch `stable` (now v28, tag `v28`): the
   version to play your main save on. Changes only by promoting a proven
   nightly, or a small safe fix (made on `stable`, then merged into `main`).
   Keep it in its own folder, built with BUILD.bat.
-- **Nightly** = branch `main`, versions `v28-nightly1`, `-nightly2`... (next)
+- **Nightly** = branch `main`, versions `v29-nightly1`, `-nightly2`... (next)
   Experimental. Its own folder and saves.
 - **Promoting**: when a nightly is solid, it becomes the next stable: set the
   version to `v27`, bookmark (tag), move `stable` to it, make the stable zips.
@@ -270,6 +270,9 @@ The one before: `v26` / `bookmark-2026-10-15`. To go back: `git checkout v26`.
   30 ms coalescing, keepalive 25 s), relay_url.h. Host window by reach
   (direct / code / home only). connect_within 10 s; home_address warning.
   Tested with a Node stand-in for the Workers runtime.
+- **v28 stable** (2026-10-18): v28-nightly2 promoted after a real session
+  between two apartments far apart through the relay (ping ~350 ms, input
+  delay 20 = the maximum, 29,000+ frames in sync).
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

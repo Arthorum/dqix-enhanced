@@ -3,14 +3,12 @@
 What's planned for DQIX Enhanced, roughly in order. Done items move to the
 bottom with the version they arrived in.
 
-## Checks still to do (v27)
+## Multiplayer polish
 
-- [ ] **A real internet session with friends**: 3-4 players, tag mode,
-      co-op through Pavo and a DQVC purchase, on different home networks.
-- [ ] **The host window on Windows**: check the address, the Copy button, the
-      player list and Start the game.
-- [ ] **The updater's first real run**: *Help > Check for updates* against
-      the public repository, then an actual update and a rollback.
+- [ ] **Lower input delay over long distances**: base it on the one-way trip,
+      bundle less at the relay, and log every wait so lag can be traced.
+- [ ] **The host window on Windows**: check the Copy button and the player
+      list with 3-4 players.
 
 ## Modern options
 
@@ -67,6 +65,9 @@ the same room.
 
 ## Done
 
+- [x] **v28 released as stable**: a real session across thousands of miles,
+      both on apartment internet, through the relay (from v28-nightly2).
+- [x] The updater: a real update to v27 and a rollback, tested on Windows.
 - [x] Join with a code through a relay, on any internet (v28-nightly2).
 - [x] **v27 released as stable** (from v27-nightly21).
 - [x] A setup window (`Install Dragon Quest IX.bat`) with shortcuts and an
