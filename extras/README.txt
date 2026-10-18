@@ -1,9 +1,7 @@
-Optional files go here. The game works without them; they add things the
-original got from Nintendo's servers, which closed in 2014.
+Optional, and no longer needed: the game has DQVC's sales and the downloadable
+quests built in, and BUILD.bat fetches DQVC's news by itself.
 
-  wfc\YDQE\     DQIX's downloads: Sellma's downloadable quests and special
-                guests, DQVC's news, and dqvc.txt (DQVC's 52 weekly sales on
-                the original calendar). Used by Wireless > Server > Built-in.
-
-If you were given a "DQIX-PC extras" folder or zip, copy its contents here
-so that this folder contains wfc\YDQE\..., then run BUILD.bat again.
+If you'd rather use the original files of Nintendo's download server (from the
+fans' archive, github.com/InternalLoss/DLS1-Files), copy them here so that this
+folder contains wfc\YDQE\_list.txt and the files it lists, then run BUILD.bat
+again. A dqvc.txt there (tools/dqvc_build.py) replaces the built-in sale list.

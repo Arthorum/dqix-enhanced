@@ -148,6 +148,17 @@ to it: `git checkout bookmark-2026-10-15`.
   runs BUILD.bat with DQIX_NOPAUSE=1, starts game\play.bat) and
   `update\rollback.bat`. BUILD.bat remembers the ROM (rom\last-rom.txt).
   Only works in a BUILD.bat project (game\ one below BUILD.bat).
+- **nightly10**: the built-in Wi-Fi needs no files. DQVC's schedule is built
+  in as numbers (runtime/dqvc_schedule.h from tools/dqvc_to_c.py; no item
+  names or sale titles); the quest download is built from 64 quest + 23
+  guest numbers (dlc_quest_file: byte for byte Nintendo's quest52e.bin of
+  2010-06-04, checked); without a _list.txt the server lists those two plus
+  infomes_47.bin when present, which build-game.sh fetches from
+  raw.githubusercontent.com/InternalLoss/DLS1-Files/master/YDQE/ (the only US
+  news that survives; Square Enix's text, so not kept here). Tested: same
+  requests, same screens and the same save as with the original files; no
+  files at all (2 files, DQVC works); a session with only the news.
+  Next: hand-written weekly news (by the owner, by hand).
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

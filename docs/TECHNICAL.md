@@ -37,11 +37,14 @@ You need your own Dragon Quest IX cartridge's ROM (the USA version), Windows
    `game` folder holds everything the game needs, including your save
    (`dqix.sav`) and settings (`settings.ini`), so you can move it anywhere.
 
-**Optional extras.** Copy them into the `extras` folder (so it contains
-`wfc\YDQE\...`) and run `BUILD.bat` again: DQIX's downloads for the built-in
-Wi-Fi server (Sellma's downloadable quests, DQVC's news and its 52 weekly
-sales). They are game data, so they aren't part of this project; see
-`extras\README.txt`.
+**Built-in downloads.** The built-in Wi-Fi server needs no files: DQVC's 52
+sales are built in as numbers (`runtime/dqvc_schedule.h`, made by
+`tools/dqvc_to_c.py`), and the quest download is built from the list of
+quest and guest numbers it held (byte for byte the file Nintendo served on
+4 June 2010). Only DQVC's news is Square Enix's text: `BUILD.bat` fetches the
+one message that survives (`infomes_47.bin`) from the fans' archive of
+Nintendo's download server. Original files in `extras\wfc\YDQE\` (with a
+`_list.txt`) are still used instead, if present; see `extras\README.txt`.
 
 Nothing from the game is in this project: `BUILD.bat` makes everything from
 your ROM on your PC (`tools/extract_rom.py` takes the code out of it,

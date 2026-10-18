@@ -194,25 +194,53 @@ static int64_t cycle_start(int y) {
 
 static char* load_file(const char* path, int* size);
 typedef struct { uint32_t id, price, qty; } StockItem;
+#include "dqvc_schedule.h"
 #define DQVC_DAILY_ITEMS 12             /* of the week's pool, per day */
 /* This week's stock for the game, built from dqvc.txt: a malloc'd file and
  * its name, or NULL (no schedule). */
-static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len, char* title, int titlecap) {
+/* The sale schedule: wfc/<game>/dqvc.txt if there is one (with the names,
+ * for reading), else the one built in (numbers only, dqvc_schedule.h; USA). */
+static int dqvc_schedule(const char* gamecd, DqvcWeek** weeks_out, DqvcItem** items_out, int* nweeks) {
     char p[700]; snprintf(p, sizeof p, "%s/%s/dqvc.txt", g_dir, gamecd);
     int n = 0; char* txt = load_file(p, &n);
-    if (!txt) return NULL;
-    /* each sale's start, as days after the first one (the dates are from the
-     * 2011-12 cycle: July-December 2011, January-July 2012) */
-    int starts[128]; int weeks = 0;
+    if (!txt) {
+        if (strcmp(gamecd, "YDQE")) return 0;
+        *weeks_out = (DqvcWeek*)DQVC_WEEKS; *items_out = (DqvcItem*)DQVC_ITEMS;
+        *nweeks = (int)(sizeof DQVC_WEEKS / sizeof DQVC_WEEKS[0]);
+        return 1;
+    }
+    DqvcWeek* w = calloc(128, sizeof *w); DqvcItem* it = calloc(4096, sizeof *it);
+    int nw = 0, ni = 0;
     for (char* l = txt; l && *l; ) {
-        char* e = strchr(l, '\n');
-        int mo, d;
-        if (!strncmp(l, "week", 4) && weeks < 128)
-            starts[weeks++] = sscanf(l + 4, " %d/%d", &mo, &d) == 2 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31
-                              ? (int)(civil_days(mo >= 7 ? 2011 : 2012, mo, d) - civil_days(2011, 7, 15)) : -1;
+        char* e = strchr(l, '\n'); if (e) *e = 0;
+        int mo, d; unsigned id, price, qty;
+        if (!strncmp(l, "week", 4)) {
+            if (nw < 128 && sscanf(l + 4, " %d/%d", &mo, &d) == 2) { w[nw].month = (uint8_t)mo; w[nw].day = (uint8_t)d; w[nw].first = (uint16_t)ni; w[nw].count = 0; nw++; }
+        } else if (nw && ni < 4096 && sscanf(l, "%u %u %u", &id, &price, &qty) == 3 && id) {
+            it[ni].id = (uint16_t)id; it[ni].price = price; it[ni].qty = (uint8_t)(qty ? qty : 1); ni++; w[nw - 1].count++;
+        }
         l = e ? e + 1 : NULL;
     }
-    if (!weeks || starts[0] != 0) { free(txt); return NULL; }
+    free(txt);
+    if (!nw) { free(w); free(it); return 0; }
+    *weeks_out = w; *items_out = it; *nweeks = nw;
+    return 2;                                               /* allocated */
+}
+
+/* Today's stock for the game: a malloc'd file and its name, or NULL (no schedule). */
+static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len, char* title, int titlecap) {
+    DqvcWeek* sw; DqvcItem* si; int weeks;
+    int src = dqvc_schedule(gamecd, &sw, &si, &weeks);
+    if (!src) return NULL;
+    /* each sale's start, as days after the first one (the dates are from the
+     * 2011-12 cycle: July-December 2011, January-July 2012) */
+    int starts[128]; starts[0] = -1;
+    for (int i = 0; i < weeks && i < 128; i++) {
+        int mo = sw[i].month, d = sw[i].day;
+        starts[i] = mo >= 1 && mo <= 12 && d >= 1 && d <= 31 ? (int)(civil_days(mo >= 7 ? 2011 : 2012, mo, d) - civil_days(2011, 7, 15)) : -1;
+    }
+    if (weeks > 128) weeks = 128;
+    if (starts[0] != 0) { if (src == 2) { free(sw); free(si); } return NULL; }
     /* Now, in UTC, with days starting at 08:00 UTC: when the original service
      * put out each day's stock. Each year's cycle starts on the Friday nearest
      * 15 July (the sales started on Fridays at 08:00 GMT). */
@@ -226,19 +254,13 @@ static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len,
     int64_t abs_week = (int64_t)(y - 2010) * weeks + w;
     int64_t abs_day = day - civil_days(2010, 7, 1);         /* a new stock file every day */
     /* the items of week w */
-    StockItem items[200]; int ni = 0; int cur = -1;
-    title[0] = 0;
-    for (char* l = txt; l && *l; ) {
-        char* e = strchr(l, '\n'); if (e) *e = 0;
-        if (!strncmp(l, "week", 4)) { cur++; if (cur == w) { const char* t = l + 4; while (*t == ' ') t++; while (*t && *t != ' ') t++; while (*t == ' ') t++; snprintf(title, (size_t)titlecap, "%s", t);
-                                                            size_t tl = strlen(title); while (tl && (title[tl - 1] == '\r' || title[tl - 1] == ' ')) title[--tl] = 0; } }
-        else if (cur == w && ni < 200) {
-            unsigned id, price, qty;
-            if (sscanf(l, "%u %u %u", &id, &price, &qty) == 3 && id) { items[ni].id = id; items[ni].price = price; items[ni].qty = qty ? qty : 1; ni++; }
-        }
-        l = e ? e + 1 : NULL;
+    StockItem items[200]; int ni = 0;
+    snprintf(title, (size_t)titlecap, "sale %d", w + 1);
+    for (int i = 0; i < sw[w].count && ni < 200; i++) {
+        const DqvcItem* x = &si[sw[w].first + i];
+        items[ni].id = x->id; items[ni].price = x->price; items[ni].qty = x->qty ? x->qty : 1; ni++;
     }
-    free(txt);
+    if (src == 2) { free(sw); free(si); }
     if (!ni) return NULL;
     /* Each day's stock: the original changed daily within the week's theme
      * (which items it chose each day isn't recorded), so each day takes its
@@ -278,7 +300,53 @@ static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len,
       memset(q + 27, 0xFF, 5); }
     *len = seal(f, body + 32);
     snprintf(name, (size_t)namecap, "dqvc_d%05d.bin", (int)abs_day);
-    ev("wfc: DQVC week %d of %d (%s, sale %lld), day %lld: %d of its %d items\n", w + 1, weeks, title, (long long)abs_week, (long long)abs_day, ni, full);
+    ev("wfc: DQVC sale %d of %d (cycle week %lld), day %lld: %d of its %d items\n", w + 1, weeks, (long long)abs_week, (long long)abs_day, ni, full);
+    return f;
+}
+
+/* ---------------------------------------------------------------- the downloadable quests
+ * What the last quest download held (USA): which of the cartridge's
+ * downloadable quests are switched on, in the order they came out, and the
+ * order of the 23 special guests. Only numbers: the quests and guests
+ * themselves are on the cartridge. The file built from these is the same,
+ * byte for byte, as the one Nintendo served on 4 June 2010. */
+static const uint8_t DLC_QUESTS[64] = {
+    0x85, 0x86, 0xae, 0x91, 0xaf, 0x02, 0xb0, 0xb1, 0xb2, 0x95, 0xb3, 0x87, 0xb4, 0x89, 0xb5, 0x8a,
+    0xb6, 0x9b, 0xb7, 0xa4, 0xb8, 0x7f, 0xb9, 0x9e, 0xba, 0xca, 0xbc, 0xbd, 0xbe, 0xbf, 0x8f, 0x7b,
+    0xa1, 0x9c, 0xa5, 0xc0, 0xc1, 0x9a, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0x94, 0x98, 0x96, 0x92, 0x9d,
+    0x99, 0xa2, 0x7a, 0xa0, 0x83, 0x97, 0xa8, 0x8b, 0xa6, 0xad, 0x8c, 0xa9, 0xaa, 0x9f, 0x84, 0x88 };
+static const uint8_t DLC_GUESTS[23] = { 3, 19, 15, 4, 11, 1, 12, 21, 17, 8, 23, 16, 6, 5, 7, 20, 13, 2, 9, 10, 14, 18, 22 };
+#define DLC_QUEST_FILE "quest52e.bin"
+
+/* one record: tag, count, 2-bit types (4 in the header, then 16 per word), values */
+static uint8_t* dls_record(uint8_t* q, int tag, const uint32_t* v, int n, int type) {
+    q[0] = (uint8_t)tag; q[1] = 0; q[2] = (uint8_t)n; q[3] = 0;
+    for (int i = 0; i < n && i < 4; i++) q[3] |= (uint8_t)(type << (2 * i));
+    q += 4;
+    int rest = n > 4 ? n - 4 : 0, words = (rest + 15) / 16;
+    memset(q, 0xFF, (size_t)words * 4);
+    for (int i = 0; i < rest; i++) { if (i % 4 == 0) q[i / 4] = 0; q[i / 4] |= (uint8_t)(type << (2 * (i % 4))); }
+    q += words * 4;
+    for (int i = 0; i < n; i++) { put32le(q, v[i]); q += 4; }
+    return q;
+}
+static uint8_t* dlc_quest_file(int* len) {
+    uint8_t* f = calloc(1, 1024);
+    uint8_t* q = f + 16;
+    uint32_t v[64];
+    v[0] = 0; q = dls_record(q, 0x65, v, 1, 0);
+    v[0] = 20; q = dls_record(q, 0x64, v, 1, 0);
+    for (int i = 0; i < 64; i++) v[i] = DLC_QUESTS[i];
+    q = dls_record(q, 0x6C, v, 64, 1);
+    for (int i = 0; i < 23; i++) v[i] = DLC_GUESTS[i];
+    q = dls_record(q, 0x6D, v, 23, 1);
+    v[0] = 1; q = dls_record(q, 0x6E, v, 1, 1);
+    int end = (int)(q - f); end = (end + 15) / 16 * 16;
+    memset(q, 0xFF, (size_t)(f + end - q));
+    put32le(f, 5); put32le(f + 4, (uint32_t)end); put32le(f + 8, 27); put32le(f + 12, 2);
+    memcpy(f + end, "2010/06/04 17:42:30\0" "100604\0", 27);
+    memset(f + end + 27, 0xFF, 5);
+    *len = seal(f, end + 32);
     return f;
 }
 
@@ -405,6 +473,15 @@ static char* http(const char* req, int reqlen, int* outlen) {
         for (int i = 0; i < 4 && okcd; i++) okcd = (gamecd[i] >= 'A' && gamecd[i] <= 'Z') || (gamecd[i] >= '0' && gamecd[i] <= '9');
         char p[700]; snprintf(p, sizeof p, "%s/%s/_list.txt", g_dir, okcd ? gamecd : "none");
         int ln = 0; char* list = okcd ? load_file(p, &ln) : NULL;
+        if (!list && okcd && !strcmp(gamecd, "YDQE")) {
+            /* no _list.txt: the quests and DQVC built in, and the news if the build fetched it */
+            int ql = 0; free(dlc_quest_file(&ql));
+            list = malloc(512);
+            int o = snprintf(list, 512, DLC_QUEST_FILE "\t\tquest\t\t\t%d\r\nauction_0.bin\t\tauction\t\t\t0\r\n", ql);
+            char np[700]; snprintf(np, sizeof np, "%s/%s/infomes_47.bin", g_dir, gamecd);
+            int nl = 0; char* news = load_file(np, &nl);
+            if (news) { snprintf(list + o, (size_t)(512 - o), "infomes_47.bin\t\tmes\t\t\t%d\r\n", nl); free(news); }
+        }
         char hits[2048] = ""; int count = 0;
         char wname[64] = "", wtitle[128]; int wlen = 0;
         uint8_t* wk = okcd ? dqvc_week(gamecd, wname, sizeof wname, &wlen, wtitle, sizeof wtitle) : NULL;
@@ -434,6 +511,7 @@ static char* http(const char* req, int reqlen, int* outlen) {
                 binlen = wl;
             } else
             bin = okn && okcd ? load_file(p, &binlen) : NULL;
+            if (!bin && okn && !strcmp(gamecd, "YDQE") && !strcmp(name, DLC_QUEST_FILE)) bin = (char*)dlc_quest_file(&binlen);   /* built in */
             if (bin) { ctype = "application/x-dsdl"; snprintf(extrab, sizeof extrab, "Content-Disposition: attachment; filename=\"%s\"\r\n", name); extra = extrab; }
             else status = 404;
         }

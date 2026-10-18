@@ -40,8 +40,8 @@ exactly like the original, and it can also do things the DS never could.
 - **Sellma's DQVC shop is back**, with the original 52 weekly sales on their
   original calendar. New stock arrives every day, every player gets their
   own shop, and friends visiting your world can shop at yours.
-- The original downloadable quests and news, served by a small built-in
-  server (with the optional extras), so no internet connection is needed.
+- The downloadable quests arrive through Sellma like in 2010, from a small
+  server built into the game: no internet connection or extra files needed.
 - An option to unlock all downloadable quests and special guests at once.
 
 **Easy to keep up to date**
@@ -61,11 +61,9 @@ first time.
    and unzip it somewhere, for example in Documents. (The green **Code**
    button gives the nightly version: the newest work, less tested.)
 2. Put your ROM in the `rom` folder.
-3. Optional: if you have the extras, unzip them into the `extras` folder.
-   They add the original downloads for the built-in Wi-Fi and DQVC.
-4. Double-click **`BUILD.bat`**. The first time, it installs free build tools
+3. Double-click **`BUILD.bat`**. The first time, it installs free build tools
    (MSYS2), which takes 10-20 minutes in all. Later builds are much faster.
-5. Play with **`game\play.bat`**. Make a desktop shortcut to it if you like.
+4. Play with **`game\play.bat`**. Make a desktop shortcut to it if you like.
 
 Your save (`dqix.sav`) and settings (`settings.ini`) live in the `game`
 folder. **Don't share the `game` or `build` folders**: they contain the game.
@@ -107,7 +105,7 @@ The game checks for a new stable version when it starts and asks before
 changing anything. *Help > Check for updates* shows both the stable and the
 nightly version, so you can choose either. An update downloads the new
 version of this project, builds the game again from your ROM, and restarts.
-Your saves, settings and extras are kept, and the previous version is kept
+Your saves and settings are kept, and the previous version is kept
 in the `update` folder (`update\rollback.bat` goes back to it).
 
 ## If something goes wrong

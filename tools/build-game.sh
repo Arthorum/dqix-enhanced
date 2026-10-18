@@ -58,8 +58,18 @@ for src in extras/wfc wfc; do
         mkdir -p "game/wfc/$(basename "$g")" && cp "$g"* "game/wfc/$(basename "$g")/"
     done
 done
-if [ -d game/wfc ]; then echo "   Wireless downloads (DQVC, quests): included"
-else echo "   Wireless downloads not found (optional: put them in the extras folder and build again)"; fi
+# DQVC's news: the one message that survives (Nintendo's last), from the fans'
+# archive of Nintendo's download server. The quests and DQVC's sales are
+# built into the game; the news is Square Enix's text, so it is fetched, not kept here.
+if [ ! -f game/wfc/YDQE/infomes_47.bin ]; then
+    mkdir -p game/wfc/YDQE
+    if curl -fsSL --max-time 30 -o game/wfc/YDQE/infomes_47.bin \
+         https://raw.githubusercontent.com/InternalLoss/DLS1-Files/master/YDQE/infomes_47.bin; then
+        echo "   DQVC news: fetched"
+    else
+        rm -f game/wfc/YDQE/infomes_47.bin; echo "   DQVC news: not fetched (optional; Sellma just has no news)"
+    fi
+fi
 cat > game/play.bat <<'BAT'
 @echo off
 rem Dragon Quest IX (PC). Keys: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R,
