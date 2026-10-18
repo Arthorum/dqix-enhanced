@@ -1010,11 +1010,10 @@ static void restart_with(const char* session) {
 #endif
 }
 
+static int choose(const char* title, const char* text, const char* const* buttons, int n, int def, int cancel);
 static int ask_yes(const char* title, const char* text, const char* yes) {
-    const SDL_MessageBoxButtonData b[2] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, yes }, { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel" } };
-    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, title, text, 2, b, NULL };
-    int r = 0;
-    return SDL_ShowMessageBox(&d, &r) == 0 && r == 1;
+    const char* b[2] = { yes, "Cancel" };
+    return choose(title, text, b, 2, 0, 1) == 0;
 }
 
 static int ask_name(void) {
@@ -1064,6 +1063,114 @@ static void session_action(int id) {
 }
 
 /* ---------------------------------------------------------------- updates (update.c) */
+/* ---------------------------------------------------------------- sending a bug report (GitHub)
+ * Nothing is uploaded by the game: it packs the report into one .zip, opens a
+ * new GitHub issue in the browser with the details filled in, and opens the
+ * folder with the zip so the player can drag it in. Only after a clear
+ * warning (GitHub is public), with the save files optional. */
+static void url_add(char* out, size_t n, const char* s) {
+    size_t k = strlen(out);
+    for (; *s && k + 4 < n; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out[k++] = (char)c;
+        else { snprintf(out + k, n - k, "%%%02X", c); k += 3; }
+    }
+    out[k] = 0;
+}
+
+static void show_in_folder(const char* path) {
+#ifdef _WIN32
+    char full[MAX_PATH]; if (!GetFullPathNameA(path, sizeof full, full, NULL)) return;
+    for (char* p = full; *p; p++) if (*p == '/') *p = '\\';
+    char cmd[MAX_PATH + 40]; snprintf(cmd, sizeof cmd, "explorer.exe /select,\"%s\"", full);
+    STARTUPINFOA si; memset(&si, 0, sizeof si); si.cb = sizeof si;
+    PROCESS_INFORMATION pi;
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+#else
+    char dir[600]; snprintf(dir, sizeof dir, "%s", path);
+    char* s = strrchr(dir, '/'); if (s) *s = 0;
+    char url[700]; snprintf(url, sizeof url, "file://%s", dir);
+    SDL_OpenURL(url);
+#endif
+}
+
+static int choose(const char* title, const char* text, const char* const* buttons, int n, int def, int cancel);
+static void report_send(const char* dir, const char* description) {
+    static const char* WARN =
+        "Send this report to the people working on the game?\n\n"
+        "Your browser opens a new bug report on the project's GitHub page, already filled in, and the report's folder opens "
+        "with one file in it to drag into that page. Then press Submit. You need a free GitHub account.\n\n"
+        "Everything on GitHub is public: anyone can see the report and download its file. The file contains:\n"
+        "  - a screenshot of the game\n"
+        "  - every button you pressed since the game started\n"
+        "  - your save file (your characters' names and progress), at the start and now, if ticked below\n"
+        "  - your description\n"
+        "  - the game's version, log and settings: your graphics card, the Wi-Fi settings and the console's made-up ID; "
+        "after playing with friends also their names and the host's internet address\n"
+        "  - timing measurements\n\n"
+        "Nothing is sent until you press Submit on GitHub.";
+    int with_saves = 1;
+    const char* b[2] = { "Open GitHub", "Don't send" };
+    int r = choice_box(g_win, "Send the bug report", WARN, b, 2, 0, 1, "Include my save file (it makes the problem much easier to find)", &with_saves);
+    if (r < 0) {                                                  /* no Windows dialog: three buttons instead of the tick */
+        const char* b3[3] = { "Send with my save", "Send without my save", "Don't send" };
+        int r3 = choose("Send the bug report", WARN, b3, 3, 0, 2);
+        if (r3 == 2) return;
+        with_saves = r3 == 0; r = 0;
+    }
+    if (r != 0) return;
+    char zip[400];
+    if (!report_zip(dir, with_saves, zip, sizeof zip)) { info_box(SDL_MESSAGEBOX_ERROR, "Send the bug report", "The report couldn't be packed. It is still in the reports folder.", g_win); return; }
+    const char* zname = strrchr(zip, '/'); zname = zname ? zname + 1 : zip;
+    char title[160] = "Bug report (" DQIX_VERSION ")";
+    if (description && description[0]) {
+        char first[90]; snprintf(first, sizeof first, "%s", description);
+        first[strcspn(first, "\r\n")] = 0;
+        if (strlen(first) > 70) strcpy(first + 67, "...");
+        snprintf(title, sizeof title, "%s (" DQIX_VERSION ")", first);
+    }
+    static char body[6000];
+    snprintf(body, sizeof body,
+             "**Version:** %s (%s)\n**Mode:** %s\n**Graphics:** %s\n\n**What happened:**\n%s\n\n"
+             "**Report file:** drag `%s` from the folder that just opened into this box.%s\n",
+             DQIX_VERSION,
+#ifdef _WIN32
+             "Windows",
+#else
+             "Linux",
+#endif
+             g_classic ? "Classic" : "Enhanced", g_gl ? gl_renderer_name() : "software",
+             description && description[0] ? description : "(please describe what you did and what went wrong)",
+             zname, with_saves ? "" : " (without the save file)");
+    static char url[16000];
+    snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/issues/new?labels=bug&title=");
+    url_add(url, sizeof url, title);
+    strncat(url, "&body=", sizeof url - strlen(url) - 1);
+    url_add(url, sizeof url, body);
+    show_in_folder(zip);
+    if (SDL_OpenURL(url) != 0) {
+        char m[600]; snprintf(m, sizeof m, "The browser didn't open. Go to https://github.com/%s/issues/new and attach %s.", UPDATE_REPO, zip);
+        info_box(SDL_MESSAGEBOX_INFORMATION, "Send the bug report", m, g_win);
+    }
+}
+
+/* A message with buttons: Windows' own dialog (buttons sized to their words),
+ * SDL's elsewhere. Returns the chosen button's index, or `cancel`. */
+static int choose(const char* title, const char* text, const char* const* buttons, int n, int def, int cancel) {
+    int r = choice_box(g_win, title, text, buttons, n, def, cancel, NULL, NULL);
+    if (r >= 0) return r;
+    SDL_MessageBoxButtonData b[8];
+    if (n > 8) n = 8;
+    for (int i = 0; i < n; i++) {
+        b[i].flags = (i == def ? SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT : 0) | (i == cancel ? SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT : 0);
+        b[i].buttonid = i; b[i].text = buttons[i];
+    }
+    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, title, text, n, b, NULL };
+    int out = cancel;
+    if (SDL_ShowMessageBox(&d, &out) != 0 || out < 0) return cancel;
+    return out;
+}
+
 static void update_go(const char* branch, const char* version) {
     if (session_requested()) { info_box(SDL_MESSAGEBOX_INFORMATION, "Update", "Leave the session first (Wireless menu), then update.", g_win); return; }
     if (!update_project_dir()) {
@@ -1075,7 +1182,7 @@ static void update_go(const char* branch, const char* version) {
     snprintf(text, sizeof text, "Update to %s?\n\nThe game closes, downloads %s, builds it from your ROM again (a few minutes; "
              "a window shows how far it is) and starts again. Your saves, settings and extras are kept, and the current "
              "version is kept in the update folder in case you want to go back (update\\rollback.bat).", version, version);
-    if (!ask_yes("Update", text, "Update")) return;
+    { const char* b[2] = { "Update", "Cancel" }; if (choose("Update", text, b, 2, 0, 1) != 0) return; }
     backup_flush();
     settings_save();
     if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - downloading the update...");
@@ -1091,13 +1198,11 @@ static void update_offer(const UpdateInfo* u) {
     char text[400];
     snprintf(text, sizeof text, "Dragon Quest IX %s is available (you have %s).\n\nUpdate now? (Help > Check for updates "
              "also has the nightly version, with the newest work.)", u->stable, DQIX_VERSION);
-    const SDL_MessageBoxButtonData b[3] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Update" }, { 0, 2, "Skip this version" },
-                                            { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Later" } };
-    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, "Update available", text, 3, b, NULL };
-    int r = 0;
-    if (SDL_ShowMessageBox(&d, &r) != 0) return;
-    if (r == 1) update_go("stable", u->stable);
-    else if (r == 2) { snprintf(g_update_skip, sizeof g_update_skip, "%s", u->stable); settings_save(); }
+    char upd[64]; snprintf(upd, sizeof upd, "Update to %s", u->stable);
+    const char* b[3] = { upd, "Skip this version", "Later" };
+    int r = choose("Update available", text, b, 3, 0, 2);
+    if (r == 0) update_go("stable", u->stable);
+    else if (r == 1) { snprintf(g_update_skip, sizeof g_update_skip, "%s", u->stable); settings_save(); }
 }
 
 /* Help > Check for updates */
@@ -1109,24 +1214,26 @@ static void update_menu(void) {
         info_box(SDL_MESSAGEBOX_INFORMATION, "Updates", m, g_win);
         return;
     }
-    char text[700];
+    const char* tag_s = update_newer(u.stable, DQIX_VERSION) ? " (newer)" : !strcmp(u.stable, DQIX_VERSION) ? " (this one)" : " (older)";
+    const char* tag_n = update_newer(u.nightly, DQIX_VERSION) ? " (newer)" : !strcmp(u.nightly, DQIX_VERSION) ? " (this one)" : " (older)";
+    char back[200] = "";
+    if (update_newer(DQIX_VERSION, u.stable))
+        snprintf(back, sizeof back, "\n\nInstalling stable goes back to %s, an older version than this one. Your saves and settings are kept.", u.stable);
+    char text[900];
     snprintf(text, sizeof text,
              "This copy: %s\n\nStable: %s%s\nTested; recommended for everyone.\n\nNightly: %s%s\nThe newest work: new features "
-             "and fixes first, but less tested.\n\nFriends playing together need the same version.",
-             DQIX_VERSION, u.stable, update_newer(u.stable, DQIX_VERSION) ? " (newer)" : !strcmp(u.stable, DQIX_VERSION) ? " (this one)" : "",
-             u.nightly, update_newer(u.nightly, DQIX_VERSION) ? " (newer)" : !strcmp(u.nightly, DQIX_VERSION) ? " (this one)" : "");
-    char bs[48], bn[48];
+             "and fixes first, but less tested.%s\n\nFriends playing together need the same version.",
+             DQIX_VERSION, u.stable, tag_s, u.nightly, tag_n, back);
+    char bs[64], bn[64];
     snprintf(bs, sizeof bs, "Install stable %s", u.stable);
     snprintf(bn, sizeof bn, "Install nightly %s", u.nightly);
-    SDL_MessageBoxButtonData b[3]; int nb = 0;
-    if (strcmp(u.stable, DQIX_VERSION)) b[nb++] = (SDL_MessageBoxButtonData){ 0, 1, bs };
-    if (strcmp(u.nightly, DQIX_VERSION) && strcmp(u.nightly, u.stable)) b[nb++] = (SDL_MessageBoxButtonData){ 0, 2, bn };
-    b[nb++] = (SDL_MessageBoxButtonData){ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Close" };
-    const SDL_MessageBoxData d = { SDL_MESSAGEBOX_INFORMATION, g_win, "Updates", text, nb, b, NULL };
-    int r = 0;
-    if (SDL_ShowMessageBox(&d, &r) != 0) return;
-    if (r == 1) update_go("stable", u.stable);
-    else if (r == 2) update_go("main", u.nightly);
+    const char* b[3]; int id[3], nb = 0;
+    if (strcmp(u.stable, DQIX_VERSION)) { id[nb] = 1; b[nb++] = bs; }
+    if (strcmp(u.nightly, DQIX_VERSION) && strcmp(u.nightly, u.stable)) { id[nb] = 2; b[nb++] = bn; }
+    id[nb] = 0; b[nb++] = "Close";
+    int r = choose("Updates", text, b, nb, nb - 1, nb - 1);
+    if (id[r] == 1) update_go("stable", u.stable);
+    else if (id[r] == 2) update_go("main", u.nightly);
 }
 
 /* the lobby: until everyone is in */
@@ -1293,6 +1400,7 @@ static void do_action(int id) {
         session_action(id);
         break;
     case MI_SHOT: g_shot_req = 1; break;
+    case MI_SEND_REPORT:                                          /* Help > Send a bug report: the same as F10 */
     case MI_REPORT: {
         extern char g_report_last_dir[300];
         report_write("F10 pressed");                               /* captured first: the moment you pressed it */
@@ -1304,6 +1412,7 @@ static void do_action(int id) {
             FILE* f = fopen(path, "wb");
             if (f) { fputs(text, f); fputs("\n", f); fclose(f); }
         }
+        if (g_win && g_report_last_dir[0]) report_send(g_report_last_dir, text);   /* send it? (asks first) */
         free(text);
         if (g_win) SDL_SetWindowTitle(g_win, "Dragon Quest IX - report saved (see the reports folder)");
         g_fps_t0 = SDL_GetPerformanceCounter();                    /* keep that title up for a second */
@@ -1378,7 +1487,7 @@ static void do_action(int id) {
     }
     if (relayout && g_win) layout_window();
     menu_sync();
-    if (id != MI_SHOT && id != MI_REPORT && id != MI_PAUSE && id != MI_TURBO) settings_save();
+    if (id != MI_SHOT && id != MI_REPORT && id != MI_SEND_REPORT && id != MI_PAUSE && id != MI_TURBO) settings_save();
 }
 
 static void handle_events(void) {

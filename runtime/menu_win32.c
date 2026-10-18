@@ -116,6 +116,7 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(help, MI_UPDATE, L"Check for &updates...");
     item(help, MI_UPDATE_AUTO, L"Check for updates at &start");
     sep(help);
+    item(help, MI_SEND_REPORT, L"&Send a bug report...");
     item(help, MI_ABOUT, L"&About");
 
     SetMenu(g_hwnd, g_bar);
@@ -220,6 +221,122 @@ static WORD* put_item(WORD* p, DWORD style, short x, short y, short cx, short cy
     return p;
 }
 
+
+/* ---------------------------------------------------------------- a message with buttons that fit */
+#define CB_TEXT 2000
+#define CB_ICON 2001
+#define CB_CHECK 2002
+#define CB_BUTTON 3000
+typedef struct { int n, def, cancel, has_check, checked; } ChoiceInfo;
+
+static INT_PTR CALLBACK choice_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    ChoiceInfo* ci = (ChoiceInfo*)GetWindowLongPtrW(h, DWLP_USER);
+    switch (msg) {
+    case WM_INITDIALOG: {
+        ci = (ChoiceInfo*)lp;
+        SetWindowLongPtrW(h, DWLP_USER, (LONG_PTR)ci);
+        SendDlgItemMessageW(h, CB_ICON, STM_SETICON, (WPARAM)LoadIconW(NULL, (LPCWSTR)IDI_INFORMATION), 0);
+        if (ci->has_check) CheckDlgButton(h, CB_CHECK, ci->checked ? BST_CHECKED : BST_UNCHECKED);
+        /* sizes in dialog units -> pixels for this font and monitor */
+        RECT u = { 7, 7, 280, 14 }; MapDialogRect(h, &u);
+        int margin = u.left, textw = u.right, btnh = u.bottom;
+        RECT g = { 4, 50, 0, 0 }; MapDialogRect(h, &g);
+        int gap = g.left, minbtn = g.top, icon = GetSystemMetrics(SM_CXICON);
+        HDC dc = GetDC(h);
+        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        HGDIOBJ old = SelectObject(dc, f);
+        wchar_t t[4096];
+        GetDlgItemTextW(h, CB_TEXT, t, 4096);
+        RECT tr = { 0, 0, textw, 0 };
+        DrawTextW(dc, t, -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        int bw[8], total = 0;
+        for (int i = 0; i < ci->n; i++) {
+            wchar_t b[200]; SIZE sz;
+            GetDlgItemTextW(h, CB_BUTTON + i, b, 200);
+            GetTextExtentPoint32W(dc, b, (int)wcslen(b), &sz);
+            bw[i] = sz.cx + 2 * margin + gap; if (bw[i] < minbtn) bw[i] = minbtn;
+            total += bw[i] + (i ? gap : 0);
+        }
+        int checkh = 0, checkw = 0;
+        if (ci->has_check) {
+            wchar_t c[300]; SIZE sz; GetDlgItemTextW(h, CB_CHECK, c, 300);
+            GetTextExtentPoint32W(dc, c, (int)wcslen(c), &sz);
+            checkw = sz.cx + GetSystemMetrics(SM_CXMENUCHECK) + 3 * gap; checkh = btnh;
+        }
+        SelectObject(dc, old);
+        ReleaseDC(h, dc);
+        int tx = margin + icon + 2 * gap, th = tr.bottom;
+        int cw = tx + tr.right + margin;
+        if (cw < total + 2 * margin) cw = total + 2 * margin;
+        if (ci->has_check && cw < tx + checkw + margin) cw = tx + checkw + margin;
+        int y = margin;
+        SetWindowPos(GetDlgItem(h, CB_ICON), NULL, margin, y, icon, icon, SWP_NOZORDER);
+        SetWindowPos(GetDlgItem(h, CB_TEXT), NULL, tx, y, cw - tx - margin, th, SWP_NOZORDER);
+        y += (th > icon ? th : icon) + margin;
+        if (ci->has_check) { SetWindowPos(GetDlgItem(h, CB_CHECK), NULL, tx, y, cw - tx - margin, checkh, SWP_NOZORDER); y += checkh + margin; }
+        int bx = cw - margin - total;
+        for (int i = 0; i < ci->n; i++) { SetWindowPos(GetDlgItem(h, CB_BUTTON + i), NULL, bx, y, bw[i], btnh, SWP_NOZORDER); bx += bw[i] + gap; }
+        int ch = y + btnh + margin;
+        RECT wr = { 0, 0, cw, ch };
+        AdjustWindowRectEx(&wr, (DWORD)GetWindowLongW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongW(h, GWL_EXSTYLE));
+        HWND parent = GetParent(h); RECT pr;
+        if (!parent || !GetWindowRect(parent, &pr)) SystemParametersInfoW(SPI_GETWORKAREA, 0, &pr, 0);
+        int w = wr.right - wr.left, hh = wr.bottom - wr.top;
+        SetWindowPos(h, NULL, pr.left + (pr.right - pr.left - w) / 2, pr.top + (pr.bottom - pr.top - hh) / 2, w, hh, SWP_NOZORDER);
+        SetFocus(GetDlgItem(h, CB_BUTTON + ci->def));
+        return FALSE;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if (id >= CB_BUTTON && id < CB_BUTTON + ci->n) {
+            if (ci->has_check) ci->checked = IsDlgButtonChecked(h, CB_CHECK) == BST_CHECKED;
+            EndDialog(h, id - CB_BUTTON); return TRUE;
+        }
+        if (id == IDCANCEL) { if (ci->has_check) ci->checked = IsDlgButtonChecked(h, CB_CHECK) == BST_CHECKED; EndDialog(h, ci->cancel); return TRUE; }
+        if (id == IDOK) { EndDialog(h, ci->def); return TRUE; }
+        break;
+    }
+    }
+    return FALSE;
+}
+
+int choice_box(SDL_Window* win, const char* title, const char* text, const char* const* buttons, int n, int def, int cancel,
+               const char* check, int* checked) {
+    if (n < 1 || n > 8) return -1;
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    HWND parent = NULL;
+    if (win && SDL_GetWindowWMInfo(win, &info) && info.subsystem == SDL_SYSWM_WINDOWS) parent = info.info.win.window;
+    static WORD buf[16384];
+    memset(buf, 0, sizeof buf);
+    DLGTEMPLATE* d = (DLGTEMPLATE*)align4(buf);
+    d->style = DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    d->cdit = (WORD)(2 + n + (check ? 1 : 0)); d->cx = 200; d->cy = 100;
+    WORD* p = (WORD*)(d + 1);
+    *p++ = 0; *p++ = 0;
+    static wchar_t w[8192];
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, w, 8192);
+    p = put_str(p, w);
+    *p++ = 9; p = put_str(p, L"Segoe UI");
+    p = put_item(p, SS_ICON, 0, 0, 0, 0, CB_ICON, 0x82, L"");
+    /* the text: \n -> \r\n for the static control */
+    static wchar_t t[8192]; int k = 0;
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, w, 8192);
+    for (int i = 0; w[i] && k < 8190; i++) { if (w[i] == L'\n') t[k++] = L'\r'; t[k++] = w[i]; }
+    t[k] = 0;
+    p = put_item(p, SS_NOPREFIX, 0, 0, 10, 10, CB_TEXT, 0x82, t);
+    if (check) { MultiByteToWideChar(CP_UTF8, 0, check, -1, w, 8192); p = put_item(p, WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 10, 10, CB_CHECK, 0x80, w); }
+    for (int i = 0; i < n; i++) {
+        MultiByteToWideChar(CP_UTF8, 0, buttons[i], -1, w, 8192);
+        p = put_item(p, WS_TABSTOP | (i == def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), 0, 0, 10, 10, (WORD)(CB_BUTTON + i), 0x80, w);
+    }
+    ChoiceInfo ci = { n, def, cancel, check != NULL, checked ? *checked : 0 };
+    INT_PTR r = DialogBoxIndirectParamW(GetModuleHandleW(NULL), d, parent, choice_proc, (LPARAM)&ci);
+    if (r < 0) return -1;
+    if (checked) *checked = ci.checked;
+    return (int)r;
+}
+
 char* ask_text(SDL_Window* win, const char* title, const char* prompt) {
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
@@ -306,7 +423,7 @@ int session_window_open(SDL_Window* win) {
     memset(buf, 0, sizeof buf);
     DLGTEMPLATE* d = (DLGTEMPLATE*)align4(buf);
     d->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
-    d->cdit = 9; d->x = 0; d->y = 0; d->cx = 270; d->cy = 252;
+    d->cdit = 9; d->x = 0; d->y = 0; d->cx = 270; d->cy = 278;
     WORD* p = (WORD*)(d + 1);
     *p++ = 0; *p++ = 0;
     p = put_str(p, L"Play with friends far away");
@@ -314,12 +431,12 @@ int session_window_open(SDL_Window* win) {
     p = put_item(p, 0, 8, 8, 254, 10, ID_HEAD, 0x82, L"");
     p = put_item(p, WS_BORDER | ES_READONLY | ES_AUTOHSCROLL | ES_CENTER, 8, 21, 196, 16, ID_ADDR, 0x81, L"");
     p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 210, 21, 52, 16, ID_COPY, 0x80, L"Copy");
-    p = put_item(p, 0, 8, 42, 254, 66, ID_HINT, 0x82, L"");
-    p = put_item(p, 0, 8, 112, 254, 10, 0xFFFF, 0x82, L"Players:");
-    p = put_item(p, WS_BORDER | WS_VSCROLL | LBS_NOSEL, 8, 124, 254, 54, ID_LIST, 0x83, L"");
-    p = put_item(p, 0, 8, 184, 254, 34, ID_STATUS, 0x82, L"");
-    p = put_item(p, WS_TABSTOP | BS_DEFPUSHBUTTON, 118, 228, 84, 17, ID_START, 0x80, L"Start the game");
-    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 208, 228, 54, 17, IDCANCEL, 0x80, L"Cancel");
+    p = put_item(p, 0, 8, 42, 254, 92, ID_HINT, 0x82, L"");
+    p = put_item(p, 0, 8, 138, 254, 10, 0xFFFF, 0x82, L"Players:");
+    p = put_item(p, WS_BORDER | WS_VSCROLL | LBS_NOSEL, 8, 150, 254, 54, ID_LIST, 0x83, L"");
+    p = put_item(p, 0, 8, 210, 254, 34, ID_STATUS, 0x82, L"");
+    p = put_item(p, WS_TABSTOP | BS_DEFPUSHBUTTON, 118, 254, 84, 17, ID_START, 0x80, L"Start the game");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 208, 254, 54, 17, IDCANCEL, 0x80, L"Cancel");
     g_ses = CreateDialogIndirectParamW(GetModuleHandleW(NULL), d, info.info.win.window, ses_proc, 0);
     if (!g_ses) return 0;
     /* a bigger, bolder address */
@@ -367,6 +484,8 @@ void session_window_close(void) {
     g_ses = NULL;
 }
 #else
+int choice_box(SDL_Window* win, const char* title, const char* text, const char* const* buttons, int n, int def, int cancel,
+               const char* check, int* checked) { (void)win; (void)title; (void)text; (void)buttons; (void)n; (void)def; (void)cancel; (void)check; (void)checked; return -1; }
 char* ask_text(SDL_Window* win, const char* title, const char* prompt) { (void)win; (void)title; (void)prompt; return NULL; }
 float display_mm_per_pixel(SDL_Window* win) { (void)win; return 0; }
 void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) { (void)win; (void)shell_names; (void)n_shells; }

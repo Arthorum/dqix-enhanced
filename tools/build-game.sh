@@ -120,4 +120,4 @@ cd "$(dirname "$0")" && exec ./dqix data/dqix.nds data/code 0 1 dqix.sav
 SH
 chmod +x game/play.sh
 echo
-echo "== Done. The game is in the 'game' folder: double-click play.bat."
+case "$(uname -s)" in MINGW*|MSYS*) echo "== Done. The game is in the 'game' folder: double-click dqix.exe." ;; *) echo "== Done. The game is in the 'game' folder: run play.sh." ;; esac

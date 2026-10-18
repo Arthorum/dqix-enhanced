@@ -73,13 +73,20 @@ first time.
 
 1. Download the latest **stable** release from the
    **[Releases page](https://github.com/sackchief/dqix-enhanced/releases)**
-   (*Source code (zip)*) and unzip it somewhere, for example in Documents.
-   The **Nightly** release there is the newest work, less tested.
-2. Put your ROM in the `rom` folder.
-3. Double-click **`BUILD.bat`**. The first time, it installs free build tools
-   (MSYS2), which takes 10-20 minutes in all. Later builds are much faster.
-4. Play with **`game\dqix.exe`** (the one with the game's icon). Make a
-   desktop shortcut to it if you like.
+   (*Source code (zip)*) and unzip it. The **Nightly** release there is the
+   newest work, less tested.
+2. Double-click **`Install Dragon Quest IX.bat`**. A setup window walks you
+   through it: choose your ROM (it checks it's the right one), where to put
+   the game (your Documents by default), and shortcuts on the desktop and in
+   the Start menu. It then installs the free build tools (MSYS2) and builds
+   the game: 10-20 minutes the first time. Press **Play now** at the end.
+3. Next time, start it from the desktop or the Start menu. It is listed in
+   Settings > Apps, where it can be uninstalled (your saves are kept unless
+   you say otherwise). To pin it to the taskbar, right-click the shortcut.
+
+Prefer no window? Put your ROM in the `rom` folder and double-click
+**`BUILD.bat`** instead; the game appears in the `game` folder
+(`game\dqix.exe`).
 
 Your save (`dqix.sav`) and settings (`settings.ini`) live in the `game`
 folder. **Don't share the `game` or `build` folders**: they contain the game.

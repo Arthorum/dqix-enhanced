@@ -52,7 +52,7 @@ typedef struct {
     int gone[SESSION_MAX];
     char address[128];                    /* what friends type in (host) / where we connect (guest) */
     char message[256];                    /* the latest news (joined, left, out of sync, errors) */
-    char hint[600];                       /* host: how friends get in */
+    char hint[1000];                      /* host: how friends get in */
     int ready;                            /* host: the address is known */
     int desync;
 } SessionInfo;

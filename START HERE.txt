@@ -4,11 +4,14 @@ Dragon Quest IX for PC
 This turns YOUR OWN Dragon Quest IX ROM (the USA version, dumped from your
 cartridge) into a PC version of the game. No game files are included.
 
-1. Put your ROM (.nds) in the "rom" folder.
-2. Double-click BUILD.bat.
+1. Double-click "Install Dragon Quest IX.bat". A window walks you through it:
+   your ROM, where to put the game (Documents by default) and shortcuts.
    - The first time it installs free build tools (MSYS2) and takes 10-20 minutes.
-   - It needs Windows 10/11 (64-bit), ~3 GB free space and the internet once.
-3. Play: double-click game\dqix.exe (make a desktop shortcut to it if you like).
+   - It needs Windows 10/11 (64-bit), ~4 GB free space and the internet once.
+2. Press "Play now" at the end. Later, use the desktop or Start menu shortcut.
+
+Without the window: put your ROM (.nds) in the "rom" folder, double-click
+BUILD.bat, then play game\dqix.exe.
 
 Controls: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q/W = L/R,
 Enter = START, Right Shift = SELECT, mouse = touch screen, Tab = fast forward.

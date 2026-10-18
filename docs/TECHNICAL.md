@@ -26,6 +26,10 @@ natively, plus the runtime that stands in for the DS hardware.
 You need your own Dragon Quest IX cartridge's ROM (the USA version), Windows
 10 or 11 (64-bit), about 3 GB of free space, and the internet the first time.
 
+The easy way is **`Install Dragon Quest IX.bat`**: a setup window that does
+the steps below for you (into Documents\DQIX-Enhanced by default), adds
+shortcuts and an entry in Settings > Apps. By hand:
+
 1. Put your ROM (`.nds`) in the `rom` folder. (Or skip this and choose it
    when step 2 asks.)
 2. Double-click **`BUILD.bat`**. The first time, it installs MSYS2 (free
@@ -332,6 +336,8 @@ build.mk               makefile (make -f build.mk)
 tools/where.sh         run, then show where the game is
 tests/                 decoder check vs LLVM; behaviour tests for recompiler + interpreter
 recomp.bat             regenerate the ARM9 C on Windows (developer build)
+Install Dragon Quest IX.bat  the setup window (tools/setup-wizard.ps1): ROM check, folder,
+                       shortcuts, Apps entry (tools/uninstall.ps1), then BUILD.bat
 BUILD.bat              the one-click build: your ROM -> the game folder
 tools/build-game.sh    what BUILD.bat runs (inside MSYS2; also works on Linux)
 tools/extract_rom.py   takes the code out of a DS ROM (same output as dsd rom extract)

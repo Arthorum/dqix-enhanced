@@ -34,7 +34,9 @@ the same room.
 
 - [ ] **Join a session that has already started.**
 - [ ] **A way in for friends whose router won't open the port**, without
-      everyone installing a virtual LAN.
+      everyone installing a virtual LAN (hole punching with invite codes).
+- [ ] **Check NAT-PMP, PCP and IPv6 on real routers** (tested so far against
+      a stand-in router only).
 - [ ] **Lower input delay when the DSes aren't talking wirelessly**, so walking
       around during a session feels as responsive as playing alone.
 
@@ -66,6 +68,9 @@ the same room.
 
 ## Done
 
+- [x] A setup window (`Install Dragon Quest IX.bat`) with shortcuts and an
+      uninstaller; NAT-PMP, PCP and IPv6 for multiplayer; Send a bug report;
+      earlier versions on the Releases page (v27-nightly21).
 - [x] The right stick turns the camera; double-click leaves fullscreen
       (v27-nightly18).
 - [x] Widescreen: the world drawn wider, the top screen as a minimap; the

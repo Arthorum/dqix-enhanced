@@ -14,6 +14,7 @@ enum {
     MI_NET = 180, MI_SRV_ALTWFC, MI_SRV_WIIMMFI, MI_SRV_CUSTOM, MI_NET_HELP, MI_SRV_BUILTIN,
     MI_SES_HOST = 190, MI_SES_JOIN, MI_SES_START, MI_SES_LEAVE, MI_SES_NAME, MI_SES_HELP,
     MI_ANALOG = 200, MI_CORNER, MI_MODERN_HELP, MI_WIDE,
+    MI_SEND_REPORT = 210,
 };
 
 /* shell_names: the console colours, in order (MI_SHELLC0 + i) */
@@ -32,6 +33,13 @@ float display_mm_per_pixel(SDL_Window* win);
  * available on this system. */
 char* ask_text(SDL_Window* win, const char* title, const char* prompt);
 
+/* A message with buttons sized to their words (Windows), and optionally a
+ * check box (check = its text, *checked = its state in and out). Returns the
+ * chosen button (0..n-1), `cancel` when closed, or -1 when not available here
+ * (the caller then shows an SDL message box). */
+int choice_box(SDL_Window* win, const char* title, const char* text, const char* const* buttons, int n, int def, int cancel,
+               const char* check, int* checked);
+
 /* The session window (Windows): while players gather, a window of its own
  * with the address to give out (and a Copy button), who has joined, and
  * Start / Cancel. Elsewhere the lobby on the DS screens does it all. */
@@ -41,7 +49,7 @@ typedef struct {
     int failed;                   /* the session couldn't start: only Back */
     char heading[96];             /* "Give your friends this address:" / "Connected to:" */
     char address[128];
-    char hint[700];
+    char hint[1000];
     char players[4][96];
     int n_players;
     char status[300];

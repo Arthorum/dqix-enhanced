@@ -49,7 +49,7 @@ set "DQIX_ROM=%ROM%"
 "%MSYSROOT%\usr\bin\bash.exe" -lc "./tools/build-game.sh \"$(cygpath -u \"$DQIX_ROM\")\""
 if errorlevel 1 goto failed
 echo.
-echo Finished. Play with game\play.bat (you can make a shortcut to it).
+echo Finished. Play with game\dqix.exe (you can make a shortcut to it).
 if not defined DQIX_NOPAUSE pause
 exit /b 0
 

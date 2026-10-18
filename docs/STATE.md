@@ -245,6 +245,20 @@ to it: `git checkout bookmark-2026-10-15`.
   Sticks: the walk flag (02109DA4) is 1 on the title menu too; walking and
   the camera now also need the field pointer at 020F33E0 (0 until a save is
   loaded).
+- **nightly21**: `runtime/portmap.c`: PCP (RFC 6887, MAP v2) then NAT-PMP
+  (RFC 6886) when UPnP fails; IPv6: UPnP WANIPv6FirewallControl AddPinhole,
+  else PCP MAP from the global v6 address; renew_thread renews at half the
+  lifetime. Tested against stand-in routers (DQIX_GATEWAY,
+  DQIX_GATEWAY6, DQIX_UPNP_LOCATION, DQIX_TEST_V6). Join takes a bare IPv6
+  address. choice_box (menu_win32.c): dialogs whose buttons are sized to
+  their text (update window, bug report). Send a bug report: report_zip
+  (stored zip, saves optional) + a prefilled GitHub issue
+  (.github/ISSUE_TEMPLATE). Setup: `Install Dragon Quest IX.bat` ->
+  tools/setup-wizard.ps1 (WinForms, PowerShell 5.1: SHA-1 ROM check, folder
+  checks, robocopy, Unblock-File, BUILD.bat with DQIX_NOPAUSE, shortcuts,
+  HKCU Uninstall entry -> tools/uninstall.ps1). apply.bat starts
+  game\dqix.exe. Earlier versions: annotated tags v17-v25,
+  v27-nightly1-20 with release-notes/past/.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

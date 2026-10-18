@@ -161,7 +161,7 @@ static const char APPLY_BAT[] =
     "del update\\download.zip >nul 2>&1\r\n"
     "echo.\r\n"
     "echo Done: Dragon Quest IX %2. Starting the game...\r\n"
-    "start \"\" \"game\\play.bat\"\r\n"
+    "start \"\" \"game\\dqix.exe\"\r\n"
     "exit /b 0\r\n"
     ":fail\r\n"
     "echo.\r\n"
@@ -187,7 +187,7 @@ static const char ROLLBACK_BAT[] =
     "set DQIX_NOPAUSE=1\r\n"
     "call BUILD.bat\r\n"
     "if errorlevel 1 ( pause & exit /b 1 )\r\n"
-    "start \"\" \"game\\play.bat\"\r\n";
+    "start \"\" \"game\\dqix.exe\"\r\n";
 
 static int write_file_w(const wchar_t* path, const void* d, size_t n) {
     FILE* f = _wfopen(path, L"wb");

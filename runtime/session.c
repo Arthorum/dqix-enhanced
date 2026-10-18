@@ -9,6 +9,7 @@
 #include "session.h"
 #include "version.h"
 #include "upnp.h"
+#include "portmap.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -114,7 +115,7 @@ static int g_state;                 /* SessionInfo.state */
 static int g_start_req, g_cancel_req, g_auto_players;
 static Console g_con[SESSION_MAX];
 static int g_ping[SESSION_MAX], g_gone[SESSION_MAX];
-static char g_addr[128], g_msg[256], g_name[32] = "Player", g_hint[600];
+static char g_addr[128], g_msg[256], g_name[32] = "Player", g_hint[1000];
 static int g_port = SESSION_PORT, g_upnp_done;
 static int g_desync, g_local;
 static Peer g_peer[SESSION_MAX];    /* host: guests 1..3 (by slot); guest: [0] = the host */
@@ -1018,6 +1019,8 @@ static void* net_thread(void* u)
 /* ---------------------------------------------------------------- reachability (host) */
 /* this PC's global IPv6 address, if it has one (no packet is sent) */
 static int ipv6_global(char* out, size_t n) {
+    const char* t = getenv("DQIX_TEST_V6");                     /* tests: pretend this is our global IPv6 address */
+    if (t) { if (!*t) return 0; snprintf(out, n, "%s", t); return 1; }
     sock_t s = socket(AF_INET6, SOCK_DGRAM, 0);
     if (s == BADSOCK) return 0;
     struct sockaddr_in6 to; memset(&to, 0, sizeof to);
@@ -1049,27 +1052,103 @@ static int ipv4_local(char* out, size_t n) {
     return 1;
 }
 
+/* Letting friends in: ask the router to open the port, by UPnP, then PCP, then
+ * NAT-PMP (portmap.c); with IPv6, ask it to open its firewall too (UPnP IGD 2
+ * or PCP). The host window then says what worked and which address to give. */
+#ifdef _WIN32
+static DWORD WINAPI renew_thread(LPVOID u);
+#else
+static void* renew_thread(void* u);
+#endif
 static void host_reachability(void) {
-    char ext[64] = "", lan[64] = "", why[256] = "", v6[80] = "";
-    int r = getenv("DQIX_NO_UPNP") ? 0 : upnp_open(g_port, ext, sizeof ext, lan, sizeof lan, why, sizeof why);
+    char ext[64] = "", lan[64] = "", why[256] = "", v6[80] = "", method[16] = "";
+    int ext_port = g_port;
+    int tried = !getenv("DQIX_NO_UPNP");
+    int r = tried ? upnp_open(g_port, ext, sizeof ext, lan, sizeof lan, why, sizeof why) : 0;
+    if (r) snprintf(method, sizeof method, "UPnP");
+    char why_upnp[256]; snprintf(why_upnp, sizeof why_upnp, "%s", why);
+    if (r != 1 && tried) {                                        /* UPnP off, missing or refused: the other two */
+        char e2[64], m2[16], w2[256];
+        int r2 = portmap_open(g_port, e2, sizeof e2, &ext_port, m2, sizeof m2, w2, sizeof w2);
+        if (r2 == 1 || (r2 == 2 && !r)) { r = r2; snprintf(ext, sizeof ext, "%s", e2); snprintf(method, sizeof method, "%s", m2); snprintf(why, sizeof why, "%s", w2); }
+        else if (!r) {                                            /* one plain reason */
+            int upnp_silent = strstr(why_upnp, "no router answered") != NULL;
+            int pmp_silent = strstr(w2, "doesn't answer") || strstr(w2, "couldn't");
+            if (upnp_silent && pmp_silent) snprintf(why, sizeof why, "it doesn't answer UPnP, NAT-PMP or PCP; they may be switched off in its settings");
+            else if (!upnp_silent) snprintf(why, sizeof why, "%s", why_upnp);
+            else snprintf(why, sizeof why, "%s", w2);
+        }
+    }
     if (!lan[0]) ipv4_local(lan, sizeof lan);
-    if (getenv("DQIX_NO_UPNP")) snprintf(why, sizeof why, "not tried");
-    int has6 = ipv6_global(v6, sizeof v6);
+    if (!tried) snprintf(why, sizeof why, "not tried");
+    int has6 = ipv6_global(v6, sizeof v6), open6 = 0;
+    char why6[256] = "";
+    if (has6 && tried) {
+        open6 = upnp_pinhole(v6, g_port, why6, sizeof why6);
+        if (!open6) open6 = portmap_open6(v6, g_port, why6, sizeof why6);
+    }
+    char v6line[300] = "";
+    if (has6) snprintf(v6line, sizeof v6line, open6 ? " With IPv6, friends can also use [%s]:%d."
+                                                     : " With IPv6, friends can also try [%s]:%d (your router may block it).", v6, g_port);
     lock();
     if (r == 1 && ext[0]) {
-        snprintf(g_addr, sizeof g_addr, "%s:%d", ext, g_port);
-        snprintf(g_hint, sizeof g_hint, "Your router opened port %d by itself. Friends in the same house use %s:%d instead.", g_port, lan[0] ? lan : "this PC's address", g_port);
+        snprintf(g_addr, sizeof g_addr, "%s:%d", ext, ext_port);
+        snprintf(g_hint, sizeof g_hint, "Your router opened the port by itself (%s): give friends the address above. "
+                 "Friends in the same house use %s:%d.%s", method, lan[0] ? lan : "this PC's address", g_port, v6line);
+    } else if (has6 && open6) {
+        snprintf(g_addr, sizeof g_addr, "[%s]:%d", v6, g_port);
+        snprintf(g_hint, sizeof g_hint, "This address is for friends whose internet has IPv6 (your router let it through). "
+                 "For the others the router didn't open a port (%s): forward TCP port %d to this PC (%s), "
+                 "or all join a free virtual LAN (Tailscale, ZeroTier or Radmin VPN) and use this PC's address there.",
+                 why, g_port, lan[0] ? lan : "this PC");
     } else {
         if (has6) snprintf(g_addr, sizeof g_addr, "[%s]:%d", v6, g_port);
         else snprintf(g_addr, sizeof g_addr, "%s:%d", lan[0] ? lan : "this PC", g_port);
-        snprintf(g_hint, sizeof g_hint, "Your router didn't open the port (%s). %s"
-                 "Either forward TCP port %d to this PC (%s) in your router and give friends your internet address, "
-                 "or all of you join a free virtual LAN (Tailscale, ZeroTier or Radmin VPN) and give them this PC's address there.",
-                 why, has6 ? "The address above works for friends who have IPv6. " : "Friends in the same house can use the address above. ",
+        snprintf(g_hint, sizeof g_hint, "Your router didn't open the port: %s. %s"
+                 "For others: forward TCP port %d to this PC (%s) in your router, or all join a free virtual LAN "
+                 "(Tailscale, ZeroTier or Radmin VPN) and use this PC's address there.",
+                 why, has6 ? "The address above works for friends with IPv6 if your router lets it through. "
+                           : "Friends in the same house can use the address above. ",
                  g_port, lan[0] ? lan : "this PC");
+    }
+    {   /* in the log and bug reports: what the router did */
+        static char line[1200];
+        snprintf(line, sizeof line, "session: reachable at %s: %s\n", g_addr, g_hint);
+        LOG_WARN("%s", line);
+        report_log_line(line);
     }
     unlock();
     g_upnp_done = 1;
+#ifdef _WIN32
+    CreateThread(NULL, 0, renew_thread, NULL, 0, NULL);
+#else
+    { pthread_t t; if (pthread_create(&t, NULL, renew_thread, NULL) == 0) pthread_detach(t); }
+#endif
+}
+
+static void close_ports(void) { upnp_close(); portmap_close(); }
+
+/* Keeping the router's openings from running out (they last 2 hours), on a
+ * thread of their own: a router slow to answer never holds up the game. */
+#ifdef _WIN32
+static DWORD WINAPI renew_thread(LPVOID u)
+#else
+static void* renew_thread(void* u)
+#endif
+{
+    (void)u;
+    const char* t = getenv("DQIX_TEST_RENEW_MS");              /* tests: check more often than once a minute */
+    int tick = t ? atoi(t) : 60000;
+    for (int minute = 1; ; minute++) {
+        sleep_ms(tick);
+        portmap_renew();                                          /* when half their time is up */
+        if (minute % 30 == 0) upnp_renew();
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
 }
 
 /* ---------------------------------------------------------------- setup */
@@ -1222,13 +1301,14 @@ void session_boot(void) {
         g_auto_players = players;
         if (!start_host(port)) { news("can't wait for players on port %d (is another game hosting?)", port); g_state = 5; return; }
         snprintf(g_addr, sizeof g_addr, "(finding your address...)");
-        atexit(upnp_close);
+        atexit(close_ports);
         g_state = 2;
         news("hosting on port %d: waiting for players", port);
     } else if (!strncmp(e, "join:", 5)) {
         /* join:address[:port]; an IPv6 address goes in [brackets] */
         const char* s = e + 5;
         if (*s == '[') { const char* c = strchr(s, ']'); if (c) { snprintf(a, sizeof a, "%.*s", (int)(c - s - 1), s + 1); if (c[1] == ':') port = atoi(c + 2); } }
+        else if (strchr(s, ':') != strrchr(s, ':')) snprintf(a, sizeof a, "%s", s);   /* a bare IPv6 address (several colons): the usual port */
         else { const char* c = strrchr(s, ':'); if (c) { snprintf(a, sizeof a, "%.*s", (int)(c - s), s); port = atoi(c + 1); } else snprintf(a, sizeof a, "%s", s); }
         snprintf(g_addr, sizeof g_addr, "%s:%d", a, port);
         g_state = 1;

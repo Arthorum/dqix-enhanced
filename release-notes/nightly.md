@@ -2,6 +2,24 @@
 adventure; try this one in its own folder with a copy of your save.
 
 **New since stable v26**
+- **Easy setup**: double-click `Install Dragon Quest IX.bat` and a window
+  walks you through it: choose your ROM (it checks it's the right one),
+  where to put the game (Documents by default; it warns about OneDrive and
+  folders Windows protects), shortcuts on the desktop and in the Start menu,
+  then it builds the game with a progress bar and a Play now button. The
+  game is listed in Settings > Apps, where it can be uninstalled (your saves
+  are kept unless you say otherwise).
+- **More routers let friends in**: when UPnP is switched off or missing, the
+  game also asks the router with NAT-PMP and PCP. Friends with IPv6 can join
+  over IPv6 too (the game asks the router's firewall to let them in), and
+  joining accepts an IPv6 address.
+- **Send a bug report** (Help menu, or F10): saves the report, then opens a
+  ready-made report on GitHub with the zip to drag into it. It says first
+  exactly what's included, since the report is public; your save is only
+  included if you tick the box.
+- **Clearer windows**: the update window's buttons fit their text
+  ("Update to v27", "Skip this version", "Later").
+- **Every earlier version is on the Releases page**, kept for the record.
 - **Playing with friends far away**: tag mode (canvassing for guests) and
   co-op through Pavo with up to 4 players over the internet. The game sets up
   your router where it can, and the host gets a window with the address to
@@ -43,8 +61,8 @@ adventure; try this one in its own folder with a copy of your save.
 - Fixed: a thin line of one colour along the top of a screen when the
   screens are shown smaller than they are drawn (with the console photo).
 
-**How to install**: download *Source code (zip)* below, unzip it, put your
-ROM in the `rom` folder and double-click `BUILD.bat`. Already on a recent
+**How to install**: download *Source code (zip)* below, unzip it and
+double-click `Install Dragon Quest IX.bat`. Already on a recent
 nightly? Use Help > Check for updates instead.
 
 The plans for what comes next are in ROADMAP.md.

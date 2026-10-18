@@ -65,6 +65,7 @@ int64_t rtc_utc_offset(void);             /* local time - UTC, seconds (DQIX_UTC
 void rtc_set_utc_offset(int64_t off);
 /* reports (report.c) */
 void report_write(const char* reason);
+int report_zip(const char* dir, int with_saves, char* out, size_t outn);   /* the report as one .zip (path in out) */
 void report_log_line(const char* line);
 /* sound (sound.c) */
 void sound_advance(uint32_t cycles);

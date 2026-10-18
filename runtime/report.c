@@ -121,3 +121,62 @@ void report_write(const char* reason) {
     snprintf(g_report_last_dir, sizeof g_report_last_dir, "%s", dir);
     busy = 0;
 }
+
+/* ---------------------------------------------------------------- one .zip to attach (Help > Send a bug report)
+ * The report's files in one zip next to its folder (stored, not compressed:
+ * it is small). with_saves = 0 leaves the save files out. */
+static uint32_t crc32_of(const uint8_t* d, size_t n) {
+    static uint32_t tab[256]; static int init;
+    if (!init) { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; tab[i] = c; } init = 1; }
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) c = tab[(c ^ d[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+static void w16(FILE* f, unsigned v) { fputc((int)(v & 0xFF), f); fputc((int)((v >> 8) & 0xFF), f); }
+static void w32(FILE* f, uint32_t v) { w16(f, v & 0xFFFF); w16(f, v >> 16); }
+
+int report_zip(const char* dir, int with_saves, char* out, size_t outn) {
+    static const char* names[] = { "description.txt", "info.txt", "screenshot.bmp", "input.txt", "log.txt", "perf.txt",
+                                   "wireless.bin", "boot.sav", "now.sav" };
+    const char* base = strrchr(dir, '/'); base = base ? base + 1 : dir;
+    snprintf(out, outn, "%s.zip", dir);
+    FILE* z = fopen(out, "wb");
+    if (!z) return 0;
+    time_t now = time(NULL); struct tm* t = localtime(&now);
+    unsigned dtime = (unsigned)(t->tm_hour << 11 | t->tm_min << 5 | t->tm_sec / 2);
+    unsigned ddate = (unsigned)((t->tm_year - 80) << 9 | (t->tm_mon + 1) << 5 | t->tm_mday);
+    struct { char name[200]; uint32_t crc, size, off; } ent[16]; int n = 0;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (!with_saves && strstr(names[i], ".sav")) continue;
+        char path[600]; snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        FILE* f = fopen(path, "rb");
+        if (!f) continue;
+        fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+        uint8_t* d = malloc(len > 0 ? (size_t)len : 1);
+        size_t got = d ? fread(d, 1, (size_t)len, f) : 0;
+        fclose(f);
+        if (!d) continue;
+        snprintf(ent[n].name, sizeof ent[n].name, "%s/%s", base, names[i]);
+        ent[n].crc = crc32_of(d, got); ent[n].size = (uint32_t)got; ent[n].off = (uint32_t)ftell(z);
+        size_t nl = strlen(ent[n].name);
+        w32(z, 0x04034b50); w16(z, 10); w16(z, 0x0800); w16(z, 0); w16(z, dtime); w16(z, ddate);   /* local header (UTF-8 names) */
+        w32(z, ent[n].crc); w32(z, ent[n].size); w32(z, ent[n].size); w16(z, (unsigned)nl); w16(z, 0);
+        fwrite(ent[n].name, 1, nl, z);
+        fwrite(d, 1, got, z);
+        free(d);
+        n++;
+    }
+    uint32_t cd = (uint32_t)ftell(z);
+    for (int i = 0; i < n; i++) {
+        size_t nl = strlen(ent[i].name);
+        w32(z, 0x02014b50); w16(z, 20); w16(z, 10); w16(z, 0x0800); w16(z, 0); w16(z, dtime); w16(z, ddate);
+        w32(z, ent[i].crc); w32(z, ent[i].size); w32(z, ent[i].size); w16(z, (unsigned)nl); w16(z, 0); w16(z, 0);
+        w16(z, 0); w16(z, 0); w32(z, 0); w32(z, ent[i].off);
+        fwrite(ent[i].name, 1, nl, z);
+    }
+    uint32_t cdlen = (uint32_t)ftell(z) - cd;
+    w32(z, 0x06054b50); w16(z, 0); w16(z, 0); w16(z, (unsigned)n); w16(z, (unsigned)n); w32(z, cdlen); w32(z, cd); w16(z, 0);
+    int ok = !ferror(z);
+    fclose(z);
+    return ok && n > 0;
+}

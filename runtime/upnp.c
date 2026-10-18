@@ -28,6 +28,9 @@ typedef int sock_t;
 
 static char g_control[512], g_service[128], g_host[128];
 static int g_port_open, g_ext_port, g_router_port;
+static char g_fw_control[512];                   /* WANIPv6FirewallControl: opening the router's IPv6 firewall */
+static char g_pinhole[32];                       /* the open pinhole's id */
+static const char* FW_SERVICE = "urn:schemas-upnp-org:service:WANIPv6FirewallControl:1";
 
 static void set_timeout(sock_t s, int ms) {
 #ifdef _WIN32
@@ -137,30 +140,44 @@ static int find_router(char* location, size_t n) {
     return 0;
 }
 
-static int soap(const char* action, const char* args, char* out, int cap, char* local, size_t ln) {
+static int soap_to(const char* control, const char* service, const char* action, const char* args, char* out, int cap, char* local, size_t ln) {
     char host[128], path[400]; int port;
-    if (!split_url(g_control, host, sizeof host, &port, path, sizeof path)) return -1;
+    if (!split_url(control, host, sizeof host, &port, path, sizeof path)) return -1;
     char body[1500];
     snprintf(body, sizeof body,
              "<?xml version=\"1.0\"?>\r\n<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
              "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:%s xmlns:u=\"%s\">%s</u:%s></s:Body></s:Envelope>\r\n",
-             action, g_service, args, action);
+             action, service, args, action);
     char req[2500];
     snprintf(req, sizeof req, "POST %s HTTP/1.1\r\nHOST: %s:%d\r\nCONTENT-TYPE: text/xml; charset=\"utf-8\"\r\nCONTENT-LENGTH: %d\r\n"
-             "SOAPACTION: \"%s#%s\"\r\nConnection: close\r\n\r\n%s", path, host, port, (int)strlen(body), g_service, action, body);
+             "SOAPACTION: \"%s#%s\"\r\nConnection: close\r\n\r\n%s", path, host, port, (int)strlen(body), service, action, body);
     return http(host, port, req, out, cap, local, ln);
+}
+static int soap(const char* action, const char* args, char* out, int cap, char* local, size_t ln) {
+    return soap_to(g_control, g_service, action, args, out, cap, local, ln);
 }
 
 int upnp_open(int port, char* ext_ip, size_t en, char* lan_ip, size_t ln, char* why, size_t wn) {
     ext_ip[0] = lan_ip[0] = 0;
     char loc[512];
-    if (!find_router(loc, sizeof loc)) { snprintf(why, wn, "no router answered (UPnP is off or not supported)"); return 0; }
+    const char* test_loc = getenv("DQIX_UPNP_LOCATION");             /* tests: a stand-in router's description */
+    if (test_loc) snprintf(loc, sizeof loc, "%s", test_loc);
+    else if (!find_router(loc, sizeof loc)) { snprintf(why, wn, "no router answered (UPnP is off or not supported)"); return 0; }
     char host[128], path[400]; int hport;
     if (!split_url(loc, host, sizeof host, &hport, path, sizeof path)) { snprintf(why, wn, "the router gave an odd address"); return 0; }
     static char xml[65536];
     char req[700];
     snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHOST: %s:%d\r\nConnection: close\r\n\r\n", path, host, hport);
     if (http(host, hport, req, xml, sizeof xml, lan_ip, ln) <= 0) { snprintf(why, wn, "the router didn't describe itself"); return 0; }
+    {   /* IGD 2 routers may also open their IPv6 firewall (upnp_pinhole) */
+        const char* fw = strstr(xml, FW_SERVICE);
+        char c[400];
+        g_fw_control[0] = 0;
+        if (fw && xml_tag(fw, "controlURL", c, sizeof c)) {
+            if (!strncmp(c, "http://", 7)) snprintf(g_fw_control, sizeof g_fw_control, "%s", c);
+            else snprintf(g_fw_control, sizeof g_fw_control, "http://%s:%d%s%s", host, hport, c[0] == '/' ? "" : "/", c);
+        }
+    }
     /* the WAN connection service and its control address */
     const char* svc = NULL;
     static const char* kinds[] = { "urn:schemas-upnp-org:service:WANIPConnection:2", "urn:schemas-upnp-org:service:WANIPConnection:1",
@@ -201,10 +218,46 @@ int upnp_open(int port, char* ext_ip, size_t en, char* lan_ip, size_t ln, char* 
     return 1;
 }
 
+static void pinhole_close(void);
 void upnp_close(void) {
+    pinhole_close();
     if (!g_port_open) return;
     char args[300], ans[4096];
     snprintf(args, sizeof args, "<NewRemoteHost></NewRemoteHost><NewExternalPort>%d</NewExternalPort><NewProtocol>TCP</NewProtocol>", g_ext_port);
     soap("DeletePortMapping", args, ans, sizeof ans, NULL, 0);
     g_port_open = 0;
+}
+
+/* IPv6: open the router's firewall for this PC's address and port (UPnP IGD 2,
+ * WANIPv6FirewallControl). Only after upnp_open found the router. 1: open. */
+int upnp_pinhole(const char* v6, int port, char* why, size_t wn) {
+    if (!g_fw_control[0]) { snprintf(why, wn, "the router has no UPnP IPv6 firewall control"); return 0; }
+    char args[600]; static char ans[8192];
+    snprintf(args, sizeof args, "<RemoteHost></RemoteHost><RemotePort>0</RemotePort><InternalClient>%s</InternalClient>"
+             "<InternalPort>%d</InternalPort><Protocol>6</Protocol><LeaseTime>7200</LeaseTime>", v6, port);
+    int n = soap_to(g_fw_control, FW_SERVICE, "AddPinhole", args, ans, sizeof ans, NULL, 0);
+    if (n <= 0 || !strstr(ans, " 200 ") || !xml_tag(ans, "UniqueID", g_pinhole, sizeof g_pinhole)) {
+        char code[32] = "";
+        if (n > 0) xml_tag(ans, "errorCode", code, sizeof code);
+        snprintf(why, wn, "the router refused to open its IPv6 firewall%s%s%s", code[0] ? " (error " : "", code, code[0] ? ")" : "");
+        g_pinhole[0] = 0;
+        return 0;
+    }
+    return 1;
+}
+
+/* keep the pinhole open (its lease is 2 hours): call every so often */
+void upnp_renew(void) {
+    if (!g_pinhole[0]) return;
+    char args[200]; static char ans[4096];
+    snprintf(args, sizeof args, "<UniqueID>%s</UniqueID><NewLeaseTime>7200</NewLeaseTime>", g_pinhole);
+    soap_to(g_fw_control, FW_SERVICE, "UpdatePinhole", args, ans, sizeof ans, NULL, 0);
+}
+
+static void pinhole_close(void) {
+    if (!g_pinhole[0]) return;
+    char args[200]; static char ans[4096];
+    snprintf(args, sizeof args, "<UniqueID>%s</UniqueID>", g_pinhole);
+    soap_to(g_fw_control, FW_SERVICE, "DeletePinhole", args, ans, sizeof ans, NULL, 0);
+    g_pinhole[0] = 0;
 }
