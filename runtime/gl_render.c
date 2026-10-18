@@ -29,6 +29,11 @@
     X(void, glClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glClear, (GLbitfield)) \
     X(void, glClearBufferfv, (GLenum, GLint, const GLfloat*)) \
+    X(void, glClearBufferfi, (GLenum, GLint, GLfloat, GLint)) \
+    X(void, glStencilFunc, (GLenum, GLint, GLuint)) \
+    X(void, glStencilOp, (GLenum, GLenum, GLenum)) \
+    X(void, glStencilMask, (GLuint)) \
+    X(void, glClearBufferiv, (GLenum, GLint, const GLint*)) \
     X(void, glEnable, (GLenum)) \
     X(void, glDisable, (GLenum)) \
     X(void, glEnablei, (GLenum, GLuint)) \
@@ -144,7 +149,7 @@ static const char* FS_POLY =
     "  if (a == 0) discard;\n"
     "  if (u_alphatest != 0 && float(a) <= u_aref) discard;\n"
     "  float fa = a >= 31 ? 1.0 : float(a) / 31.0;\n"
-    "  o_color = vec4(vec3(c) / 31.0 * fa, fa);\n"
+    "  o_color = vec4(vec3(c) / 31.0, fa);\n"                  /* straight colour and alpha, like the DS's buffer */
     "  o_attr = vec4(v_attr.z, v_attr.w, eflag, 1.0);\n"
     "  gl_FragDepth = u_wbuf != 0 ? clamp((1.0 / gl_FragCoord.w) / 4096.0, 0.0, 1.0) : gl_FragCoord.z;\n"
     "}\n";
@@ -161,7 +166,7 @@ static const char* FS_POST =
     "#version 330 core\n"
     "in vec2 v_uv; out vec4 o_color;\n"
     "uniform sampler2D u_color; uniform sampler2D u_attr; uniform sampler2D u_depth;\n"
-    "uniform int u_edge; uniform vec3 u_edgecol[8]; uniform int u_scale;\n"
+    "uniform int u_edge; uniform vec3 u_edgecol[8]; uniform int u_scale; uniform int u_aa;\n"
     "uniform int u_fog; uniform int u_fog_alpha_only; uniform vec4 u_fogcol; uniform float u_fogtab[32];\n"
     "uniform int u_fogoff; uniform int u_fogshift; uniform int u_wbuf;\n"
     "void main() {\n"
@@ -175,7 +180,12 @@ static const char* FS_POST =
     "      ivec2 q = p + o[k];\n"
     "      if (q.x < 0 || q.y < 0 || q.x >= sz.x || q.y >= sz.y) continue;\n"
     "      vec4 an = texelFetch(u_attr, q, 0);\n"
-    "      if (abs(an.r - id) > 0.004 && d < texelFetch(u_depth, q, 0).r) { int i = int(id * 63.0 + 0.5) >> 3; c = vec4(u_edgecol[i], 1.0); break; }\n"
+    "      if (abs(an.r - id) > 0.004 && d < texelFetch(u_depth, q, 0).r) { int i = int(id * 63.0 + 0.5) >> 3;\n"
+    /* with anti-aliasing on, the DS blends a marked edge half and half with what is behind it
+     * (the soft outlines of DQIX's characters); the farther neighbour stands in for that */
+    "        if (u_aa != 0) { vec4 b = texelFetch(u_color, q, 0); c = vec4(b.a > 0.0 ? mix(b.rgb, u_edgecol[i], 17.0 / 32.0) : u_edgecol[i], b.a > 0.0 ? max(c.a, b.a) : c.a); }\n"
+    "        else c = vec4(u_edgecol[i], c.a);\n"
+    "        break; }\n"
     "    }\n"
     "  }\n"
     "  if (u_fog != 0 && at.g > 0.5) {\n"
@@ -187,10 +197,10 @@ static const char* FS_POST =
     "      if (z15 - u_fogoff < 0) dens = u_fogtab[0]; else if (i >= 31) dens = u_fogtab[31];\n"
     "      else { float f = float((z15 - u_fogoff) - i * step) / float(step); dens = mix(u_fogtab[i], u_fogtab[i + 1], f); } }\n"
     "    if (dens >= 127.0) dens = 128.0; dens /= 128.0;\n"
-    "    float a = c.a; vec3 rgb = a > 0.0 ? c.rgb / a : vec3(0.0);\n"
+    "    float a = c.a; vec3 rgb = c.rgb;\n"
     "    if (u_fog_alpha_only == 0) rgb = mix(rgb, u_fogcol.rgb, dens);\n"
     "    a = mix(a, u_fogcol.a, dens);\n"
-    "    c = vec4(rgb * a, a);\n"
+    "    c = vec4(rgb, a);\n"
     "  }\n"
     "  o_color = c;\n"
     "}\n";
@@ -232,13 +242,13 @@ static const char* FS_COMP =
     "  vec3 c2 = c2t.rgb; int mb = int(c2t.a * 255.0 + 0.5);\n"
     "  ivec2 sz = textureSize(u_3d, 0);\n"
     "  vec4 s = texelFetch(u_3d, min(ivec2(v_uv * vec2(sz)), sz - 1), 0);\n"
-    "  float A = s.a; vec3 c3 = A > 0.0 ? s.rgb / A : vec3(0.0);\n"
+    "  float A = s.a; vec3 c3 = s.rgb;\n"
     "  float eva = float(info.g) / 16.0, evb = float(info.b) / 16.0, evy = float(info.a) / 16.0;\n"
     "  vec3 o;\n"
     "  if (mode == 1) {\n"
     "    bool sec = (info.r & 4u) != 0u; int eff = int((info.r >> 3) & 3u);\n"
     "    if (A <= 0.0) o = col;\n"
-    "    else if (A < 0.999 && sec) o = s.rgb + c2 * (1.0 - A);\n"
+    "    else if (A < 0.999 && sec) o = c3 * A + c2 * (1.0 - A);\n"
     "    else if (eff == 1 && sec) o = min(c3 * eva + c2 * evb, vec3(1.0));\n"
     "    else if (eff == 2) o = c3 + (1.0 - c3) * evy;\n"
     "    else if (eff == 3) o = c3 - c3 * evy;\n"
@@ -599,12 +609,12 @@ static void make_fbs(void) {
         Fb3D* f = &g_fb[i];
         f->color = new_tex(GL_RGBA8, g_fb3_w, g_fb_h, GL_RGBA, GL_UNSIGNED_BYTE, GL_NEAREST);
         f->attr  = new_tex(GL_RGBA8, g_fb3_w, g_fb_h, GL_RGBA, GL_UNSIGNED_BYTE, GL_NEAREST);
-        f->depth = new_tex(GL_DEPTH_COMPONENT24, g_fb3_w, g_fb_h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_NEAREST);
+        f->depth = new_tex(GL_DEPTH24_STENCIL8, g_fb3_w, g_fb_h, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, GL_NEAREST);   /* stencil: the DS's per-pixel flags (see the drawing) */
         p_glGenFramebuffers(1, &f->fbo);
         p_glBindFramebuffer(GL_FRAMEBUFFER, f->fbo);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, f->color, 0);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, f->attr, 0);
-        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, f->depth, 0);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, f->depth, 0);
         GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
         p_glDrawBuffers(2, bufs);
         if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) fprintf(stderr, "GL: 3D framebuffer incomplete\n");
@@ -715,7 +725,11 @@ static void push_vertex(int* nv, const SVtx* v, float alpha, const Poly* p, floa
     (*nv)++;
 }
 
-typedef struct { int first, count; GLuint tex; int sampler; float tw, th; int translucent, depth_write, depth_eq, lines; } Batch;
+#define ST_SOLID 0x80                    /* stencil: the pixel has a colour (alpha > 0) */
+#define ST_TRANS 0x40                    /* a translucent polygon is on it (its id: bits 0-4, of the DS's 0-5) */
+#define ST_MASKBIT 0x20                  /* marked by the latest shadow mask */
+#define ST_ID 0x1F
+typedef struct { int first, count; GLuint tex; int sampler; float tw, th; int translucent, depth_write, depth_eq, lines, pid, shadow; } Batch;
 static Batch* g_batches; static int g_bcap;
 
 static void gl_vblank(void) {
@@ -731,6 +745,23 @@ static void gl_render(const Frame3D* f) {
 }
 static void gl_render_(const Frame3D* f) {
     g_frameno++;
+    {   /* tests: DQIX_GL_PROBE="f,x,y": on the first 3D frame from frame f, list the polygons over DS pixel x,y */
+        static int pn = -2, px, py; const char* e;
+        if (pn == -2) { pn = -1; if ((e = getenv("DQIX_GL_PROBE"))) sscanf(e, "%d,%d,%d", &pn, &px, &py); }
+        static int done; if (pn >= 0 && (int)g_frame >= pn && !done && (done = 1)) {
+            fprintf(stderr, "probe: frame %llu disp3d %04x wbuf %d fogcol %04x/%02x fogoff %04x fogtab", (unsigned long long)g_frame, IO16_(0x060), f->wbuf, IO16_(0x358), g_io[0x35A], IO16_(0x35C));
+            for (int k = 0; k < 32; k++) fprintf(stderr, " %d", g_io[0x360 + k] & 127);
+            fprintf(stderr, "\n");
+        }
+        if (pn >= 0 && done == 1 && (done = 2)) for (int i = 0; i < f->n; i++) {
+            const Poly* p = f->order[i]; float x0 = 1e9f, x1 = -1e9f;
+            for (int k = 0; k < p->n; k++) { if (p->v[k].x < x0) x0 = p->v[k].x; if (p->v[k].x > x1) x1 = p->v[k].x; }
+            if (px < x0 || px > x1 || py < p->ymin || py > p->ymax) continue;
+            fprintf(stderr, "probe %d: %s attr %08x alpha %u mode %u id %u fmt %u tex %08x pal %04x n %d col %.0f,%.0f,%.0f z %.4f\n", i,
+                    i < f->n_opaque ? "opaque" : "transl", p->attr, (p->attr >> 16) & 31, (p->attr >> 4) & 3, (p->attr >> 24) & 63,
+                    (p->teximg >> 26) & 7, p->teximg, p->pltt, p->n, p->v[0].r, p->v[0].g, p->v[0].b, p->v[0].zn);
+        }
+    }
     int side = f->width > 256 ? (f->width - 256) / 2 : 0;
     if (side != g_wside) { free_fbs(); g_wside = side; make_fbs(); }   /* widescreen on/off: buffers of the new width */
     g_half_w = (float)(256 + 2 * side) / 2.0f;
@@ -759,6 +790,8 @@ static void gl_render_(const Frame3D* f) {
         b.depth_write = !b.translucent || (p->attr & 0x800);
         b.depth_eq = (p->attr >> 14) & 1;
         b.lines = wire;
+        b.pid = (p->attr >> 24) & 63;
+        b.shadow = ((p->attr >> 4) & 3) == 3 ? (b.pid == 0 ? 1 : 2) : 0;   /* 1 the shadow's mask, 2 the shadow */
         b.first = nv;
         float a = wire ? 31.0f : (float)alpha;
         if (wire) {
@@ -775,7 +808,8 @@ static void gl_render_(const Frame3D* f) {
         if (nb > 0) {
             Batch* l = &g_batches[nb - 1];
             if (l->tex == b.tex && l->sampler == b.sampler && l->translucent == b.translucent && l->depth_write == b.depth_write &&
-                l->depth_eq == b.depth_eq && l->lines == b.lines && l->first + l->count == b.first) { l->count += b.count; continue; }
+                l->depth_eq == b.depth_eq && l->lines == b.lines && l->first + l->count == b.first &&
+                (!b.translucent || l->pid == b.pid) && l->shadow == b.shadow && !b.shadow) { l->count += b.count; continue; }
         }
         if (nb == g_bcap) { g_bcap = g_bcap ? g_bcap * 2 : 1024; g_batches = realloc(g_batches, sizeof(Batch) * (size_t)g_bcap); }
         g_batches[nb++] = b;
@@ -787,11 +821,11 @@ static void gl_render_(const Frame3D* f) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, fb->fbo);
     p_glViewport(0, 0, g_fb3_w, g_fb_h);
 
-    /* clear: color (premultiplied), attributes (clear polygon id, fog), depth */
+    /* clear: color (straight), attributes (clear polygon id, fog), depth and the per-pixel flags */
     uint32_t clear = IO32_(0x350);
     uint16_t cdepth = IO16_(0x354) & 0x7FFF;
     float ca = (float)((clear >> 16) & 31) / 31.0f;
-    float cc[4] = { (float)(clear & 31) / 31.0f * ca, (float)((clear >> 5) & 31) / 31.0f * ca, (float)((clear >> 10) & 31) / 31.0f * ca, ca };
+    float cc[4] = { (float)(clear & 31) / 31.0f, (float)((clear >> 5) & 31) / 31.0f, (float)((clear >> 10) & 31) / 31.0f, ca };
     float cattr[4] = { (float)((clear >> 24) & 63) / 63.0f, (float)((clear >> 15) & 1), 0.0f, 0.0f };
     uint32_t d24 = (uint32_t)cdepth * 0x200 + ((cdepth + 1) / 0x8000) * 0x1FF;
     float cd = cdepth == 0x7FFF ? 1.0f : f->wbuf ? fminf((float)d24 / 4096.0f / 4096.0f, 1.0f) : (float)d24 / 16777215.0f;
@@ -799,7 +833,8 @@ static void gl_render_(const Frame3D* f) {
     p_glDepthMask(GL_TRUE);
     p_glClearBufferfv(GL_COLOR, 0, cc);
     p_glClearBufferfv(GL_COLOR, 1, cattr);
-    p_glClearBufferfv(GL_DEPTH, 0, &cd);
+    p_glStencilMask(0xFF);
+    p_glClearBufferfi(GL_DEPTH_STENCIL, 0, cd, ca > 0.0f ? ST_SOLID : 0);
 
     p_glBindVertexArray(vao_poly);
     p_glBindBuffer(GL_ARRAY_BUFFER, vbo_poly);
@@ -818,6 +853,18 @@ static void gl_render_(const Frame3D* f) {
     p_glEnable(GL_DEPTH_TEST);
     p_glActiveTexture(GL_TEXTURE0);
     int blend_on = (disp3d >> 3) & 1;
+    /* The DS's rules for translucent pixels, kept per pixel in the stencil buffer:
+     *   ST_SOLID  the pixel has a colour (alpha > 0): opaque, or the clear colour
+     *   ST_TRANS  a translucent polygon is on it, with its id in the low 6 bits
+     * - onto a pixel with no colour yet, a translucent polygon is written as it is
+     *   (its own colour and alpha: nothing to blend with);
+     * - onto any other pixel it is blended, and alpha becomes the larger of the two;
+     * - never onto a pixel already covered by a translucent polygon with the same
+     *   id (one mesh doesn't blend over itself: layered clouds, glows, water).
+     * Shadows: the mask (id 0) marks where it is hidden (depth test fails); the
+     * shadow then darkens only those pixels, and not the object of its own id. */
+    p_glEnable(GL_STENCIL_TEST);
+    int in_mask = 0;
     for (int i = 0; i < nb; i++) {
         Batch* b = &g_batches[i];
         p_glBindTexture(GL_TEXTURE_2D, b->tex);
@@ -825,19 +872,61 @@ static void gl_render_(const Frame3D* f) {
         p_glUniform2f(loc_texsize, b->tw, b->th);
         p_glDepthFunc(b->depth_eq ? GL_EQUAL : GL_LESS);
         p_glDepthMask(b->depth_write ? GL_TRUE : GL_FALSE);
-        if (b->translucent) {
-            if (blend_on) {
-                p_glEnablei(GL_BLEND, 0);
-                p_glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
-                p_glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX);
-            } else p_glDisablei(GL_BLEND, 0);
-            p_glColorMaski(1, 0, 1, 0, 0);                      /* translucent pixels keep the opaque polygon id */
-        } else {
+        GLenum prim = b->lines ? GL_LINES : GL_TRIANGLES;
+        if (b->shadow == 1) {                                   /* shadow mask: no colour; mark where it fails the depth test */
+            p_glColorMaski(0, 0, 0, 0, 0); p_glColorMaski(1, 0, 0, 0, 0);
+            p_glDepthMask(GL_FALSE);
+            p_glStencilMask(ST_MASKBIT);
+            if (!in_mask) { GLint zero = 0; p_glClearBufferiv(GL_STENCIL, 0, &zero); }   /* a new mask: the old marks go */
+            in_mask = 1;
+            p_glStencilFunc(GL_ALWAYS, ST_MASKBIT, ST_MASKBIT);
+            p_glStencilOp(GL_KEEP, GL_REPLACE, GL_KEEP);
+            p_glDrawArrays(prim, b->first, b->count);
+            p_glColorMaski(0, 1, 1, 1, 1);
+            continue;
+        }
+        in_mask = 0;
+        if (!b->translucent && !b->shadow) {
             p_glDisablei(GL_BLEND, 0);
             p_glColorMaski(1, 1, 1, 1, 1);
+            p_glStencilMask(0xFF);
+            p_glStencilFunc(GL_ALWAYS, ST_SOLID, 0xFF);
+            p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            p_glDrawArrays(prim, b->first, b->count);
+            continue;
         }
-        p_glDrawArrays(b->lines ? GL_LINES : GL_TRIANGLES, b->first, b->count);
+        GLint ref = ST_SOLID | ST_TRANS | (b->pid & ST_ID);
+        p_glColorMaski(1, 0, 1, 0, 0);                          /* translucent pixels keep the opaque polygon id */
+        if (b->shadow == 2) {                                   /* the shadow: only on marked pixels; clears the marks */
+            if (blend_on) { p_glEnablei(GL_BLEND, 0); p_glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE); p_glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX); }
+            else p_glDisablei(GL_BLEND, 0);
+            p_glStencilMask(0xFF);
+            p_glStencilFunc(GL_EQUAL, ref | ST_MASKBIT, ST_MASKBIT);   /* the marks stay for the next shadow, like the DS */
+            p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            p_glDrawArrays(prim, b->first, b->count);
+            continue;
+        }
+        p_glStencilMask(0xFF);
+        p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        /* 1: pixels with no colour yet: the polygon as it is */
+        p_glDisablei(GL_BLEND, 0);
+        p_glStencilFunc(GL_GREATER, ref, ST_SOLID);
+        p_glDrawArrays(prim, b->first, b->count);
+        /* 2: the others, except where this id already is (or 1 just drew) */
+        if (blend_on) {
+            p_glEnablei(GL_BLEND, 0);
+            p_glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
+            p_glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX);
+        } else {                                                /* blending off: the colour replaces, alpha still the larger */
+            p_glEnablei(GL_BLEND, 0);
+            p_glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ONE);
+            p_glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX);
+        }
+        p_glStencilFunc(GL_NOTEQUAL, ref, ST_SOLID | ST_TRANS | ST_ID);
+        p_glDrawArrays(prim, b->first, b->count);
     }
+    p_glDisable(GL_STENCIL_TEST);
+    p_glStencilMask(0xFF);
     p_glDisablei(GL_BLEND, 0);
 
     p_glDisable(GL_DEPTH_TEST);
@@ -854,6 +943,7 @@ static void gl_render_(const Frame3D* f) {
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_attr"), 1);
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_depth"), 2);
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_edge"), (disp3d >> 5) & 1);
+    p_glUniform1i(p_glGetUniformLocation(prog_post, "u_aa"), (disp3d >> 4) & 1);
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_scale"), g_scale);
     float ec[24];
     for (int i = 0; i < 8; i++) { uint16_t c = IO16_(0x330 + i * 2); ec[i * 3] = (float)(c & 31) / 31.0f; ec[i * 3 + 1] = (float)((c >> 5) & 31) / 31.0f; ec[i * 3 + 2] = (float)((c >> 10) & 31) / 31.0f; }
