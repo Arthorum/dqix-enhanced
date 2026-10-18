@@ -57,9 +57,10 @@ You need your own Dragon Quest IX cartridge's ROM (USA version, `.nds`),
 Windows 10 or 11 (64-bit), about 3 GB of free space, and the internet the
 first time.
 
-1. Download the **[stable version](https://github.com/sackchief/dqix-enhanced/archive/refs/heads/stable.zip)**
-   and unzip it somewhere, for example in Documents. (The green **Code**
-   button gives the nightly version: the newest work, less tested.)
+1. Download the latest **stable** release from the
+   **[Releases page](https://github.com/sackchief/dqix-enhanced/releases)**
+   (*Source code (zip)*) and unzip it somewhere, for example in Documents.
+   The **Nightly** release there is the newest work, less tested.
 2. Put your ROM in the `rom` folder.
 3. Double-click **`BUILD.bat`**. The first time, it installs free build tools
    (MSYS2), which takes 10-20 minutes in all. Later builds are much faster.
