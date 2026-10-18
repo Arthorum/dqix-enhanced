@@ -338,7 +338,7 @@ static void settings_load(void) {
         else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
         else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); g_wide = !strcmp(val, "wide"); }
-        else if (!strcmp(key, "analog_walk")) g_analog_walk = atoi(val) != 0;
+        else if (!strcmp(key, "walk_any_direction")) g_analog_walk = atoi(val) != 0;   /* (the older analog_walk, off by default then, is ignored) */
         else if (!strcmp(key, "fullscreen")) g_fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "dslite_filter")) g_opt.lcd = atoi(val) != 0;
         else if (!strcmp(key, "lcd_colors")) g_opt.lcd_color = atoi(val) != 0;
@@ -381,10 +381,10 @@ static void settings_save(void) {
     fprintf(f, "resolution_3d = %d\n", g_scale3d);
     fprintf(f, "# window size: 1 to 8 times the DS screens (F3)\n");
     fprintf(f, "window_scale = %d\n", g_scale);
-    fprintf(f, "# stacked, side_by_side or corner (the top screen small in the corner; F2)\n");
+    fprintf(f, "# stacked, side_by_side, corner (the top screen small beside the field) or wide (widescreen; F2)\n");
     fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : g_wide ? "wide" : g_corner ? "corner" : "stacked");
-    fprintf(f, "# Modern: the left stick walks in any direction (0 or 1)\n");
-    fprintf(f, "analog_walk = %d\n", g_analog_walk);
+    fprintf(f, "# Modern: the left stick walks in any direction, like the stylus (0 or 1)\n");
+    fprintf(f, "walk_any_direction = %d\n", g_analog_walk);
     fprintf(f, "# 0 or 1 (F11)\n");
     fprintf(f, "fullscreen = %d\n", g_fullscreen);
     fprintf(f, "# DS Lite screen filter (F6) and its parts: 0 or 1; backlight: low, medium, high, max\n");
@@ -541,6 +541,7 @@ void frontend_init(int argc, char** argv) {
     g_report_perf = perf_write;
     g_headless = getenv("DQIX_NOWINDOW") != NULL;
     if (getenv("DQIX_HIDDEN")) { g_hidden = g_headless = 1; return; }
+    g_analog_walk = 1;                                          /* Modern: walking with the stick is on unless turned off */
     skins_scan();
     default_console_color();
     if (!getenv("DQIX_NO_SETTINGS")) {
@@ -1323,8 +1324,8 @@ static void do_action(int id) {
     case MI_ANALOG: g_analog_walk = !g_analog_walk; break;
     case MI_MODERN_HELP:
         info_box(SDL_MESSAGEBOX_INFORMATION, "Modern",
-            "Optional ways to play that the DS didn't have. They are all off at first, and with them off the game is exactly the original.\n\n"
-            "Walk in any direction with the left stick: on the DS the D-pad walks in 8 directions and only the stylus walks in any. With this on, "
+            "Optional ways to play that the DS didn't have. Walking with the stick is on at first; the others are off. With them all off the game is exactly the original.\n\n"
+            "Walk in any direction with the left stick (on at first): on the DS the D-pad walks in 8 directions and only the stylus walks in any. With this on, "
             "a controller's left stick steers like the stylus while you walk around (the game's own stylus walking). In menus, dialogue and "
             "battles the stick stays a D-pad. Friends in a session don't need it on.\n\n"
             "Widescreen: the field is drawn wider than the DS's screen, so you see more of the world left and right, and the top screen "

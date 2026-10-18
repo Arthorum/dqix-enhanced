@@ -9,14 +9,14 @@ adventure; try this one in its own folder with a copy of your save.
 - **DQVC like the original**: sales on the original calendar (Fridays,
   08:00 UTC), new stock every day, every player their own shop, visitors can
   shop at the host's Sellma, and DQVC works inside multiplayer sessions.
-- **Modern options** (new Modern menu, all off at first):
+- **Modern options** (new Modern menu):
   - **Widescreen**: the world is drawn wider than the DS's screen, so you see
     more of it left and right, and the top screen sits small in the corner
     like a minimap. Menus slide over to make room; in battles the commands
     sit in the corner at half size. 16:9 in a window, as wide as your
     monitor in fullscreen. Enhanced mode.
-  - **Walk in any direction** with a controller's left stick, now without
-    the stylus's arrow on the screen.
+  - **Walk in any direction** with a controller's left stick, now on at
+    first and without the stylus's arrow on the screen.
   - The top screen in the corner, with the field as on the DS.
 - **Nothing extra to download**: DQVC and the downloadable quests are built
   into the game; the build fetches DQVC's news by itself.

@@ -30,10 +30,11 @@ exactly like the original, and it can also do things the DS never could.
   forward.
 - The game's own icon (the one the DS menu shows), made from your ROM.
 
-**Modern options** (all off at first; with them off, the game is the original)
-- **Walk in any direction with the left stick**: the stick steers like the
-  DS stylus while you walk around, instead of the D-pad's 8 directions
-  (without the stylus's arrow on the screen).
+**Modern options** (in the Modern menu; with them all off, the game is the
+original)
+- **Walk in any direction with the left stick** (on at first): the stick
+  steers like the DS stylus while you walk around, instead of the D-pad's 8
+  directions (without the stylus's arrow on the screen).
 - **Widescreen**: the world drawn wider than the DS's screen, so you see
   more of it left and right, with the map and party small in the corner like
   a minimap. Menus slide over to make room; in battles the commands sit in

@@ -205,6 +205,11 @@ to it: `git checkout bookmark-2026-10-15`.
   with those textures that frame carry the tag; hidden (HPoly.hidden) only in
   what's drawn, while analog walk is on and the mouse isn't held. Checked:
   only the arrow's pixels differ, save identical.
+- **nightly14**: walking with the stick is on by default (frontend_init sets
+  it before settings_load; the setting is now `walk_any_direction`, so older
+  settings files, which all said analog_walk = 0, start with it on). The
+  arrow is hidden only while the stick walks (and 8 frames after), so mouse
+  and touch-screen walking keep it.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).
