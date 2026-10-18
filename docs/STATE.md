@@ -1,16 +1,16 @@
 # Where the project stands
 
-Git tag `bookmark-2026-10-15` marks the last stable version (v26). To go back
-to it: `git checkout bookmark-2026-10-15`.
+Git tag `v27` (and `bookmark-2026-10-18`) marks the current stable version.
+The one before: `v26` / `bookmark-2026-10-15`. To go back: `git checkout v26`.
 
 ## Stable and nightly
 
-- **Stable** = git branch `stable` (now v26, tag `bookmark-2026-10-15`): the
+- **Stable** = git branch `stable` (now v27, tag `v27`): the
   version to play your main save on. Changes only by promoting a proven
   nightly, or a small safe fix (made on `stable`, then merged into `main`).
   Keep it in its own folder, built with BUILD.bat.
-- **Nightly** = branch `main`, versions `v27-nightly1`, `-nightly2`...
-  Experimental (now: wireless multiplayer). Its own folder and saves.
+- **Nightly** = branch `main`, versions `v28-nightly1`, `-nightly2`... (next)
+  Experimental. Its own folder and saves.
 - **Promoting**: when a nightly is solid, it becomes the next stable: set the
   version to `v27`, bookmark (tag), move `stable` to it, make the stable zips.
 
@@ -259,6 +259,9 @@ to it: `git checkout bookmark-2026-10-15`.
   HKCU Uninstall entry -> tools/uninstall.ps1). apply.bat starts
   game\dqix.exe. Earlier versions: annotated tags v17-v25,
   v27-nightly1-20 (release-notes/past/index.txt; no releases for them).
+- **v27 stable** (2026-10-18): v27-nightly21 promoted (version "v27",
+  release-notes/v27.md; `stable` = `main`). Nightly is the same until
+  v28-nightly1.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

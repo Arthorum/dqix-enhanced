@@ -3,7 +3,7 @@
 What's planned for DQIX Enhanced, roughly in order. Done items move to the
 bottom with the version they arrived in.
 
-## Before the next stable release (v27)
+## Checks still to do (v27)
 
 - [ ] **A real internet session with friends**: 3-4 players, tag mode,
       co-op through Pavo and a DQVC purchase, on different home networks.
@@ -11,7 +11,6 @@ bottom with the version they arrived in.
       player list and Start the game.
 - [ ] **The updater's first real run**: *Help > Check for updates* against
       the public repository, then an actual update and a rollback.
-- [ ] **Release v27 as stable**, so players on stable get update notices too.
 
 ## Modern options
 
@@ -68,6 +67,7 @@ the same room.
 
 ## Done
 
+- [x] **v27 released as stable** (from v27-nightly21).
 - [x] A setup window (`Install Dragon Quest IX.bat`) with shortcuts and an
       uninstaller; NAT-PMP, PCP and IPv6 for multiplayer; Send a bug report (v27-nightly21).
 - [x] The right stick turns the camera; double-click leaves fullscreen
