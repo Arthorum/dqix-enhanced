@@ -460,6 +460,37 @@ static int try_gl(void) {
     return 1;
 }
 
+/* The window's icon: the game's own, the 32x32 picture the DS menu shows for
+ * the cartridge (in the ROM's banner). On Windows, dqix.exe normally carries
+ * it already (made from the ROM by the build), and Windows takes it from there
+ * at every size; this is for other systems and builds without it. */
+static void window_icon(void) {
+#ifdef _WIN32
+    if (FindResourceA(NULL, MAKEINTRESOURCEA(1), (LPCSTR)RT_GROUP_ICON)) return;
+#endif
+    extern size_t g_rom_size;
+    if (!g_rom || g_rom_size < 0x200 || !g_win) return;
+    uint32_t off; memcpy(&off, g_rom + 0x68, 4);
+    if (off == 0 || off + 0x240 > g_rom_size) return;
+    const uint8_t* bits = g_rom + off + 0x20;                  /* 4x4 tiles of 8x8, 4 bits a pixel */
+    uint32_t pal[16];
+    for (int i = 0; i < 16; i++) {                               /* BGR555; colour 0 is see-through */
+        uint16_t c; memcpy(&c, g_rom + off + 0x220 + i * 2, 2);
+        uint32_t r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+        pal[i] = (i ? 0xFF000000u : 0) | ((r << 3 | r >> 2) << 16) | ((g << 3 | g >> 2) << 8) | (b << 3 | b >> 2);
+    }
+    enum { N = 64 };                                             /* doubled, sharp pixels */
+    static uint32_t px[N * N];
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            int sx = x / 2, sy = y / 2, t = (sy / 8) * 4 + sx / 8;
+            uint8_t v = bits[t * 32 + (sy & 7) * 4 + (sx & 7) / 2];
+            px[y * N + x] = pal[(sx & 1) ? v >> 4 : v & 15];
+        }
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormatFrom(px, N, N, 32, N * 4, SDL_PIXELFORMAT_ARGB8888);
+    if (s) { SDL_SetWindowIcon(g_win, s); SDL_FreeSurface(s); }
+}
+
 static void lobby_hook(void);
 static void idle_pump(void);
 void frontend_init(int argc, char** argv) {
@@ -497,6 +528,7 @@ void frontend_init(int argc, char** argv) {
             SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
             g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
         }
+        window_icon();
         apply_mode();
         const char* names[N_DRAWN + MAX_SKINS];
         for (int i = 0; i < N_DRAWN; i++) names[i] = SHELLS[i].name;
@@ -868,7 +900,8 @@ static void restart_with(const char* session) {
     STARTUPINFOW si; memset(&si, 0, sizeof si); si.cb = sizeof si;
     PROCESS_INFORMATION pi;
     wchar_t* cmd = _wcsdup(GetCommandLineW());
-    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    DWORD flags = GetConsoleWindow() ? 0 : CREATE_NO_WINDOW;   /* started without a console (dqix.exe double-clicked): stay without */
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, flags, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
         exit(0);
     }

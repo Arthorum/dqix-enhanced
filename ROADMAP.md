@@ -64,6 +64,8 @@ the same room.
 
 ## Done
 
+- [x] The game's own icon for dqix.exe and its window, made from the ROM;
+      dqix.exe starts the game when double-clicked (v27-nightly12).
 - [x] Modern options: walk in any direction with the left stick; the top
       screen in the corner for widescreen monitors (v27-nightly11).
 - [x] DQVC and the downloadable quests built into the game; no extra files

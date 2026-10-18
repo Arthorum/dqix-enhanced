@@ -16,6 +16,9 @@ adventure; try this one in its own folder with a copy of your save.
   into the game; the build fetches DQVC's news by itself.
 - **Updates from inside the game**: Help > Check for updates (stable or
   nightly), and a notice when a new stable version is out.
+- **The game's own icon**: dqix.exe gets the icon the DS menu shows for the
+  cartridge, made from your ROM when the game is built. Double-click
+  `game\dqix.exe` (or a shortcut to it) to play: no console window.
 - The photo of a real DS Lite is the default console; tidier help windows.
 
 **How to install**: download *Source code (zip)* below, unzip it, put your

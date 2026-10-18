@@ -33,7 +33,10 @@ GENOBJ = $(patsubst $(GEN)/%.c,$(OBJ)/gen/%.o,$(wildcard $(GEN)/*.c))
 GEN7OBJ = $(patsubst $(GEN7)/%.c,$(OBJ)/gen7/%.o,$(wildcard $(GEN7)/*.c))
 RTOBJ = $(patsubst runtime/%.c,$(OBJ)/rt/%.o,$(RT))
 
-$(OUT): $(GENOBJ) $(GEN7OBJ) $(RTOBJ) $(SLIRPOBJ) $(OBJ)/rt/exe_main.o
+# RES: optional extra objects for the program only, e.g. the Windows icon
+# resource the build makes from the ROM (tools/rom_icon.py)
+RES ?=
+$(OUT): $(GENOBJ) $(GEN7OBJ) $(RTOBJ) $(SLIRPOBJ) $(OBJ)/rt/exe_main.o $(RES)
 	$(CC) -o $@ $^ $(SDL_LIBS) -lm $(NET_LIBS) $(LDFLAGS)
 
 # The game as a library (CORE=dqixcore.dll / dqixcore.so): in a session the

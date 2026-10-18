@@ -8,7 +8,7 @@ cartridge) into a PC version of the game. No game files are included.
 2. Double-click BUILD.bat.
    - The first time it installs free build tools (MSYS2) and takes 10-20 minutes.
    - It needs Windows 10/11 (64-bit), ~3 GB free space and the internet once.
-3. Play: double-click game\play.bat (make a desktop shortcut to it if you like).
+3. Play: double-click game\dqix.exe (make a desktop shortcut to it if you like).
 
 Controls: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q/W = L/R,
 Enter = START, Right Shift = SELECT, mouse = touch screen, Tab = fast forward.

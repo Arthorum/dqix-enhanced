@@ -28,6 +28,7 @@ exactly like the original, and it can also do things the DS never could.
   pixel scaling.
 - Keyboard, mouse (as the touch screen) and gamepads. Hold Tab to fast
   forward.
+- The game's own icon (the one the DS menu shows), made from your ROM.
 
 **Modern options** (all off at first; with them off, the game is the original)
 - **Walk in any direction with the left stick**: the stick steers like the
@@ -71,7 +72,8 @@ first time.
 2. Put your ROM in the `rom` folder.
 3. Double-click **`BUILD.bat`**. The first time, it installs free build tools
    (MSYS2), which takes 10-20 minutes in all. Later builds are much faster.
-4. Play with **`game\play.bat`**. Make a desktop shortcut to it if you like.
+4. Play with **`game\dqix.exe`** (the one with the game's icon). Make a
+   desktop shortcut to it if you like.
 
 Your save (`dqix.sav`) and settings (`settings.ini`) live in the `game`
 folder. **Don't share the `game` or `build` folders**: they contain the game.

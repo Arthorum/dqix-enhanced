@@ -33,7 +33,7 @@ You need your own Dragon Quest IX cartridge's ROM (the USA version), Windows
    which takes a few minutes. Then it checks the ROM, takes the game's code
    out of it, turns it into C and compiles it (10-20 minutes the first time,
    much less after updates).
-3. Play with **`game\play.bat`** (make a shortcut to it if you like). The
+3. Play with **`game\dqix.exe`** or `game\play.bat` (make a shortcut to it if you like). The
    `game` folder holds everything the game needs, including your save
    (`dqix.sav`) and settings (`settings.ini`), so you can move it anywhere.
 

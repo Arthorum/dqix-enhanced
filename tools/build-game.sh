@@ -30,15 +30,50 @@ echo "== Recompiling it to C (about a minute)"
 $PY recomp/build.py --extract build/extract --config config/usa/arm9 --out build/recomp --hle hle.txt --interpret interpret.txt --patch patches.txt
 $PY recomp/arm7.py --extract build/extract --out build/recomp7 --hle hle7.txt
 
+# The program's icon: the game's own (the one the DS menu shows), made from the
+# ROM like everything else, so nothing from the game is kept in this project.
+# Optional: without it the exe has Windows' plain icon.
+make_icon() {    # make_icon <rom> <dir> -> sets RES
+    RES=
+    mkdir -p "$2"
+    if $PY tools/rom_icon.py "$1" "$2/dqix.ico" && command -v windres >/dev/null 2>&1; then
+        cat > "$2/dqix.rc" <<'RC'
+1 ICON "dqix.ico"
+1 VERSIONINFO
+FILEVERSION 0,0,0,0
+PRODUCTVERSION 0,0,0,0
+FILEOS 0x40004
+FILETYPE 1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Dragon Quest IX"
+      VALUE "ProductName", "DQIX Enhanced"
+      VALUE "OriginalFilename", "dqix.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+RC
+        if (cd "$2" && windres dqix.rc -O coff -o dqix_res.o); then RES="$2/dqix_res.o"; echo "   icon: the game's own"; fi
+    fi
+}
+
 echo "== Compiling (the first time takes a while; later builds only redo what changed)"
 mkdir -p game
 case "$(uname -s)" in
 MINGW*|MSYS*)
     EXE=game/dqix.exe
+    make_icon "$ROM" build/icon
     # dqixcore.dll: the game again as a library, for the other players' DSes in a session
     make -j"$(nproc)" -f build.mk OS=Windows_NT GEN=build/recomp GEN7=build/recomp7 OBJ=build/obj FRONTEND=sdl OUT="$EXE" CORE=game/dqixcore.dll \
          CFLAGS="-O1 -w" DEFS=-DRECOMP_TRACE SDL_CFLAGS="$(sdl2-config --cflags)" SDL_LIBS="-lSDL2" \
-         LDFLAGS="-static-libgcc -Wl,--stack,67108864" "$EXE" core
+         LDFLAGS="-static-libgcc -Wl,--stack,67108864" RES="$RES" "$EXE" core
     cp /ucrt64/bin/SDL2.dll game/ ;;
 *)
     EXE=game/dqix

@@ -169,6 +169,18 @@ to it: `git checkout bookmark-2026-10-15`.
   battles. DQIX_STICK=from,to,x,y + DQIX_ANALOG=1 for tests. *Corner
   layout*: canvas 341x192, top screen at 1/3 in the top left
   (`layout = corner`, F2 cycles). With both off: replays unchanged.
+- **nightly12**: the program's icon is the game's own: the 32x32 banner
+  icon (ROM header 0x68 -> banner; bitmap +0x20, 4x4 tiles of 8x8 at 4 bpp;
+  palette +0x220, BGR555, colour 0 clear). tools/rom_icon.py (standard
+  library only) writes build/icon/dqix.ico (16-256, nearest pixel) and
+  build-game.sh compiles it with windres into a resource (RES= in build.mk,
+  plus a VERSIONINFO "Dragon Quest IX"); SDL takes the exe's first icon for
+  the window. Without the resource (Linux, build-windows.sh) frontend_sdl.c
+  window_icon() sets it from g_rom at 64x64. exe_main.c: no arguments ->
+  the exe's folder, data/dqix.nds data/code 0 1 dqix.sav, and on Windows the
+  console is freed (output to last-run.log; restarts use CREATE_NO_WINDOW).
+  Tested: the icon read back from the exe's resources and from the X window;
+  no-argument start on Linux. Not tested: the Windows no-console start.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).
