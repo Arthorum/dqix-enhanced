@@ -120,6 +120,21 @@ to it: `git checkout bookmark-2026-10-15`.
   Now 3 and 4 players meet in the host's world. DQVC: two saves on the
   same day got the same six from the same file (the game doesn't pick per
   player; the original's "different for each player" was the server).
+- **nightly8**: DQVC per DS: the daily share is picked by the day and the
+  console's MAC (firmware 0x36, sent with each console in a session), so
+  friends get different shops; Player A and Player B on the same Friday: 2 items
+  in common out of 6. Visiting: a visitor (Player C, in Player A's world) talks
+  to Sellma ("one of young Player A's friends"), sees the host's stock and
+  buys from it (skull ring: 1 -> 0, 950 G). Separate "PCs" (processes over
+  TCP, `DQIX_NETDELAY=ms` holds every message that long): 3 PCs in tag
+  mode, everyone canvassed both others, 184/184 sync checks the same.
+  4 PCs in co-op (Player C hosts; Player B, Player A, Player D visit) first froze
+  for good: Player D's console came back on air 1.4 s ahead of the others
+  and waited for them without reading its rings, while the host's console
+  waited for room in its ring to Player D (full of frames sent while
+  Player D was deaf). Fix: waiting consoles drop the frames they could
+  never hear (`drain_deaf` in air.c). Then: all four in Player C's world on
+  every PC, 206-235 sync checks each, all the same.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

@@ -98,6 +98,9 @@ typedef struct {
     int hello;                      /* host: its HELLO arrived */
     double ping_sent;
     double heard;                   /* when something last arrived from it */
+    /* tests: DQIX_NETDELAY=ms holds what we send that long (an internet's latency on one PC) */
+    uint64_t queued, sent, held_upto; /* bytes ever put in / sent / allowed out */
+    struct { double t; uint64_t end; } mark[1024]; int mhead, mtail;
 } Peer;
 
 typedef struct {
@@ -217,12 +220,20 @@ static void b_u8(Buf* b, uint8_t v) { b_put(b, &v, 1); }
 static void b_u32(Buf* b, uint32_t v) { uint8_t t[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; b_put(b, t, 4); }
 static void b_u64(Buf* b, uint64_t v) { b_u32(b, (uint32_t)v); b_u32(b, (uint32_t)(v >> 32)); }
 static void b_str(Buf* b, const char* s, size_t n) { char t[128] = { 0 }; snprintf(t, sizeof t, "%s", s); b_put(b, t, n); }
+static double g_netdelay = -1;
 static void send_msg(Peer* p, int type, const Buf* b) {
     uint8_t h[5] = { 0 };
     uint32_t n = b ? (uint32_t)b->n : 0;
     h[0] = (uint8_t)n; h[1] = (uint8_t)(n >> 8); h[2] = (uint8_t)(n >> 16); h[3] = (uint8_t)(n >> 24); h[4] = (uint8_t)type;
     put_bytes(p, h, 5);
     if (n) put_bytes(p, b->d, n);
+    p->queued += 5 + n;
+    if (g_netdelay < 0) g_netdelay = getenv("DQIX_NETDELAY") ? atof(getenv("DQIX_NETDELAY")) : 0;
+    if (g_netdelay > 0) {
+        int next = (p->mtail + 1) % 1024;
+        if (next == p->mhead) p->mhead = (p->mhead + 1) % 1024;              /* full: the oldest goes now */
+        p->mark[p->mtail].t = now_ms() + g_netdelay; p->mark[p->mtail].end = p->queued; p->mtail = next;
+    }
 }
 typedef struct { const uint8_t* d; size_t n, pos; int bad; } Rd;
 static int64_t g_utc_off;               /* the host's time zone (rtc_utc_offset) */
@@ -270,10 +281,19 @@ static int net_up(void) {
 /* flush what's queued; read what's there. -1 = the connection is gone */
 static int peer_io(Peer* p) {
     if (p->s == BADSOCK) return -1;
-    while (p->out_len) {
-        int n = (int)send(p->s, (const char*)p->out, (int)(p->out_len > 65536 ? 65536 : p->out_len), 0);
+    size_t may = p->out_len;
+    if (g_netdelay > 0) {                                         /* tests: only what has waited long enough */
+        double t = now_ms(); uint64_t upto = p->sent;
+        while (p->mhead != p->mtail && p->mark[p->mhead].t <= t) { upto = p->mark[p->mhead].end; p->mhead = (p->mhead + 1) % 1024; }
+        p->held_upto = upto > p->held_upto ? upto : p->held_upto;
+        may = (size_t)(p->held_upto - p->sent);
+        if (may > p->out_len) may = p->out_len;
+    }
+    while (may) {
+        int n = (int)send(p->s, (const char*)p->out, (int)(may > 65536 ? 65536 : may), 0);
         if (n < 0) { if (sock_err_again()) break; return -1; }
         memmove(p->out, p->out + n, p->out_len - (size_t)n); p->out_len -= (size_t)n;
+        may -= (size_t)n; p->sent += (uint64_t)n;
     }
     for (;;) {
         if (p->in_len + 65536 > p->in_cap) { p->in_cap = p->in_len + 65536 * 2; p->in = realloc(p->in, p->in_cap); }

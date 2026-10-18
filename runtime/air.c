@@ -134,8 +134,31 @@ void air_status(char* buf, size_t n) {
                               (unsigned long long)ld(&g_air->in[k].count), g_air->con[k].gone ? " gone" : "");
 }
 
+/* The radio was off up to this tick: frames that reached this console by then
+ * went unheard. While the radio is off this console doesn't wait for the
+ * others, so some of those frames may only be written later - they must
+ * still go unheard, or what is heard would depend on how fast each PC runs
+ * (the PCs of a session would drift apart). */
+static uint64_t g_deaf_until;
+
+/* While waiting, take such unheard frames out of the rings: a console far
+ * behind may be sending them, and with its ring to us full it would wait
+ * for us while we wait for it (seen with 4 PCs in co-op: a console whose
+ * radio came back on 1.4 s ahead of the others). Which frames go is decided
+ * by their ticks alone, so it is the same on every PC. */
+static void drain_deaf(void) {
+    if (!g_air) return;
+    for (int k = 0; k < g_n; k++) {
+        if (k == g_me) continue;
+        uint64_t r = g_air->rd[g_me][k];
+        while (r < ld(&g_air->wr[k]) && g_air->ring[k][r % RING].rx_tick <= g_deaf_until) r++;
+        if (r != g_air->rd[g_me][k]) st(&g_air->rd[g_me][k], r);
+    }
+}
+
 /* wait helper: calls the idle hook every 15 ms or so */
 static void waiting(double* last) {
+    drain_deaf();
     double t = now_ms();
     if (g_wait.kind && g_wait.since == 0) g_wait.since = t;
     if (*last == 0) *last = t;
@@ -224,12 +247,6 @@ void air_send(uint64_t rx_tick, int kind, int aid, uint32_t cmd_id, const uint8_
     st(&g_air->wr[g_me], w + 1);
 }
 
-/* The radio was off up to this tick: frames that reached this console by then
- * went unheard. While the radio is off this console doesn't wait for the
- * others, so some of those frames may only be written later - they must
- * still go unheard, or what is heard would depend on how fast each PC runs
- * (the PCs of a session would drift apart). */
-static uint64_t g_deaf_until;
 
 /* move every frame that starts by `now` from the rings into the local queue, in (tick, sender) order */
 static void pull(uint64_t now) {

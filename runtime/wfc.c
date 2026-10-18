@@ -146,7 +146,8 @@ static int dns(const uint8_t* q, int len) {
  * Each year's cycle starts on the Friday nearest 15 July, every sale keeps
  * its distance from that start (so they start on Fridays), and the stock
  * changes every day at 08:00 UTC: a share of the sale's items picked by the
- * date (DQVC_DAILY_ITEMS), from which the game shows six. The DS's clock
+ * date and the DS (its MAC address; DQVC_DAILY_ITEMS), from which the game
+ * shows six. The DS's clock
  * (your PC's) decides which day it is.
  */
 static void rc4(const uint8_t* key, int kl, uint8_t* d, int n) {
@@ -245,7 +246,14 @@ static uint8_t* dqvc_week(const char* gamecd, char* name, int namecap, int* len,
      * six of them. */
     int full = ni;
     if (ni > DQVC_DAILY_ITEMS) {
-        uint32_t r = 0x9E3779B9u ^ (uint32_t)abs_day * 2654435761u;
+        /* the day and this DS: every console gets its own share (the original's
+         * stock was "generally different for each player"), the same all day.
+         * The MAC is in the console's firmware, which a session sends to every
+         * PC, so every PC picks the same for each player. */
+        uint32_t fwlen; const uint8_t* fw = firmware_image(&fwlen);
+        uint32_t mac = 2166136261u;
+        for (int i = 0; i < 6; i++) mac = (mac ^ fw[0x36 + i]) * 16777619u;
+        uint32_t r = 0x9E3779B9u ^ (uint32_t)abs_day * 2654435761u ^ mac;
         int pick[200]; for (int i = 0; i < ni; i++) pick[i] = i;
         for (int i = ni - 1; i > 0; i--) { r = r * 1103515245u + 12345u; int j = (int)((r >> 8) % (uint32_t)(i + 1)); int t = pick[i]; pick[i] = pick[j]; pick[j] = t; }
         int keep[200] = { 0 }; for (int i = 0; i < DQVC_DAILY_ITEMS; i++) keep[pick[i]] = 1;
