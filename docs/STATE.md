@@ -221,6 +221,10 @@ to it: `git checkout bookmark-2026-10-15`.
   are also kept inside each screen's part of the texture (keep_in), half a
   texel of the mipmap level in use. The plain view is pixel for pixel the
   same as before.
+- **nightly17**: SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS = 0 (SDL2 reports
+  Nintendo controllers by label by default: A/B and X/Y were swapped on
+  Switch controllers); Joy-Con pairs combined. Not tested with real pads
+  here.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

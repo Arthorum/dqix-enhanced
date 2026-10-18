@@ -554,6 +554,11 @@ void frontend_init(int argc, char** argv) {
     /* real pixels on high-DPI Windows setups (not stretched by the system), so
      * the pixel grid and actual size are drawn on the monitor's own pixels */
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+    /* Controllers: the buttons by position (right = A, bottom = B, like the DS)
+     * for every brand. SDL otherwise reports Nintendo controllers (Switch Pro,
+     * Joy-Cons) by their labels, which would swap A/B and X/Y on them. */
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, "1");   /* two Joy-Cons are one controller */
     if (SDL_Init((g_headless ? 0 : SDL_INIT_VIDEO) | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         exit(1);

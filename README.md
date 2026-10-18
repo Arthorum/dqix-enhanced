@@ -89,7 +89,7 @@ folder. **Don't share the `game` or `build` folders**: they contain the game.
 | DS | Keyboard | Gamepad |
 |---|---|---|
 | D-pad | arrow keys | D-pad / left stick |
-| A / B / X / Y | X / Z / S / A | right / bottom / top / left button |
+| A / B / X / Y | X / Z / S / A | right / bottom / top / left button (by position, on any controller) |
 | L / R | Q / W | shoulder buttons |
 | START / SELECT | Enter / Right Shift | Start / Back |
 | touch screen | left mouse button on the bottom screen | |
