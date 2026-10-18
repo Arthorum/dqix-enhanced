@@ -37,3 +37,7 @@ setup-history.bat
 /bookmarks/
 # private working notes (machine paths etc.)
 /docs/PRIVATE-NOTES.md
+# a game folder's own files if one is ever run from here (sessions, settings, Wi-Fi ID)
+session/
+settings.ini
+wireless.bin
