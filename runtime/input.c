@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "nds.h"
 #include "session.h"
 
@@ -24,6 +25,35 @@ int g_touch_down, g_touch_x, g_touch_y;
 /* set by the frontend (keyboard / mouse / gamepad) */
 uint16_t g_fe_keys;
 int g_fe_touch, g_fe_tx, g_fe_ty;
+int g_fe_stick_x, g_fe_stick_y;
+uint16_t g_fe_stick_keys;
+int g_analog_walk;
+
+/* ---------------------------------------------------------------- Modern: walk in any direction
+ * On the DS, the D-pad walks in 8 directions; the stylus walks in any: touch
+ * the field and drag, and the hero walks the way the drag points (how far
+ * doesn't matter). With this on, the left stick does that drag: while the
+ * hero is free to walk (the game's own flag at 02109DA4 is 1; 2 in dialogue
+ * and menus, 0 while loading), pushing the stick touches the middle of the
+ * field and drags towards the stick's direction. Anywhere else the stick
+ * stays a D-pad. To the game (and to friends in a session) it is just the
+ * stylus. */
+#define WALK_FLAG 0x109DA4
+#define WALK_X 128
+#define WALK_Y 100
+#define WALK_REACH 48
+#define WALK_DEAD 9000                  /* stick distance before it walks (of 32767) */
+static int g_walk_frames;               /* frames the stick has been walking (0: not) */
+static int stick_walk(int* tx, int* ty) {
+    long long x = g_fe_stick_x, y = g_fe_stick_y;
+    double m = sqrt((double)(x * x + y * y));
+    if (!g_analog_walk || m < WALK_DEAD || g_main_ram[WALK_FLAG] != 1) { g_walk_frames = 0; return 0; }
+    if (g_walk_frames++ < 2) { *tx = WALK_X; *ty = WALK_Y; return 1; }   /* touch down first, then drag */
+    int dx = (int)lround((double)x / m * WALK_REACH), dy = (int)lround((double)y / m * WALK_REACH);
+    *tx = WALK_X + dx; *ty = WALK_Y + dy;
+    if (*tx < 0) *tx = 0; if (*tx > 255) *tx = 255; if (*ty < 0) *ty = 0; if (*ty > 191) *ty = 191;
+    return 1;
+}
 
 static const char* const k_names[] = { "A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L", "X", "Y", "LID" };   /* LID = the DS is closed */
 
@@ -154,7 +184,18 @@ void input_update(void) {
         }
     }
     g_keys_down |= g_fe_keys;
-    if (g_fe_touch) { g_touch_down = 1; g_touch_x = g_fe_tx; g_touch_y = g_fe_ty; }
+    {   /* tests: DQIX_STICK=from,to,x,y[;...] holds the left stick there for those frames; DQIX_ANALOG=1 */
+        static int init; static long long st[16][4]; static int nst;
+        if (!init) { init = 1; const char* e = getenv("DQIX_STICK");
+            for (const char* q = e; q && *q && nst < 16; ) { if (sscanf(q, "%lld,%lld,%lld,%lld", &st[nst][0], &st[nst][1], &st[nst][2], &st[nst][3]) == 4) nst++;
+                q = strchr(q, ';'); if (q) q++; }
+            if (getenv("DQIX_ANALOG")) g_analog_walk = 1; }
+        for (int i = 0; i < nst; i++) if ((long long)g_frame >= st[i][0] && (long long)g_frame < st[i][1]) { g_fe_stick_x = (int)st[i][2]; g_fe_stick_y = (int)st[i][3]; }
+    }
+    if (g_fe_touch) { g_touch_down = 1; g_touch_x = g_fe_tx; g_touch_y = g_fe_ty; g_walk_frames = 0; }
+    else { int tx, ty;
+        if (!g_touch_down && stick_walk(&tx, &ty)) { g_touch_down = 1; g_touch_x = tx; g_touch_y = ty; }
+        else { if (g_touch_down) g_walk_frames = 0; g_keys_down |= g_fe_stick_keys; } }
     if (session_running()) {                            /* lockstep: what was pressed `delay` frames ago, on every PC */
         uint32_t v = session_frame_input(g_frame, session_pack(g_keys_down, g_touch_down, g_touch_x, g_touch_y));
         session_unpack(v, &g_keys_down, &g_touch_down, &g_touch_x, &g_touch_y);

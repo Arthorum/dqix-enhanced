@@ -29,6 +29,13 @@ exactly like the original, and it can also do things the DS never could.
 - Keyboard, mouse (as the touch screen) and gamepads. Hold Tab to fast
   forward.
 
+**Modern options** (all off at first; with them off, the game is the original)
+- **Walk in any direction with the left stick**: the stick steers like the
+  DS stylus while you walk around, instead of the D-pad's 8 directions.
+- **Top screen in the corner**: the field fills a widescreen window or
+  monitor, with the map and party small in the corner.
+- Coming: full widescreen and a free camera (see the roadmap).
+
 **Multiplayer, from anywhere**
 - **Tag mode** (canvassing for guests) and **co-op** (visiting and inviting
   through Pavo) with up to 4 players, over the internet: friends don't need

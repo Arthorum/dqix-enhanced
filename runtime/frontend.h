@@ -16,3 +16,8 @@ extern uint16_t g_keys_down;              /* A B SELECT START RIGHT LEFT UP DOWN
 extern int g_touch_down, g_touch_x, g_touch_y;
 extern uint16_t g_fe_keys;                /* frontend's own input, merged by input_update() */
 extern int g_fe_touch, g_fe_tx, g_fe_ty;
+/* the gamepad's left stick (-32768..32767) and the D-pad directions it means
+ * (kept apart: with "walk in any direction" on, the stick walks instead) */
+extern int g_fe_stick_x, g_fe_stick_y;
+extern uint16_t g_fe_stick_keys;
+extern int g_analog_walk;                 /* Modern > walk in any direction (settings.ini analog_walk) */

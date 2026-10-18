@@ -45,7 +45,7 @@ static SDL_Renderer* g_ren;
 static SDL_Texture* g_tex;
 static SDL_AudioDeviceID g_audio;
 static SDL_GameController* g_pad;
-static int g_side_by_side, g_scale = 2, g_fullscreen;
+static int g_side_by_side, g_corner, g_scale = 2, g_fullscreen;   /* g_corner: the top screen small, beside the bottom one */
 static uint64_t g_next_frame, g_perf_freq;
 static int g_fast;
 static uint32_t g_fps_frames; static uint64_t g_fps_t0;
@@ -181,8 +181,15 @@ static const char* BACKLIGHT_NAME[5] = { "", "low", "medium", "high", "max" };
  * screens are 90 pixels (21.5 mm) apart. */
 static void canvas_layout(GlPresent* v, int ww, int wh) {
     memset(v, 0, sizeof *v);
-    int shell = g_gl && g_opt.shell && !g_side_by_side;
-    if (g_side_by_side) {
+    int corner = g_gl && g_corner && !g_side_by_side;
+    int shell = g_gl && g_opt.shell && !g_side_by_side && !corner;
+    if (corner) {
+        /* Modern: the bottom screen (the field) as big as the window allows, the
+         * top screen (map, party) a third of its size in the top left corner:
+         * the canvas is 16:9 */
+        v->cw = 256 + 256.0f / 3; v->ch = 192;
+        v->top[0] = 0; v->top[1] = 0; v->bot[0] = 256.0f / 3; v->bot[1] = 0;
+    } else if (g_side_by_side) {
         v->cw = 512; v->ch = 192;
         v->top[0] = 0; v->bot[0] = 256; v->top[1] = v->bot[1] = 0;
     } else if (shell && current_skin()) {
@@ -202,6 +209,7 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
         v->top[0] = v->bot[0] = 0; v->top[1] = 0; v->bot[1] = (float)(192 + gap);
     }
     v->top[2] = v->bot[2] = 256; v->top[3] = v->bot[3] = 192;
+    if (corner) { v->top[2] = 256.0f / 3; v->top[3] = 64; }
     v->win_w = ww; v->win_h = wh;
     float sc = fminf((float)ww / v->cw, (float)wh / v->ch);
     if (g_opt.actual && g_actual_sc > 0) { if (g_actual_sc < sc) sc = g_actual_sc; }   /* real size (smaller if it doesn't fit) */
@@ -287,7 +295,8 @@ static void settings_load(void) {
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
         else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
-        else if (!strcmp(key, "layout")) g_side_by_side = !strcmp(val, "side_by_side");
+        else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); }
+        else if (!strcmp(key, "analog_walk")) g_analog_walk = atoi(val) != 0;
         else if (!strcmp(key, "fullscreen")) g_fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "dslite_filter")) g_opt.lcd = atoi(val) != 0;
         else if (!strcmp(key, "lcd_colors")) g_opt.lcd_color = atoi(val) != 0;
@@ -330,8 +339,10 @@ static void settings_save(void) {
     fprintf(f, "resolution_3d = %d\n", g_scale3d);
     fprintf(f, "# window size: 1 to 8 times the DS screens (F3)\n");
     fprintf(f, "window_scale = %d\n", g_scale);
-    fprintf(f, "# stacked or side_by_side (F2)\n");
-    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : "stacked");
+    fprintf(f, "# stacked, side_by_side or corner (the top screen small in the corner; F2)\n");
+    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : g_corner ? "corner" : "stacked");
+    fprintf(f, "# Modern: the left stick walks in any direction (0 or 1)\n");
+    fprintf(f, "analog_walk = %d\n", g_analog_walk);
     fprintf(f, "# 0 or 1 (F11)\n");
     fprintf(f, "fullscreen = %d\n", g_fullscreen);
     fprintf(f, "# DS Lite screen filter (F6) and its parts: 0 or 1; backlight: low, medium, high, max\n");
@@ -530,7 +541,7 @@ static uint16_t key_bits(const Uint8* ks) {
 }
 
 static uint16_t pad_bits(void) {
-    if (!g_pad) return 0;
+    if (!g_pad) { g_fe_stick_x = g_fe_stick_y = 0; g_fe_stick_keys = 0; return 0; }
     uint16_t k = 0;
     SDL_GameController* p = g_pad;
     /* positions: east = A, south = B, north = X, west = Y (like a DS) */
@@ -547,8 +558,10 @@ static uint16_t pad_bits(void) {
     if (SDL_GameControllerGetButton(p, SDL_CONTROLLER_BUTTON_Y)) k |= 1 << 10;
     if (SDL_GameControllerGetButton(p, SDL_CONTROLLER_BUTTON_X)) k |= 1 << 11;
     int lx = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_LEFTX), ly = SDL_GameControllerGetAxis(p, SDL_CONTROLLER_AXIS_LEFTY);
-    if (lx > 16000) k |= 1 << 4; if (lx < -16000) k |= 1 << 5;
-    if (ly < -16000) k |= 1 << 6; if (ly > 16000) k |= 1 << 7;
+    uint16_t s = 0;                                              /* the stick as a D-pad (input.c decides) */
+    if (lx > 16000) s |= 1 << 4; if (lx < -16000) s |= 1 << 5;
+    if (ly < -16000) s |= 1 << 6; if (ly > 16000) s |= 1 << 7;
+    g_fe_stick_x = lx; g_fe_stick_y = ly; g_fe_stick_keys = s;
     return k;
 }
 
@@ -754,7 +767,7 @@ static void menu_sync(void) {
         menu_enable(MI_SES_HOST, !in); menu_enable(MI_SES_JOIN, !in);
         menu_enable(MI_NET, !in);                            /* a session uses the built-in Wi-Fi only (the PCs must agree) */
     }
-    int stacked = !g_side_by_side;
+    int stacked = !g_side_by_side && !(g_corner && g_gl);
     menu_check(MI_PAUSE, g_paused);
     menu_check(MI_UPDATE_AUTO, g_update_auto);
     menu_check(MI_TURBO, g_turbo);
@@ -776,7 +789,9 @@ static void menu_sync(void) {
     menu_check(MI_SHELL, g_opt.shell); menu_enable(MI_SHELL, g_gl && stacked);
     for (int i = 0; i < N_SHELLS; i++) { menu_check(MI_SHELLC0 + i, g_opt.shell_color == i); menu_enable(MI_SHELLC0 + i, g_gl && stacked && g_opt.shell); }
     menu_check(MI_GAP, g_opt.gap || g_opt.shell); menu_enable(MI_GAP, g_gl && stacked && !g_opt.shell);
-    menu_check(MI_STACKED, stacked); menu_check(MI_SIDE, !stacked);
+    menu_check(MI_STACKED, stacked); menu_check(MI_SIDE, g_side_by_side);
+    menu_check(MI_CORNER, g_corner && !g_side_by_side); menu_enable(MI_CORNER, g_gl);
+    menu_check(MI_ANALOG, g_analog_walk);
     for (int i = 0; i < 4; i++) { menu_check(MI_SIZE1 + i, g_scale == i + 1); menu_enable(MI_SIZE1 + i, !g_opt.actual); }
     menu_check(MI_INTEGER, g_opt.integer); menu_enable(MI_INTEGER, !g_opt.actual);
     menu_check(MI_ACTUAL, g_opt.actual); menu_enable(MI_ACTUAL, g_gl);
@@ -1182,7 +1197,18 @@ static void do_action(int id) {
     case MI_BL1: case MI_BL2: case MI_BL3: case MI_BL4: g_opt.backlight = id - MI_BL1 + 1; break;
     case MI_SHELL: if (g_gl && !g_side_by_side) { g_opt.shell = !g_opt.shell; relayout = 1; } break;
     case MI_GAP: if (g_gl) { g_opt.gap = !g_opt.gap; relayout = 1; } break;
-    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; relayout = 1; break;
+    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; g_corner = 0; relayout = 1; break;
+    case MI_CORNER: if (g_gl) { g_corner = !(g_corner && !g_side_by_side); g_side_by_side = 0; relayout = 1; } break;
+    case MI_ANALOG: g_analog_walk = !g_analog_walk; break;
+    case MI_MODERN_HELP:
+        info_box(SDL_MESSAGEBOX_INFORMATION, "Modern",
+            "Optional ways to play that the DS didn't have. They are all off at first, and with them off the game is exactly the original.\n\n"
+            "Walk in any direction with the left stick: on the DS the D-pad walks in 8 directions and only the stylus walks in any. With this on, "
+            "a controller's left stick steers like the stylus while you walk around (the game's own stylus walking). In menus, dialogue and "
+            "battles the stick stays a D-pad. Friends in a session don't need it on.\n\n"
+            "Top screen in the corner: the field (the bottom screen) fills a widescreen window or monitor, and the top screen (map and party) "
+            "sits small in the corner. Also under View; F2 goes through the layouts.", g_win);
+        break;
     case MI_SIZE1: case MI_SIZE2: case MI_SIZE3: case MI_SIZE4: g_scale = id - MI_SIZE1 + 1; relayout = 1; break;
     case MI_INTEGER: g_opt.integer = !g_opt.integer; break;
     case MI_ACTUAL:
@@ -1233,7 +1259,7 @@ static void handle_events(void) {
             SDL_Scancode k = e.key.keysym.scancode;
             if (k == SDL_SCANCODE_ESCAPE) { if (g_fullscreen) do_action(MI_FULL); else exit(0); break; }
             if (k == SDL_SCANCODE_F11 || (k == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) { do_action(MI_FULL); break; }
-            if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? MI_STACKED : MI_SIDE);
+            if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? (g_gl ? MI_CORNER : MI_STACKED) : (g_corner && g_gl) ? MI_STACKED : MI_SIDE);   /* stacked -> side by side -> corner */
             if (k == SDL_SCANCODE_F3) do_action(MI_SIZE1 + g_scale % 4);
             if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) do_action(MI_RES1 + g_scale3d % 4);
             if (k == SDL_SCANCODE_F5 && g_gl) do_action(g_classic ? MI_ENHANCED : MI_CLASSIC);

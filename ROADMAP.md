@@ -13,6 +13,18 @@ bottom with the version they arrived in.
       the public repository, then an actual update and a rollback.
 - [ ] **Release v27 as stable**, so players on stable get update notices too.
 
+## Modern options
+
+Optional ways to play the DS never had, all off by default (Modern menu).
+
+- [ ] **Widescreen**: the 3D field drawn wider than the DS screen, with the
+      2D parts (text boxes, menus) kept in place. Experimental at first:
+      characters and objects the game thinks are off screen may pop in at
+      the edges until that's worked out.
+- [ ] **A free camera**: turn the camera with the right stick (and maybe
+      tilt and zoom, where the game's areas allow it).
+- [ ] Check the analog stick in battles and every kind of menu.
+
 ## Multiplayer
 
 The original game never had these, because its wireless only reached DSes in
@@ -36,7 +48,6 @@ the same room.
 
 - [ ] **Fine-tune the DS Lite screen filter** against photos of a real DS Lite
       running DQIX (colours per backlight level, pixel grid, motion blur).
-- [ ] **Enhanced extras**: widescreen, and a map on the top screen.
 - [ ] **Save states.**
 
 ## Reach
@@ -53,6 +64,8 @@ the same room.
 
 ## Done
 
+- [x] Modern options: walk in any direction with the left stick; the top
+      screen in the corner for widescreen monitors (v27-nightly11).
 - [x] DQVC and the downloadable quests built into the game; no extra files
       needed (v27-nightly10).
 - [x] In-game updates from GitHub, stable or nightly (v27-nightly9).

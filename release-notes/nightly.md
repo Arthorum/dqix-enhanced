@@ -9,6 +9,9 @@ adventure; try this one in its own folder with a copy of your save.
 - **DQVC like the original**: sales on the original calendar (Fridays,
   08:00 UTC), new stock every day, every player their own shop, visitors can
   shop at the host's Sellma, and DQVC works inside multiplayer sessions.
+- **Modern options** (new Modern menu, all off at first): walk in any
+  direction with a controller's left stick, and a layout with the top screen
+  small in the corner for widescreen monitors.
 - **Nothing extra to download**: DQVC and the downloadable quests are built
   into the game; the build fetches DQVC's news by itself.
 - **Updates from inside the game**: Help > Check for updates (stable or

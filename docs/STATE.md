@@ -159,6 +159,16 @@ to it: `git checkout bookmark-2026-10-15`.
   requests, same screens and the same save as with the original files; no
   files at all (2 files, DQVC works); a session with only the news.
   Next: hand-written weekly news (by the owner, by hand).
+- **nightly11**: Modern menu. *Walk in any direction*: the game walks by
+  stylus drag (touch anywhere on the field, drag; the hero walks the drag's
+  direction, its length doesn't matter). input.c: while the left stick is
+  past WALK_DEAD and the walk flag at 0x02109DA4 is 1 (it is 1 while the hero
+  is free to walk, 2 in dialogue/menus, 0 while loading; checked over 19
+  states; written by 020c814c), it touches (128,100) for 2 frames then drags
+  48 px the stick's way; otherwise the stick is the D-pad. Not yet checked:
+  battles. DQIX_STICK=from,to,x,y + DQIX_ANALOG=1 for tests. *Corner
+  layout*: canvas 341x192, top screen at 1/3 in the top left
+  (`layout = corner`, F2 cycles). With both off: replays unchanged.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

@@ -925,7 +925,7 @@ void gl_present(const GlPresent* v) {
      * average with mipmaps so the extra detail becomes smooth edges, not shimmer.
      * Shown larger: nearest (exact pixels) or, with the LCD filter, linear
      * (the shader keeps the pixels sharp). */
-    float px_per_texel = v->sc * (float)v->top[2] / (float)g_fb_w;
+    float px_per_texel = v->sc * (float)v->bot[2] / (float)g_fb_w;      /* the bottom screen: never the smaller one */
     int minify = px_per_texel < 0.99f;
     if (minify) p_glGenerateMipmap(GL_TEXTURE_2D);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minify ? GL_LINEAR_MIPMAP_LINEAR : v->lcd ? GL_LINEAR : GL_NEAREST);

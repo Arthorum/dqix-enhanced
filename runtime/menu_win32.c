@@ -72,6 +72,7 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     sep(view);
     item(view, MI_STACKED, L"S&tacked\tF2");
     item(view, MI_SIDE, L"&Side by side\tF2");
+    item(view, MI_CORNER, L"Top screen in the &corner (widescreen)\tF2");
     sep(view);
     HMENU size = sub(view, L"&Window size\tF3");
     item(size, MI_SIZE1, L"1x");
@@ -103,6 +104,11 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     sep(wl);
     item(wl, MI_NET_HELP, L"&How does this work?");
 
+    HMENU modern = sub(g_bar, L"&Modern");
+    item(modern, MI_ANALOG, L"Walk in any &direction with the left stick");
+    item(modern, MI_CORNER, L"Top screen in the &corner (widescreen)");
+    sep(modern);
+    item(modern, MI_MODERN_HELP, L"&What is this?");
     HMENU help = sub(g_bar, L"&Help");
     item(help, MI_CONTROLS, L"&Controls");
     item(help, MI_UPDATE, L"Check for &updates...");
