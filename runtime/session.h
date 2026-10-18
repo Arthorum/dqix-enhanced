@@ -17,6 +17,7 @@
  *
  *   DQIX_SESSION=host[:port[:players]]     host (players: start automatically)
  *   DQIX_SESSION=join:address[:port]       join
+ *   DQIX_SESSION=join:DQ-XXXX-XXXX         join with a code (through the relay, relay.h)
  *   DQIX_DELAY=frames                       input delay (default: from the pings)
  */
 #pragma once
@@ -54,6 +55,7 @@ typedef struct {
     char message[256];                    /* the latest news (joined, left, out of sync, errors) */
     char hint[1000];                      /* host: how friends get in */
     int ready;                            /* host: the address is known */
+    int reach;                            /* host: 1 direct, 2 a relay code, 3 the home network only */
     int desync;
 } SessionInfo;
 void session_info(SessionInfo* out);

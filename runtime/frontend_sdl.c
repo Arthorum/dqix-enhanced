@@ -970,7 +970,7 @@ static void settings_save(void);
 static const char SESSION_HELP[] =
     "Tag mode, visiting other worlds and inviting friends (Pavo) need DS systems close to each other. "
     "This lets friends anywhere play those parts together, up to 4 players.\n\n"
-    "How: one of you hosts (Wireless > Play with friends far away > Host), the others join with the address "
+    "How: one of you hosts (Wireless > Play with friends far away > Host), the others join with the code "
     "the host's game shows. When everyone is in, the host presses Start the game. All the games restart together, "
     "each from its own save, and from then on every PC runs every player's DS: yours in the window, your "
     "friends' unseen. Only the buttons travel between the PCs, so the DSes really are side by side - "
@@ -982,9 +982,10 @@ static const char SESSION_HELP[] =
     "- If someone's PC is slow, everyone waits for it while your DSes are talking wirelessly.\n"
     "- The built-in Wi-Fi works as usual (DQVC, the downloads), with the host's files for everyone. Other online servers are off during a session.\n"
     "- Your game saves to your own save as always. Leaving (or closing the game) switches your DS off for the others.\n\n"
-    "Getting in: the host's game asks the home router to let friends in. If the router won't, forward TCP port "
-    "27900 to the host's PC, or all of you use a free virtual LAN such as Tailscale, ZeroTier or Radmin VPN and "
-    "use the host's address there. Windows may ask whether to allow the game on networks: allow it.";
+    "Getting in: the code works on any internet - it connects through a small relay on the internet when the "
+    "host's router doesn't let friends in directly (apartment and mobile internet, for example). Where the router "
+    "does, the host's game also shows an address that connects directly, with a little less delay. "
+    "Windows may ask whether to allow the game on networks: allow it.";
 
 /* start this program again, in a session or not (the save is written first) */
 static void restart_with(const char* session) {
@@ -1040,7 +1041,7 @@ static void session_action(int id) {
     case MI_SES_JOIN: {
         if (!g_player_name[0] && !ask_name()) return;
         char* t = g_win ? ask_text(g_win, "Join a friend",
-            "The address your friend's game shows (for example 203.0.113.7:27900). "
+            "The code your friend's game shows (like DQ-7KF2-QM4P), or their address (like 203.0.113.7:27900). "
             "The game restarts and connects: save your adventure first if you haven't.") : NULL;
         if (!t) return;
         char* a = t; while (*a == ' ') a++;
@@ -1253,7 +1254,7 @@ static void do_action(int id);
 static void lobby_draw(void) {
     SessionInfo si; session_info(&si);
     static int copied;
-    if (si.host && si.ready && !copied) { SDL_SetClipboardText(si.address); copied = 1; }
+    if (si.host && si.ready && !copied) { if (si.reach != 3) SDL_SetClipboardText(si.address); copied = 1; }
     for (int s = 0; s < 2; s++) for (int i = 0; i < 256 * 192; i++) g_screen[s][i] = s ? 0x10203Au : 0x0B1830u;
     uint32_t* top = g_screen[0]; uint32_t* bot = g_screen[1];
     const uint32_t W = 0xFFFFFFu, Y = 0xFFD860u, G = 0xA8B8D8u, R = 0xFF8080u;
@@ -1266,9 +1267,10 @@ static void lobby_draw(void) {
     text_draw(top, 256, 192, 8, y, 15, Y, "Playing with friends far away"); y += 22;
     if (si.state == 5) { text_wrap(top, 256, 192, 8, y, 240, 12, R, si.message); text_wrap(bot, 256, 192, 8, 8, 240, 12, G, "Esc: back (the game restarts on its own)."); present(); return; }
     if (si.host) {
-        if (!si.ready) { text_draw(top, 256, 192, 8, y, 12, W, "Finding your address..."); y += 18; }
+        if (!si.ready) { text_draw(top, 256, 192, 8, y, 12, W, "Getting ready for friends..."); y += 18; }
         else {
-            text_draw(top, 256, 192, 8, y, 12, G, "Give your friends this address:"); y += 15;
+            text_draw(top, 256, 192, 8, y, 12, G, si.reach == 2 ? "Give your friends this code:" :
+                                                  si.reach == 3 ? "Same house only:" : "Give your friends this address:"); y += 15;
             text_draw(top, 256, 192, 12, y, 15, W, si.address); y += 19;
             text_draw(top, 256, 192, 12, y, 10, G, "(copied - paste it into a message)"); y += 15;
             y = text_wrap(top, 256, 192, 8, y, 240, 10, G, si.hint);
@@ -1303,7 +1305,10 @@ static void lobby_window(void) {
     SessionWindow w; memset(&w, 0, sizeof w);
     w.host = si.host; w.failed = si.state == 5; w.can_start = si.host && si.state == 2 && si.n >= 2;
     if (si.host) {
-        snprintf(w.heading, sizeof w.heading, "%s", si.ready ? "Give your friends this address (they choose Join a friend and paste it):" : "Finding your address...");
+        snprintf(w.heading, sizeof w.heading, "%s", !si.ready ? "Getting ready for friends..." :
+                 si.reach == 2 ? "Give your friends this code (they choose Join a friend and type it):" :
+                 si.reach == 3 ? "Only friends in the same house can join (this PC's home address):" :
+                                 "Give your friends this address (they choose Join a friend and paste it):");
         if (si.ready) snprintf(w.address, sizeof w.address, "%s", si.address);
         snprintf(w.hint, sizeof w.hint, "%s", si.ready ? si.hint : "");
     } else {

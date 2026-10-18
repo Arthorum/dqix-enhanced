@@ -10,6 +10,7 @@
 #include "version.h"
 #include "upnp.h"
 #include "portmap.h"
+#include "relay.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -120,6 +121,7 @@ static Console g_con[SESSION_MAX];
 static int g_ping[SESSION_MAX], g_gone[SESSION_MAX];
 static char g_addr[128], g_msg[256], g_name[32] = "Player", g_hint[1000];
 static int g_port = SESSION_PORT, g_upnp_done;
+static int g_reach;                     /* host: 1 direct, 2 a code (the relay), 3 the home network only */
 static int g_desync, g_local;
 static Peer g_peer[SESSION_MAX];    /* host: guests 1..3 (by slot); guest: [0] = the host */
 static sock_t g_listen = BADSOCK;
@@ -149,6 +151,7 @@ static void flog(const char* fmt, ...) {
     fflush(g_flog);
 }
 
+static void flog_line(const char* line) { flog("%s", line); }
 /* open session\\front.log as soon as hosting or joining begins, so a session that never
  * gets going can be looked into too (it is written line by line: it can be read while it happens) */
 static void flog_open(const char* mode) {
@@ -159,6 +162,7 @@ static void flog_open(const char* mode) {
     time_t t = time(NULL);
     char when[64]; strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", localtime(&t));
     flog("Dragon Quest IX %s, build %016llx, %s, %s", DQIX_VERSION, (unsigned long long)build_id(), when, mode);
+    relay_set_log(flog_line);
 }
 static const char* addr_text(const struct sockaddr* a, char* out, size_t n) {
     char h[INET6_ADDRSTRLEN + 1] = "?", sv[16] = "?";
@@ -1113,25 +1117,52 @@ static void host_reachability(void) {
     char v6line[300] = "";
     if (has6) snprintf(v6line, sizeof v6line, open6 ? " With IPv6, friends can also use [%s]:%d."
                                                      : " With IPv6, friends can also try [%s]:%d (your router may block it).", v6, g_port);
+    int direct = (r == 1 && ext[0]) || (has6 && open6);
+    char direct_addr[160] = "";
+    if (r == 1 && ext[0]) snprintf(direct_addr, sizeof direct_addr, "%s:%d", ext, ext_port);
+    else if (has6 && open6) snprintf(direct_addr, sizeof direct_addr, "[%s]:%d", v6, g_port);
+    char home[96]; snprintf(home, sizeof home, "%s:%d", lan[0] ? lan : "this PC", g_port);
+    /* the relay: a code that works for everyone, whatever their internet (relay.h) */
+    char code[16] = "", shown[24] = "", rwhy[256] = "";
+    int relayed = 0;
+    if (relay_url()[0] && !getenv("DQIX_NO_RELAY")) {
+        relay_new_code(code, sizeof code);
+        relayed = relay_host_start(code, g_port, rwhy, sizeof rwhy);
+        if (relayed) relay_show_code(code, shown, sizeof shown);
+    } else snprintf(rwhy, sizeof rwhy, "this version has no relay");
     lock();
-    if (r == 1 && ext[0]) {
-        snprintf(g_addr, sizeof g_addr, "%s:%d", ext, ext_port);
-        snprintf(g_hint, sizeof g_hint, "Your router opened the port by itself (%s): give friends the address above. "
-                 "Friends in the same house use %s:%d.%s", method, lan[0] ? lan : "this PC's address", g_port, v6line);
-    } else if (has6 && open6) {
-        snprintf(g_addr, sizeof g_addr, "[%s]:%d", v6, g_port);
-        snprintf(g_hint, sizeof g_hint, "This address is for friends whose internet has IPv6 (your router let it through). "
-                 "For the others the router didn't open a port (%s): forward TCP port %d to this PC (%s), "
-                 "or all join a free virtual LAN (Tailscale, ZeroTier or Radmin VPN) and use this PC's address there.",
-                 why, g_port, lan[0] ? lan : "this PC");
+    if (relayed) {
+        g_reach = 2;
+        snprintf(g_addr, sizeof g_addr, "%s", shown);
+        if (direct)
+            snprintf(g_hint, sizeof g_hint, "Friends choose Join a friend and type this code: it works on any internet. "
+                     "Your router also lets friends in directly (%s): the address %s works too, with a little less delay. "
+                     "Friends in the same house can use %s.", method[0] ? method : "IPv6", direct_addr, home);
+        else
+            snprintf(g_hint, sizeof g_hint, "Friends choose Join a friend and type this code. Your router doesn't let friends "
+                     "connect directly (%s), so they come in through the relay: it works on any internet, with a little "
+                     "more delay. Friends in the same house can use %s.", why, home);
+    } else if (direct) {
+        g_reach = 1;
+        snprintf(g_addr, sizeof g_addr, "%s", direct_addr);
+        if (r == 1 && ext[0])
+            snprintf(g_hint, sizeof g_hint, "Your router opened the port by itself (%s): give friends the address above. "
+                     "Friends in the same house use %s.%s", method, home, v6line);
+        else
+            snprintf(g_hint, sizeof g_hint, "This address is for friends whose internet has IPv6 (your router let it through). "
+                     "For the others the router didn't open a port (%s): forward TCP port %d to this PC (%s), "
+                     "or all join a free virtual LAN (Tailscale, ZeroTier or Radmin VPN) and use this PC's address there.",
+                     why, g_port, lan[0] ? lan : "this PC");
     } else {
+        g_reach = 3;
         if (has6) snprintf(g_addr, sizeof g_addr, "[%s]:%d", v6, g_port);
-        else snprintf(g_addr, sizeof g_addr, "%s:%d", lan[0] ? lan : "this PC", g_port);
-        snprintf(g_hint, sizeof g_hint, "Your router didn't open the port: %s. %s"
-                 "For others: forward TCP port %d to this PC (%s) in your router, or all join a free virtual LAN "
-                 "(Tailscale, ZeroTier or Radmin VPN) and use this PC's address there.",
-                 why, has6 ? "The address above works for friends with IPv6 if your router lets it through. "
-                           : "Friends in the same house can use the address above. ",
+        else snprintf(g_addr, sizeof g_addr, "%s", home);
+        snprintf(g_hint, sizeof g_hint, "Friends far away can't join yet: your router doesn't let them in (%s), and the relay "
+                 "couldn't be used (%s). %s"
+                 "To play with friends elsewhere: forward TCP port %d to this PC (%s) in your router, or all join a free "
+                 "virtual LAN (Tailscale, ZeroTier or Radmin VPN) and use this PC's address there.",
+                 why, rwhy, has6 ? "The address above works for friends with IPv6 if your router lets it through. "
+                                 : "The address above only works for friends in the same house. ",
                  g_port, lan[0] ? lan : "this PC");
     }
     {   /* in the log and bug reports: what the router did */
@@ -1203,6 +1234,46 @@ static int start_host(int port) {
     return 1;
 }
 
+/* connect, giving up after `ms` (a blocked port otherwise takes 20 s or more); 0 = connected */
+static int connect_within(sock_t s, const struct sockaddr* a, socklen_t al, int ms) {
+    sock_nonblock(s);
+    if (connect(s, a, al) == 0) return 0;
+#ifdef _WIN32
+    if (WSAGetLastError() != WSAEWOULDBLOCK) return -1;
+#else
+    if (errno != EINPROGRESS) return -1;
+#endif
+    fd_set w, x; FD_ZERO(&w); FD_ZERO(&x); FD_SET(s, &w); FD_SET(s, &x);
+    struct timeval tv = { ms / 1000, (long)(ms % 1000) * 1000 };
+    int k = select((int)s + 1, NULL, &w, &x, &tv);
+    if (k == 0) {
+#ifdef _WIN32
+        WSASetLastError(10060);
+#else
+        errno = 110;
+#endif
+        return -1;
+    }
+    int err = 0; socklen_t el = sizeof err;
+    getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
+    if (k < 0 || err) {
+#ifdef _WIN32
+        WSASetLastError(err ? err : WSAGetLastError());
+#else
+        errno = err ? err : errno;
+#endif
+        return -1;
+    }
+    return 0;
+}
+
+/* 10.x, 172.16-31.x, 192.168.x: an address inside one home network */
+static int home_address(const char* host) {
+    unsigned a, b;
+    if (sscanf(host, "%u.%u.", &a, &b) != 2) return 0;
+    return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
 static int start_join(const char* host, int port) {
     struct sockaddr_storage a; socklen_t al;
     if (!resolve(host, port, &a, &al)) { news("can't find %s", host); return 0; }
@@ -1210,13 +1281,17 @@ static int start_join(const char* host, int port) {
     sock_t s = socket(a.ss_family, SOCK_STREAM, 0);
     if (s == BADSOCK) { flog("no socket (error %d)", sock_errno()); return 0; }
     double t0 = now_ms();
-    if (connect(s, (struct sockaddr*)&a, al) != 0) {
+    if (connect_within(s, (struct sockaddr*)&a, al, 10000) != 0) {
         int e = sock_errno();
         flog("connect failed after %.1f s, socket error %d (%s)", (now_ms() - t0) / 1000.0, e,
              e == 10060 || e == 110 ? "timed out: nothing answered - the host's port is closed or a firewall drops it" :
              e == 10061 || e == 111 ? "refused: the host's PC answered, but nothing listens on that port" :
              e == 10065 || e == 10051 || e == 113 || e == 101 ? "no route to that address" : "see the number");
-        closesock(s); news("can't connect to %s:%d (is the host waiting, and its port open?)", host, port); return 0;
+        closesock(s);
+        if (home_address(host)) news("can't connect to %s:%d: that is an address inside your friend's home network, which "
+                                     "can't be reached from elsewhere. Ask your friend for the code their game shows.", host, port);
+        else news("can't connect to %s:%d (is the host waiting, and its port open?)", host, port);
+        return 0;
     }
     flog("connected after %.1f s; saying hello (version %s)", (now_ms() - t0) / 1000.0, DQIX_VERSION);
     sock_nonblock(s);
@@ -1339,6 +1414,17 @@ void session_boot(void) {
         atexit(close_ports);
         g_state = 2;
         news("hosting on port %d: waiting for players", port);
+    } else if (!strncmp(e, "join:", 5) && relay_parse_code(e + 5, a, sizeof a)) {
+        /* join:DQ-XXXX-XXXX: through the relay (relay.h) */
+        char code[16]; snprintf(code, sizeof code, "%s", a);
+        relay_show_code(code, g_addr, sizeof g_addr);
+        flog_open("joining with a code");
+        g_state = 1;
+        news("connecting with the code %s", g_addr);
+        char why[256]; int lp = 0;
+        if (!relay_join_start(code, &lp, why, sizeof why)) { news("%s", why); g_state = 5; }
+        else if (!start_join("127.0.0.1", lp)) g_state = 5;
+        else news("connected to the relay: waiting for the host to let you in");
     } else if (!strncmp(e, "join:", 5)) {
         /* join:address[:port]; an IPv6 address goes in [brackets] */
         const char* s = e + 5;
@@ -1349,6 +1435,8 @@ void session_boot(void) {
         flog_open("joining");
         g_state = 1;
         news("connecting to %s", g_addr);
+        if (home_address(a)) news("%s is an address inside one home network: it only works for players in that home. "
+                                  "For a friend far away, ask them for the code their game shows.", a);
         if (!start_join(a, port)) { g_state = 5; }
     } else if (!strncmp(e, "local:", 6)) {
         /* tests: N consoles on this PC only, the others' buttons from DQIX_INPUT_1..3, each its own MAC */
@@ -1417,6 +1505,7 @@ void session_info(SessionInfo* o) {
     snprintf(o->message, sizeof o->message, "%s", g_msg);
     snprintf(o->hint, sizeof o->hint, "%s", g_hint);
     o->ready = !g_host || g_upnp_done;
+    o->reach = g_reach;
     unlock();
 }
 void session_start_now(void) { if (g_host) g_start_req = 1; }
