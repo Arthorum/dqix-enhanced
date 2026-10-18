@@ -9,6 +9,9 @@ emulator running the DS's code. The game's code has been recompiled into
 native PC code, with the DS's hardware rebuilt around it. So it can play
 exactly like the original, and it can also do things the DS never could.
 
+**Join the community on Discord: https://discord.gg/CczgRv36NK** for help,
+news, and friends to play with.
+
 ## Features
 
 **The game as it was**
@@ -143,6 +146,8 @@ more) are in [ROADMAP.md](ROADMAP.md).
 Press **F10** in the game: it saves a report in `game\reports\` with a box
 to describe what happened. For multiplayer problems, also include
 `game\session\front.log`.
+
+Questions, or stuck? Ask on the [Discord](https://discord.gg/CczgRv36NK).
 
 ## About this project
 
