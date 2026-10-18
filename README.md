@@ -108,6 +108,11 @@ version of this project, builds the game again from your ROM, and restarts.
 Your saves and settings are kept, and the previous version is kept
 in the `update` folder (`update\rollback.bat` goes back to it).
 
+## What's next
+
+The plans (more multiplayer options, hand-written DQVC news, widescreen and
+more) are in [ROADMAP.md](ROADMAP.md).
+
 ## If something goes wrong
 
 Press **F10** in the game: it saves a report in `game\reports\` with a box
