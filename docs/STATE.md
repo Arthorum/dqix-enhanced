@@ -214,6 +214,13 @@ to it: `git checkout bookmark-2026-10-15`.
   screen filter and the console photo (g_opt.lcd, g_opt.shell = 1);
   settings.ini always holds dslite_filter and console, so updates keep each
   player's choice.
+- **nightly16**: FS_SCREEN samples with textureGrad and derivatives worked
+  out from the layout (g_duv, g_dp), not fwidth(): on a screen's first row
+  the 2x2 pixel quad reached into the console branch, the derivatives were
+  garbage and the coarsest mipmap was used (a flat-coloured line). Samples
+  are also kept inside each screen's part of the texture (keep_in), half a
+  texel of the mipmap level in use. The plain view is pixel for pixel the
+  same as before.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

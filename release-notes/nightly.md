@@ -29,6 +29,8 @@ adventure; try this one in its own folder with a copy of your save.
   and the screens inside the photo of a real DS Lite (F6 and F7 switch them).
   Updating doesn't change your settings.
 - The photo of a real DS Lite is the default console; tidier help windows.
+- Fixed: a thin line of one colour along the top of a screen when the
+  screens are shown smaller than they are drawn (with the console photo).
 
 **How to install**: download *Source code (zip)* below, unzip it, put your
 ROM in the `rom` folder and double-click `BUILD.bat`. Already on a recent

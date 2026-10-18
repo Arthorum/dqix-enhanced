@@ -298,8 +298,24 @@ static const char* FS_SCREEN =
     "/* --- the screens ------------------------------------------------------- */\n"
     "vec3 to_lin(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }\n"
     "\n"
+    /* Both screens are one texture (top screen in the upper half, and with
+     * widescreen a screen may use only the middle). Keep each screen's samples
+     * inside its own part, so filtering or a smaller mipmap never mixes in the
+     * other screen (a line of the top screen along the bottom one's edge). */
+    "vec2 u_lo, u_hi;                 // the current screen's part of the texture (set in main)\n"
+    /* How far one window pixel moves in the texture (and in DS pixels), worked
+     * out from the layout. Not from the GPU's derivatives: on a screen's edge
+     * row they compare with pixels of the console around it, which picked the
+     * blurriest mipmap (a line of one flat colour along the edge). */
+    "vec2 g_duv; float g_dp;\n"
+    "vec2 keep_in(vec2 uv, vec2 duv) {\n"
+    "    vec2 tsz = vec2(textureSize(u_src, 0));\n"
+    "    float f = max(abs(duv.x) * tsz.x, abs(duv.y) * tsz.y);      // texels per window pixel\n"
+    "    vec2 m = 0.5 * (f <= 1.001 ? 1.0 : exp2(ceil(log2(f) - 0.001))) / tsz;   // half a texel of the mipmap used\n"
+    "    return clamp(uv, u_lo + m, u_hi - m);\n"
+    "}\n"
     "vec3 fetch(vec2 uv) {            // uv in texture space\n"
-    "    vec3 c = texture(u_src, uv).rgb;\n"
+    "    vec3 c = textureGrad(u_src, keep_in(uv, g_duv), vec2(g_duv.x, 0.0), vec2(0.0, g_duv.y)).rgb;\n"
     "    return u_src_linear != 0 ? c : to_lin(c);\n"
     "}\n"
     "\n"
@@ -310,7 +326,7 @@ static const char* FS_SCREEN =
     "    {\n"
     "        vec2 t = uv * tsz - 0.5;                     // sharp bilinear: crisp pixels, even at any size\n"
     "        vec2 i = floor(t), f = t - i;\n"
-    "        vec2 s = 1.0 / max(fwidth(t), vec2(1e-4));\n"
+    "        vec2 s = 1.0 / max(g_duv * tsz, vec2(1e-4));\n"
     "        f = clamp((f - 0.5) * s + 0.5, 0.0, 1.0);\n"
     "        lin = fetch((i + 0.5 + f) / tsz);\n"
     "    }\n"
@@ -319,7 +335,7 @@ static const char* FS_SCREEN =
     "        float strength = clamp((u_view.z - 1.5) / 2.0, 0.0, 1.0);   // fades in from 1.5x, full at 3.5x\n"
     "        if (strength > 0.0) {\n"
     "            vec2 fp = fract(p);\n"
-    "            float w = clamp(fwidth(p.x) * 0.75, 0.0, 0.3);\n"
+    "            float w = clamp(g_dp * 0.75, 0.0, 0.3);\n"
     "            vec3 sub;\n"
     "            for (int k = 0; k < 3; k++) {            // red, green, blue stripes\n"
     "                float d = abs(fp.x - (float(k) + 0.5) / 3.0);\n"
@@ -432,8 +448,10 @@ static const char* FS_SCREEN =
     "    if (in_top || in_bot) {\n"
     "        vec4 r = in_top ? u_top : u_bot;\n"
     "        vec2 tx = in_top ? u_topx : u_botx;\n"
+    "        u_lo = vec2(tx.x / u_texw, in_bot ? 0.0 : 0.5); u_hi = vec2((tx.x + tx.y) / u_texw, in_bot ? 0.5 : 1.0);\n"
+    "        g_duv = vec2(tx.y / (r.z * u_view.z * u_texw), 192.0 / (r.w * u_view.z * 384.0)); g_dp = tx.y / (r.z * u_view.z);\n"
     "        vec2 sp = (p - r.xy) * vec2(tx.y, 192.0) / r.zw;          // DS pixels\n"
-    "        if (u_lcd == 0) outc = texture(u_src, vec2((sp.x + tx.x) / u_texw, (in_bot ? 0.5 : 1.0) - sp.y / 384.0)).rgb;   // exact\n"
+    "        if (u_lcd == 0) { vec2 uv = vec2((sp.x + tx.x) / u_texw, (in_bot ? 0.5 : 1.0) - sp.y / 384.0); outc = textureGrad(u_src, keep_in(uv, g_duv), vec2(g_duv.x, 0.0), vec2(0.0, g_duv.y)).rgb; }   // exact\n"
     "        else outc = pow(clamp(screen(sp, in_bot ? 1 : 0), 0.0, 1.0), vec3(1.0 / 2.2));\n"
     "    } else if (u_shell != 0 && u_skinmode != 0) {\n"
     "        vec3 bg = vec3(0.055, 0.058, 0.065) * (1.0 - 0.35 * length((p - u_canvas * 0.5) / u_canvas));\n"
