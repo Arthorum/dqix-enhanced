@@ -41,3 +41,5 @@ setup-history.bat
 session/
 settings.ini
 wireless.bin
+# your own upload helper (names your GitHub account)
+upload-to-github.bat
