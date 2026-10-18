@@ -258,7 +258,7 @@ to it: `git checkout bookmark-2026-10-15`.
   checks, robocopy, Unblock-File, BUILD.bat with DQIX_NOPAUSE, shortcuts,
   HKCU Uninstall entry -> tools/uninstall.ps1). apply.bat starts
   game\dqix.exe. Earlier versions: annotated tags v17-v25,
-  v27-nightly1-20 with release-notes/past/.
+  v27-nightly1-20 (release-notes/past/index.txt; no releases for them).
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

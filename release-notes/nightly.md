@@ -22,7 +22,6 @@ adventure; try this one in its own folder with a copy of your save.
 - **Clearer windows**: the update window's buttons fit their text
   ("Update to v27", "Skip this version", "Later"), and when a new stable
   version is offered, a button to install the newest nightly instead.
-- **Every earlier version is on the Releases page**, kept for the record.
 - **Playing with friends far away**: tag mode (canvassing for guests) and
   co-op through Pavo with up to 4 players over the internet. The game sets up
   your router where it can, and the host gets a window with the address to

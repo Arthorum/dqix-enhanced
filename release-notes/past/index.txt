@@ -1,5 +1,5 @@
 # The versions before v26 and the v27 nightlies, oldest first: tag, kind, commit, date.
-# upload-to-github.bat makes a release for each (once), with the notes in <tag>.md.
+# They have no releases: upload-to-github.bat removes any it finds (their git tags stay).
 v17 early bc86786faa68 2026-10-15T02:26:19+00:00
 v18 early 011d2cb5ac04 2026-10-15T04:14:45+00:00
 v19 early ec66bf148f74 2026-10-15T14:18:11+00:00

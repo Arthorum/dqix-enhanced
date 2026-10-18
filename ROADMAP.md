@@ -69,8 +69,7 @@ the same room.
 ## Done
 
 - [x] A setup window (`Install Dragon Quest IX.bat`) with shortcuts and an
-      uninstaller; NAT-PMP, PCP and IPv6 for multiplayer; Send a bug report;
-      earlier versions on the Releases page (v27-nightly21).
+      uninstaller; NAT-PMP, PCP and IPv6 for multiplayer; Send a bug report (v27-nightly21).
 - [x] The right stick turns the camera; double-click leaves fullscreen
       (v27-nightly18).
 - [x] Widescreen: the world drawn wider, the top screen as a minimap; the
