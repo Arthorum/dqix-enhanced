@@ -77,6 +77,18 @@ to it: `git checkout bookmark-2026-10-15`.
   2 cores: fine (12000 frames in 2m20s headless) vs >25 min as processes.
   Fallback to processes if the library is missing. `DQIX_SESSION=local:N`
   tests N consoles on one PC.
+- **nightly4**: fixed PCs drifting apart after a hiccup (a PC pausing a few
+  seconds while a radio was on): a console with its radio off doesn't wait
+  for the others, so frames sent during that time could still be in the
+  air when its radio came back on, and were then heard or not depending on
+  timing. Now frames that reached a console while its radio was off are
+  never heard (`g_deaf_until` in air.c). Before: a 6 s pause in tag mode =
+  out of sync within 20 s; after: 74/74 checks the same. Also:
+  `session\front.log` (every console's progress every 10 s, each sync
+  check, what a console is stuck waiting for after 1.5 s, the network), the
+  title bar says what it's waiting for, build fingerprints in HELLO/WELCOME
+  (log only), sessions no longer write `wireless.bin`, build-pc.bat builds
+  dqixcore.dll too.
 - Not done yet: 3-4 players tested only with one save (DQIX treats copies of
   the same save as one person: each tags 1); a relay for hosts who can't open
   a port (virtual LAN for now).

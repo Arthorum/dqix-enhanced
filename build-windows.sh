@@ -10,9 +10,10 @@ echo "== Recompiling the game's code to C (about a minute)"
 python recomp/build.py --extract $D/extract/usa --config $D/config/usa/arm9 --out $D/build/recomp --hle hle.txt --interpret interpret.txt --patch patches.txt
 python recomp/arm7.py --extract $D/extract/usa --out $D/build/recomp7 --hle hle7.txt
 echo "== Compiling (the first time takes a while; later builds only redo what changed)"
-make -j"$(nproc)" -f build.mk GEN=$D/build/recomp GEN7=$D/build/recomp7 OBJ=$D/build/obj FRONTEND=sdl OUT="$OUT/dqix.exe" \
+# dqixcore.dll: the game again as a library, for the other players' DSes in a session (Wireless menu)
+make -j"$(nproc)" -f build.mk OS=Windows_NT GEN=$D/build/recomp GEN7=$D/build/recomp7 OBJ=$D/build/obj FRONTEND=sdl OUT="$OUT/dqix.exe" CORE="$OUT/dqixcore.dll" \
      CFLAGS="-O1 -w" DEFS=-DRECOMP_TRACE SDL_CFLAGS="$(sdl2-config --cflags)" SDL_LIBS="-lSDL2" \
-     LDFLAGS="-static-libgcc -Wl,--stack,67108864"
+     LDFLAGS="-static-libgcc -Wl,--stack,67108864" "$OUT/dqix.exe" core
 cp /ucrt64/bin/SDL2.dll "$OUT/"
 mkdir -p "$OUT/skins"
 cp skins/*.png skins/*.txt "$OUT/skins/" 2>/dev/null || true     # console photos (View > Console colour)

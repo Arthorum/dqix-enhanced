@@ -168,7 +168,9 @@ To let friends in, the host's game asks the home router to forward a port
 clipboard). If the router won't, forward TCP port 27900 (`session_port` in
 `settings.ini`) to the host's PC, or all of you use a free virtual LAN
 (Tailscale, ZeroTier, Radmin VPN) and use the host's address there. Everyone
-needs the same version of the game. Your name in sessions: *Your name...*
+needs the same version of the game. If a session stands still, the title
+bar says which DS it is waiting for, and `session\front.log` next to the game
+records the session (send it with a bug report). Your name in sessions: *Your name...*
 (`player_name` in `settings.ini`). Tests: `DQIX_SESSION=host[:port[:players]]`
 or `join:address[:port]`, or `local:N` (N consoles on one PC, the others'
 buttons from `DQIX_INPUT_1..3`); `DQIX_AIR=name,index,count` connects copies

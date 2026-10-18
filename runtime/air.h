@@ -12,6 +12,7 @@
  * is what lets friends far apart each run all the consoles (session.c). */
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 #define AIR_MAX 4                 /* consoles */
 #define AIR_LOOKAHEAD 11          /* ticks a console may run ahead of the others */
@@ -69,3 +70,7 @@ extern void (*air_idle_hook)(void);
 void air_set_gone(int index);
 void air_leave_now(void);                 /* this console stops: nobody waits for it */
 uint64_t air_progress(void);              /* changes whenever any console gets further */
+double air_waiting_ms(void);               /* how long this console has been waiting (0: it isn't) */
+int air_wait_describe(char* buf, size_t n, int* console);   /* what for, in words */
+void air_status(char* buf, size_t n);     /* every console's progress, one line */
+void air_set_name(int console, const char* name);   /* for those descriptions */

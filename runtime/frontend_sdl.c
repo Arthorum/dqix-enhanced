@@ -940,7 +940,22 @@ static void lobby_hook(void) {
 }
 
 /* waiting for a friend's DS: keep the window alive */
-static void idle_pump(void) { if (g_win) SDL_PumpEvents(); }
+/* while this console waits for another (sessions): keep the window alive and say why it stands still */
+static void idle_pump(void) {
+    if (!g_win) return;
+    SDL_PumpEvents();
+    static uint64_t last;
+    uint64_t now = SDL_GetPerformanceCounter();
+    if (now - last < g_perf_freq / 2) return;
+    last = now;
+    double w = air_waiting_ms();
+    if (w < 1500) return;
+    char d[300], t[400]; int k;
+    if (!air_wait_describe(d, sizeof d, &k)) return;
+    char* paren = strstr(d, " ("); if (paren) *paren = 0;                /* the numbers are for the log */
+    snprintf(t, sizeof t, "Dragon Quest IX - %s (%.0f s) - details in session\\front.log", d, w / 1000.0);
+    SDL_SetWindowTitle(g_win, t);
+}
 
 static void do_action(int id) {
     int relayout = 0;

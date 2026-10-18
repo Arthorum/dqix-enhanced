@@ -15,6 +15,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <direct.h>
+#include <time.h>
 typedef SOCKET sock_t;
 #define BADSOCK INVALID_SOCKET
 #define closesock closesocket
@@ -54,6 +55,8 @@ static void make_dir(const char* p) { mkdir(p, 0755); }
 
 void (*session_lobby_hook)(void);
 
+static double now_ms(void);
+static void flog(const char* fmt, ...);
 /* message types */
 enum { M_HELLO = 1, M_WELCOME, M_LOBBY, M_START, M_INPUT, M_HASH, M_LEAVE, M_PING, M_PONG, M_REFUSE };
 #define MAGIC "DQIXMP01"
@@ -66,6 +69,7 @@ typedef struct {
     int index;                      /* console number (host side: the guest's) */
     int hello;                      /* host: its HELLO arrived */
     double ping_sent;
+    double heard;                   /* when something last arrived from it */
 } Peer;
 
 typedef struct {
@@ -98,13 +102,53 @@ int session_console(void) { return g_me; }
 int session_players(void) { return g_n; }
 int session_requested(void) { return g_requested || g_hidden; }
 
+/* session\\front.log: what happened in the session on this PC, for when something goes wrong */
+static FILE* g_flog;
+static uint64_t g_build[SESSION_MAX];   /* the other PCs' build fingerprints, where known (the log) */
+static double g_flog_t0;
+static void flog(const char* fmt, ...) {
+    if (!g_flog) return;
+    char line[1200];
+    va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    fprintf(g_flog, "[%9.3f] %s\n", (now_ms() - g_flog_t0) / 1000.0, line);
+    fflush(g_flog);
+}
+
 static void news(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt);
-    lock(); vsnprintf(g_msg, sizeof g_msg, fmt, ap); unlock();
+    char m[256]; vsnprintf(m, sizeof m, fmt, ap);
     va_end(ap);
-    char line[300]; snprintf(line, sizeof line, "session: %s\n", g_msg);
+    lock(); snprintf(g_msg, sizeof g_msg, "%s", m); unlock();
+    char line[300]; snprintf(line, sizeof line, "session: %s\n", m);
     LOG_WARN("%s", line);
     report_log_line(line);
+    flog("%s", m);
+}
+
+/* a fingerprint of this build (the program and the game library next to it):
+ * PCs with different builds may not compute exactly the same things */
+static int self_dir(char* out, size_t n);
+static uint64_t fnv_file(const char* path, uint64_t h) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return h;
+    static uint8_t buf[1 << 16]; size_t got;
+    while ((got = fread(buf, 1, sizeof buf, f)) > 0) for (size_t i = 0; i < got; i++) h = (h ^ buf[i]) * 0x100000001b3ull;
+    fclose(f);
+    return h;
+}
+static uint64_t build_id(void) {
+    static uint64_t id;
+    if (id) return id;
+    uint64_t h = 0xcbf29ce484222325ull;
+    char dir[1024] = "", path[1200];
+#ifdef _WIN32
+    char exe[MAX_PATH]; DWORD l = GetModuleFileNameA(NULL, exe, MAX_PATH); if (l && l < MAX_PATH) h = fnv_file(exe, h);
+    if (self_dir(dir, sizeof dir)) { snprintf(path, sizeof path, "%s\\dqixcore.dll", dir); h = fnv_file(path, h); }
+#else
+    h = fnv_file("/proc/self/exe", h);
+    if (self_dir(dir, sizeof dir)) { snprintf(path, sizeof path, "%s/dqixcore.so", dir); h = fnv_file(path, h); }
+#endif
+    return id = h | 1;
 }
 
 static double now_ms(void) {
@@ -206,6 +250,7 @@ static int peer_io(Peer* p) {
         if (n == 0) return -1;
         if (n < 0) { if (sock_err_again()) break; return -1; }
         p->in_len += (size_t)n;
+        p->heard = now_ms();
     }
     return 0;
 }
@@ -275,6 +320,7 @@ static void host_hello(Peer* p, Rd* r) {
     char ver[32]; r_str(r, ver, 32);
     Console c = { 0 };
     get_console(r, &c);
+    uint64_t theirs = r->pos + 8 <= r->n ? r_u64(r) : 0;
     Buf b = { 0 };
     if (r->bad || strcmp(magic, MAGIC)) { b_str(&b, "That isn't a Dragon Quest IX PC session.", 96); send_msg(p, M_REFUSE, &b); free(b.d); peer_io(p); peer_close(p); return; }
     if (strcmp(ver, DQIX_VERSION)) {
@@ -287,9 +333,10 @@ static void host_hello(Peer* p, Rd* r) {
     int k = g_n++;
     g_con[k] = c; p->index = k; p->hello = 1; g_ping[k] = 0;
     unlock();
-    b_u8(&b, (uint8_t)k);
+    b_u8(&b, (uint8_t)k); b_u64(&b, build_id());
     send_msg(p, M_WELCOME, &b); free(b.d);
     news("%s joined (player %d)", c.name, k + 1);
+    g_build[k] = theirs;
     host_send_lobby();
 }
 
@@ -630,10 +677,21 @@ static void kill_children(void) { signal(SIGTERM, SIG_IGN); kill(0, SIGTERM); }
 
 static void do_start(void) {
     make_dir("session");
+    if (!g_flog && (g_flog = fopen("session/front.log", "w"))) {
+        g_flog_t0 = now_ms();
+        time_t t = time(NULL);
+        char when[64]; strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", localtime(&t));
+        flog("Dragon Quest IX %s, build %016llx, %s", DQIX_VERSION, (unsigned long long)build_id(), when);
+        flog("I am player %d of %d (%s), input delay %d", g_me + 1, g_n, g_host ? "hosting" : "joined", g_delay);
+        for (int k = 0; k < g_n; k++)
+            flog("player %d: %s, ping %d ms%s", k + 1, g_con[k].name, g_ping[k],
+                 k == g_me || !g_build[k] ? "" : g_build[k] == build_id() ? ", same build" : ", a different build (compiled separately: usually fine)");
+    }
     snprintf(g_shm, sizeof g_shm, "%08x%04x", (unsigned)(g_rtc ^ (int64_t)(now_ms() * 1000)), (unsigned)rand() & 0xFFFF);
     if (!g_host) { /* the host chose the name */ }
     rtc_set_base(g_rtc);
     if (!air_init(g_shm, g_me, g_n)) { news("could not set up the shared memory"); g_state = 5; return; }
+    for (int k = 0; k < g_n; k++) air_set_name(k, g_con[k].name);
     for (int k = 0; k < g_n; k++) for (int f = 0; f < g_delay; f++) air_input_put(k, (uint64_t)f, 0);
 #ifndef _WIN32
     setpgid(0, 0); atexit(kill_children);
@@ -701,6 +759,7 @@ static void check_hashes(void) {
         uint64_t mine;
         if (air_hash_get(g_pending[i].k, g_pending[i].frame, &mine)) {
             static int matched; if (mine == g_pending[i].hash && ++matched % 10 == 1) LOG_INFO("session: in sync with %s at frame %llu (%d checks)\n", g_con[g_pending[i].k].name, (unsigned long long)g_pending[i].frame, matched);
+            flog("sync with %s at frame %llu: %s", g_con[g_pending[i].k].name, (unsigned long long)g_pending[i].frame, mine == g_pending[i].hash ? "same" : "DIFFERENT");
             if (getenv("DQIX_SYNCLOG")) fprintf(stderr, "sync %d %llu %s\n", g_pending[i].k, (unsigned long long)g_pending[i].frame, mine == g_pending[i].hash ? "ok" : "MISMATCH");
             if (mine != g_pending[i].hash && !g_desync) {
                 g_desync = 1;
@@ -758,13 +817,45 @@ static void send_mine(void) {
     }
 }
 
+/* every few seconds, and whenever this console has been stuck waiting, how far everyone is */
+static void net_status(char* out, size_t n) {
+    size_t o = 0; out[0] = 0;
+    double t = now_ms();
+    for (int i = 0; i < SESSION_MAX && o < n; i++) {
+        Peer* p = &g_peer[i];
+        if (p->s == BADSOCK || p->index < 0) continue;
+        o += (size_t)snprintf(out + o, n - o, "%s%s heard %.1f s ago, %u bytes to send", o ? ", " : "",
+                              g_host ? g_con[p->index].name : "host", p->heard ? (t - p->heard) / 1000.0 : -1.0, (unsigned)p->out_len);
+    }
+}
+static void watch(void) {
+    static double last, stuck_logged;
+    double t = now_ms(), w = air_waiting_ms();
+    int stuck = w > 1500;
+    if (!stuck) stuck_logged = 0;
+    if (!(stuck && (!stuck_logged || t - stuck_logged > 5000)) && t - last < 10000) return;
+    last = t;
+    char a[400], nets[400], d[300] = ""; int k;
+    air_status(a, sizeof a); net_status(nets, sizeof nets);
+    if (stuck) { air_wait_describe(d, sizeof d, &k); stuck_logged = t; flog("STUCK %.1f s: %s", w / 1000.0, d); }
+    flog("consoles: %s", a);
+    flog("network: %s", nets[0] ? nets : "nobody");
+}
+
 /* ---------------------------------------------------------------- the network thread */
 static void host_reachability(void);
 static void handle(int i, int type, Rd* r) {
     Peer* p = &g_peer[i];
     switch (type) {
     case M_HELLO: if (g_host && !p->hello) host_hello(p, r); break;
-    case M_WELCOME: g_me = r_u8(r); lock(); g_state = 2; unlock(); news("connected: you are player %d. Waiting for the host to start.", g_me + 1); break;
+    case M_WELCOME: {
+        g_me = r_u8(r);
+        uint64_t theirs = r->pos + 8 <= r->n ? r_u64(r) : 0;
+        lock(); g_state = 2; unlock();
+        g_build[0] = theirs;
+        news("connected: you are player %d. Waiting for the host to start.", g_me + 1);
+        break;
+    }
     case M_LOBBY: {
         int n = r_u8(r);
         lock();
@@ -813,7 +904,7 @@ static void peer_lost(int i) {
             news("a player left the lobby");
             /* tell everyone their new numbers */
             for (int j = 1; j < SESSION_MAX; j++) if (g_peer[j].s != BADSOCK && g_peer[j].hello) {
-                Buf b = { 0 }; b_u8(&b, (uint8_t)g_peer[j].index); send_msg(&g_peer[j], M_WELCOME, &b); free(b.d);
+                Buf b = { 0 }; b_u8(&b, (uint8_t)g_peer[j].index); b_u64(&b, build_id()); send_msg(&g_peer[j], M_WELCOME, &b); free(b.d);
             }
             host_send_lobby();
         }
@@ -843,7 +934,7 @@ static void* net_thread(void* u)
             host_send_lobby();
         }
         if (g_host && g_state == 2 && (g_start_req || (g_auto_players && g_n >= g_auto_players))) { g_start_req = 0; host_start(); }
-        if (g_running) { send_mine(); check_hashes(); check_children(); }
+        if (g_running) { send_mine(); check_hashes(); check_children(); watch(); }
         for (int i = 0; i < SESSION_MAX; i++) {
             Peer* p = &g_peer[i];
             if (p->s == BADSOCK) continue;
@@ -959,7 +1050,7 @@ static int start_join(const char* host, int port) {
     Console me = { 0 };
     my_console(&me);
     Buf b = { 0 };
-    b_put(&b, MAGIC, 8); b_str(&b, DQIX_VERSION, 32); put_console(&b, &me);
+    b_put(&b, MAGIC, 8); b_str(&b, DQIX_VERSION, 32); put_console(&b, &me); b_u64(&b, build_id());
     send_msg(&g_peer[0], M_HELLO, &b);
     free(b.d);
     return 1;
@@ -1020,6 +1111,12 @@ void session_boot(void) {
             my_console(&g_con[k]);
             snprintf(g_con[k].name, sizeof g_con[k].name, "Console %d", k + 1);
             if (k) { uint8_t mac[6]; memcpy(mac, &g_con[k].fw[0x36], 6); mac[5] ^= (uint8_t)(0x40 + k); firmware_image_set_mac(g_con[k].fw, mac); }
+            /* tests: another player's save / console (DQIX_SAVE_1.., DQIX_FW_1..) */
+            char nm[32]; const char* path;
+            snprintf(nm, sizeof nm, "DQIX_SAVE_%d", k);
+            if (k && (path = getenv(nm))) { FILE* f = fopen(path, "rb"); if (f) { g_con[k].save_len = (uint32_t)fread(g_con[k].save, 1, g_con[k].save_len, f); fclose(f); } }
+            snprintf(nm, sizeof nm, "DQIX_FW_%d", k);
+            if (k && (path = getenv(nm))) { FILE* f = fopen(path, "rb"); if (f) { size_t got = fread(g_con[k].fw, 1, g_con[k].fw_len, f); (void)got; fclose(f); } }
         }
         g_delay = 2;
         do_start();

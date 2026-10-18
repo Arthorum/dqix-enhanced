@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include "nds.h"
+#include "session.h"
 #include "frontend.h"
 
 uint8_t g_io7[0x1000];
@@ -147,6 +148,7 @@ void firmware_init(void) {
         g_wireless.mac_set = 1;
     }
     firmware_load_wireless();
+    if (session_requested()) g_fw_nosave = 1;                  /* a session's settings are for this session only */
     if (g_wireless.mac_set) firmware_set_mac(g_wireless.mac);
     firmware_set_ap(g_wireless.online, g_wireless.dns);
     net_enable(g_wireless.online);

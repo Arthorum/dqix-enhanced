@@ -92,12 +92,52 @@ static void relax(unsigned* spins) {
 #ifdef _WIN32
     Sleep(1);
 #else
-    struct timespec t = { 0, 250000 }; nanosleep(&t, NULL);
+    static long nap = -1; if (nap < 0) { const char* e = getenv("DQIX_NAP_US"); nap = e ? atol(e) * 1000 : 250000; }   /* tests: Windows naps ~1-2 ms */
+    struct timespec t = { 0, nap }; nanosleep(&t, NULL);
 #endif
 }
+/* what this console is waiting for right now (for the window and the session log) */
+static struct { int kind, k; uint64_t want, have; double since; } g_wait;
+enum { W_NONE, W_TICK, W_RING, W_INPUT, W_INRING };
+static char g_names[AIR_MAX][32];
+void air_set_name(int k, const char* name) { if (k >= 0 && k < AIR_MAX) snprintf(g_names[k], sizeof g_names[k], "%s", name); }
+static const char* who(int k) {
+    static char b[48];
+    if (k >= 0 && k < AIR_MAX && g_names[k][0]) snprintf(b, sizeof b, "%s's", g_names[k]); else snprintf(b, sizeof b, "player %d's", k + 1);
+    return b;
+}
+static void wait_begin(int kind, int k, uint64_t want) { g_wait.kind = kind; g_wait.k = k; g_wait.want = want; g_wait.since = 0; }
+static void wait_end(void) { g_wait.kind = W_NONE; }
+double air_waiting_ms(void) { return g_wait.kind && g_wait.since > 0 ? now_ms() - g_wait.since : 0; }
+int air_wait_describe(char* buf, size_t n, int* console) {
+    if (!g_wait.kind || !g_air) return 0;
+    int k = g_wait.k;
+    *console = k;
+    switch (g_wait.kind) {
+    case W_TICK: snprintf(buf, n, "waiting for %s DS to catch up (it is at tick %llu, this one needs %llu)", who(k),
+                          (unsigned long long)ld(&g_air->con[k].tick), (unsigned long long)g_wait.want); break;
+    case W_RING: snprintf(buf, n, "waiting for %s DS to take its wireless frames", who(k)); break;
+    case W_INPUT: snprintf(buf, n, "waiting for %s buttons for frame %llu (have up to %llu)", who(k),
+                           (unsigned long long)g_wait.want, (unsigned long long)ld(&g_air->in[k].count)); break;
+    case W_INRING: snprintf(buf, n, "waiting for %s DS to use up its buttons", who(k)); break;
+    }
+    return 1;
+}
+/* every console's progress, one line (session log) */
+void air_status(char* buf, size_t n) {
+    buf[0] = 0;
+    if (!g_air) return;
+    size_t o = 0;
+    for (int k = 0; k < g_n && o < n; k++)
+        o += (size_t)snprintf(buf + o, n - o, "%sP%d tick %llu in %llu/%llu%s", k ? ", " : "", k + 1,
+                              (unsigned long long)ld(&g_air->con[k].tick), (unsigned long long)ld(&g_air->in[k].read),
+                              (unsigned long long)ld(&g_air->in[k].count), g_air->con[k].gone ? " gone" : "");
+}
+
 /* wait helper: calls the idle hook every 15 ms or so */
 static void waiting(double* last) {
     double t = now_ms();
+    if (g_wait.kind && g_wait.since == 0) g_wait.since = t;
     if (*last == 0) *last = t;
     else if (t - *last > 15) { *last = t; if (air_idle_hook) air_idle_hook(); }
 }
@@ -158,7 +198,10 @@ void air_reach(uint64_t tick, int listening) {
     for (int k = 0; k < g_n; k++) {
         if (k == g_me) continue;
         unsigned spins = 0; double last = 0;
+        if (g_air->con[k].gone || ld(&g_air->con[k].tick) >= need) continue;
+        wait_begin(W_TICK, k, need);
         while (!g_air->con[k].gone && ld(&g_air->con[k].tick) < need) { relax(&spins); waiting(&last); }
+        wait_end();
     }
 }
 
@@ -170,7 +213,9 @@ void air_send(uint64_t rx_tick, int kind, int aid, uint32_t cmd_id, const uint8_
     for (int k = 0; k < g_n; k++) {
         if (k == g_me) continue;
         unsigned spins = 0; double last = 0;
+        wait_begin(W_RING, k, w);
         while (!g_air->con[k].gone && w - ld(&g_air->rd[k][g_me]) >= RING) { relax(&spins); waiting(&last); }
+        wait_end();
     }
     AirFrame* f = &g_air->ring[g_me][w % RING];
     f->rx_tick = rx_tick; f->cmd_id = cmd_id; f->kind = (uint8_t)kind; f->aid = (uint8_t)aid; f->from = (uint8_t)g_me;
@@ -178,6 +223,13 @@ void air_send(uint64_t rx_tick, int kind, int aid, uint32_t cmd_id, const uint8_
     memcpy(f->data, data, (size_t)len);
     st(&g_air->wr[g_me], w + 1);
 }
+
+/* The radio was off up to this tick: frames that reached this console by then
+ * went unheard. While the radio is off this console doesn't wait for the
+ * others, so some of those frames may only be written later - they must
+ * still go unheard, or what is heard would depend on how fast each PC runs
+ * (the PCs of a session would drift apart). */
+static uint64_t g_deaf_until;
 
 /* move every frame that starts by `now` from the rings into the local queue, in (tick, sender) order */
 static void pull(uint64_t now) {
@@ -188,6 +240,7 @@ static void pull(uint64_t now) {
             uint64_t r = g_air->rd[g_me][k];
             if (r >= ld(&g_air->wr[k])) continue;
             const AirFrame* f = &g_air->ring[k][r % RING];
+            if (f->rx_tick <= g_deaf_until) { st(&g_air->rd[g_me][k], r + 1); k--; continue; }   /* sent while we were deaf */
             if (f->rx_tick > now) continue;
             if (best < 0 || f->rx_tick < bt) { best = k; bt = f->rx_tick; }
         }
@@ -222,6 +275,7 @@ int air_recv(uint64_t now, AirFrame* out) {
 
 void air_skip(uint64_t now) {
     if (!g_air) return;
+    if (now > g_deaf_until) g_deaf_until = now;
     pull(now);
     g_qn = 0;
 }
@@ -257,7 +311,9 @@ void air_input_put(int k, uint64_t frame, uint32_t v) {
     if (frame < c) return;                                    /* already there */
     while (c <= frame) {
         unsigned spins = 0; double last = 0;
+        wait_begin(W_INRING, k, c);
         while (c - ld(&in->read) >= INRING && !g_air->con[k].gone) { relax(&spins); waiting(&last); }
+        wait_end();
         in->v[c % INRING] = c == frame ? v : 0;
         c++;
         st(&in->count, c);
@@ -275,7 +331,9 @@ int air_input_peek(int k, uint64_t frame, uint32_t* v) {
 uint32_t air_input_get(int k, uint64_t frame) {
     AirInput* in = &g_air->in[k];
     unsigned spins = 0; double last = 0;
+    wait_begin(W_INPUT, k, frame);
     while (ld(&in->count) <= frame) { relax(&spins); waiting(&last); }
+    wait_end();
     uint32_t v = in->v[frame % INRING];
     if (k == g_me) st(&in->read, frame);
     return v;

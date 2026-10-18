@@ -78,8 +78,27 @@ static void frame_time(void) {
     g_ft_last = t;
 }
 
+/* DQIX_PACE=frame: from that frame on, wait for real time like the window does (tests) */
+static void pace(void) {
+    static long long from = -2; static double next;
+    if (from == -2) { const char* e = getenv("DQIX_PACE"); from = e ? atoll(e) : -1; }
+    if (from < 0 || (long long)g_frame < from) return;
+    double t = now_ms();
+    if (next == 0 || t > next + 100) next = t;
+    next += 1000.0 / 59.8261;
+    while ((t = now_ms()) < next) {
+        double left = next - t;
+#ifdef _WIN32
+        if (left > 2.5) Sleep((DWORD)(left - 2));
+#else
+        if (left > 2.5) { struct timespec ts = { 0, (long)((left - 2) * 1e6) }; nanosleep(&ts, NULL); }
+#endif
+    }
+}
+
 void frontend_frame(void) {
     frame_time();
+    pace();
     int16_t buf[2048 * 2];
     uint32_t n;
     while ((n = sound_read(buf, 2048)) > 0)
