@@ -32,6 +32,11 @@ adventure; try this one in its own folder with a copy of your save.
 - **The right stick turns the camera** while you walk around (like L and R,
   slower with a light push). In fullscreen, **double-click** outside the
   touch screen to go back to the window.
+- Fixed: a rare freeze after "Continue your adventure" (it took an
+  interrupt arriving at one exact moment, e.g. after skipping the logos with
+  a tap on one particular frame).
+- Fixed: the sticks could tap and press L/R on the title screen; they only
+  walk and turn the camera once an adventure is loaded.
 - Fixed: A and B (and X and Y) were swapped on Switch controllers (Pro
   Controller, Joy-Cons). Every controller now uses the DS layout by
   position: right button A, bottom button B.

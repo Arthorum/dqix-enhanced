@@ -40,6 +40,16 @@ int g_analog_walk;
  * stays a D-pad. To the game (and to friends in a session) it is just the
  * stylus. */
 #define WALK_FLAG 0x109DA4
+/* The flag is 1 on the title screen's menu too (it means "touch input
+ * accepted"), so also require an adventure to be loaded: this pointer (a
+ * table of the field's interface parts, static data) is 0 until the save is
+ * loaded, from the title screen on (checked on the title, while loading, in
+ * a room, a town and the world map). */
+#define FIELD_PTR 0x0F33E0
+static int free_to_walk(void) {
+    uint32_t p; memcpy(&p, &g_main_ram[FIELD_PTR], 4);
+    return g_main_ram[WALK_FLAG] == 1 && p != 0;
+}
 #define WALK_X 128
 #define WALK_Y 100
 #define WALK_REACH 48
@@ -48,7 +58,7 @@ static int g_walk_frames;               /* frames the stick has been walking (0:
 static int stick_walk(int* tx, int* ty) {
     long long x = g_fe_stick_x, y = g_fe_stick_y;
     double m = sqrt((double)(x * x + y * y));
-    if (!g_analog_walk || m < WALK_DEAD || g_main_ram[WALK_FLAG] != 1) { g_walk_frames = 0; return 0; }
+    if (!g_analog_walk || m < WALK_DEAD || !free_to_walk()) { g_walk_frames = 0; return 0; }
     if (g_walk_frames++ < 2) { *tx = WALK_X; *ty = WALK_Y; return 1; }   /* touch down first, then drag */
     int dx = (int)lround((double)x / m * WALK_REACH), dy = (int)lround((double)y / m * WALK_REACH);
     *tx = WALK_X + dx; *ty = WALK_Y + dy;
@@ -67,7 +77,7 @@ static int stick_walk(int* tx, int* ty) {
 static uint32_t stick_camera(uint32_t keys) {
     static int acc;                                     /* presses owed, in 1/1000 */
     int x = g_fe_rstick_x, m = x < 0 ? -x : x;
-    if (m < CAM_DEAD || g_main_ram[WALK_FLAG] != 1 || (keys & (3u << 8))) { acc = 0; return 0; }
+    if (m < CAM_DEAD || !free_to_walk() || (keys & (3u << 8))) { acc = 0; return 0; }
     int duty = 250 + 750 * (m - CAM_DEAD) / (32767 - CAM_DEAD);   /* a quarter of the frames .. every frame */
     acc += duty;
     if (acc < 1000) return 0;

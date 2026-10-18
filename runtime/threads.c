@@ -106,7 +106,8 @@ static void dump_sys(FILE* f, ThreadSys* ts) {
         }
     }
 }
-void threads_dump(FILE* f) { dump_sys(f, &g_ts9); if (getenv("DQIX_THREADS7")) dump_sys(f, &g_ts7); }
+void ipc_dump(FILE* f);
+void threads_dump(FILE* f) { ipc_dump(f); fprintf(f, "arm9 IE %08x IF %08x IME %x / arm7 IE %08x IF %08x IME %x\n", g_c9.ie, g_c9.iflags, g_c9.ime, g_c7.ie, g_c7.iflags, g_c7.ime); dump_sys(f, &g_ts9); if (getenv("DQIX_THREADS7")) dump_sys(f, &g_ts7); }
 
 void* threads_current_coro(Core* k) { return &k->threads->cur->co; }
 int arm7_is_running(void) { return g_in_arm7; }
@@ -244,9 +245,18 @@ void threads_after_irq(Cpu* c) {
     ts->irq_switch_to = 0;
     uint32_t prev = ts->irq_switch_from;
     ensure_ctx(ts, prev);
+    /* No interrupt may be taken until the switch is done (on the DS this all
+     * happens inside the IRQ handler, with IRQs masked). The helpers below run
+     * game code, where a pending IRQ would otherwise be delivered: its own
+     * thread switch would start inside this one, the game's idea of the
+     * current thread and the one running would part, and a thread could put
+     * the idle thread to sleep: every thread waiting, a frozen game. */
+    Core* k = ts->core;
+    k->irq_depth += 100;                                   /* irq_service: not now */
     call_fn(ts->core, ts->cp_save, prev + 0x48);
     write_context(ts, prev, RESUME_IRQ);
     call_fn(ts->core, ts->cp_restore, next + 0x48);
+    k->irq_depth -= 100;
     switch_to(ts, next);
 }
 
@@ -288,3 +298,4 @@ void arm7_yield(void) {
     /* resumed: time has passed, take any interrupt that arrived meanwhile */
     irq_service(&g_arm7);
 }
+uint32_t threads_cur_ctx9(void) { return g_ts9.cur ? g_ts9.cur->ctx : 0; }

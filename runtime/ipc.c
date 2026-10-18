@@ -54,7 +54,8 @@ void ipc_fifo_send(Core* k, uint32_t v) {
     tx->q[(tx->head + tx->count++) % 16] = v;
     LOG_DEBUG("pxi: %s sends tag %u data %07x\n", k->name, v & 0x1F, v >> 6);
     { static int lg = -1; if (lg < 0) lg = getenv("DQIX_PXILOG") != NULL;
-      if (lg) fprintf(stderr, "pxi f%llu %s tag %2u err %u data %07x\n", (unsigned long long)g_frame, k->name, v & 0x1F, (v >> 5) & 1, v >> 6); }
+      extern uint32_t threads_cur_ctx9(void);
+      if (lg) fprintf(stderr, "pxi f%llu %s tag %2u err %u data %07x thr %08x\n", (unsigned long long)g_frame, k->name, v & 0x1F, (v >> 5) & 1, v >> 6, k->id == 0 ? threads_cur_ctx9() : 0); }
     if (tx->count == 1 && (g_cnt[other(k)->id] & 0x0400)) irq_raise(other(k), IRQ_IPC_RECV_NOT_EMPTY);
 }
 
@@ -68,4 +69,8 @@ uint32_t ipc_fifo_recv(Core* k) {
     g_last[k->id] = v;
     if (rx->count == 0 && (g_cnt[other(k)->id] & 0x0004)) irq_raise(other(k), IRQ_IPC_SEND_EMPTY);
     return v;
+}
+void ipc_dump(FILE* f) {
+    fprintf(f, "ipc: from ARM9 count %d, from ARM7 count %d (head word %08x), cnt9 %04x cnt7 %04x err %d/%d\n", g_fifo[0].count, g_fifo[1].count,
+            g_fifo[1].count ? g_fifo[1].q[g_fifo[1].head] : 0, g_cnt[0], g_cnt[1], g_err[0], g_err[1]);
 }

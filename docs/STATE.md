@@ -233,6 +233,18 @@ to it: `git checkout bookmark-2026-10-15`.
   (checked: full push = holding L). DQIX_RSTICK=from,to,x for tests.
   Double-click in fullscreen = leave it (nightly19: only outside the touch
   screen, where clicks are the stylus; to_touch decides).
+- **nightly20**: freeze fix. threads_after_irq (the thread switch an IRQ
+  decided, done after the handler returns) runs game code (the divider
+  context save/restore); a second pending IRQ was taken there, its own
+  switch ran inside the first, OSi_ThreadInfo.current and the running
+  coroutine parted, a thread's OS_SleepThread then put the idle thread to
+  sleep: every ARM9 thread waiting, IRQs masked, frozen (a report: tap the
+  logos on frame 466, Continue -> frozen at 1810). irq_service is held off
+  (irq_depth += 100) until the switch is done; replays otherwise unchanged.
+  threads_dump (DQIX_THREADS=1) also shows the IPC FIFOs and IE/IF/IME.
+  Sticks: the walk flag (02109DA4) is 1 on the title menu too; walking and
+  the camera now also need the field pointer at 020F33E0 (0 until a save is
+  loaded).
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).
