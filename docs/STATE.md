@@ -210,6 +210,10 @@ to it: `git checkout bookmark-2026-10-15`.
   settings files, which all said analog_walk = 0, start with it on). The
   arrow is hidden only while the stick walks (and 8 frames after), so mouse
   and touch-screen walking keep it.
+- **nightly15**: a new install (no settings.ini) starts with the DS Lite
+  screen filter and the console photo (g_opt.lcd, g_opt.shell = 1);
+  settings.ini always holds dslite_filter and console, so updates keep each
+  player's choice.
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

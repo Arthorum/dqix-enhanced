@@ -21,9 +21,10 @@ exactly like the original, and it can also do things the DS never could.
 **Better than the DS**
 - **Enhanced mode**: the 3D drawn on your graphics card at up to 4x the DS's
   resolution. Switch between Classic and Enhanced at any time (F5).
-- **The DS Lite look**: a screen filter with the DS Lite's colours, pixel
-  grid, motion blur and backlight levels. The screens can sit inside a photo
-  of a real DS Lite, or a drawn one in six colours, even at actual size.
+- **The DS Lite look** (on at first): a screen filter with the DS Lite's
+  colours, pixel grid, motion blur and backlight levels, and the screens
+  inside a photo of a real DS Lite (or a drawn one in six colours), even at
+  actual size. F6 switches the screen filter, F7 the console.
 - Any window size, fullscreen, screens stacked or side by side, and sharp
   pixel scaling.
 - Keyboard, mouse (as the touch screen) and gamepads. Hold Tab to fast

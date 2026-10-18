@@ -25,6 +25,9 @@ adventure; try this one in its own folder with a copy of your save.
 - **The game's own icon**: dqix.exe gets the icon the DS menu shows for the
   cartridge, made from your ROM when the game is built. Double-click
   `game\dqix.exe` (or a shortcut to it) to play: no console window.
+- **New installs start with the DS Lite look**: the DS Lite screen filter
+  and the screens inside the photo of a real DS Lite (F6 and F7 switch them).
+  Updating doesn't change your settings.
 - The photo of a real DS Lite is the default console; tidier help windows.
 
 **How to install**: download *Source code (zip)* below, unzip it, put your

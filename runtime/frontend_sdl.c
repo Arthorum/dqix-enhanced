@@ -76,7 +76,7 @@ static struct {
     int actual;                  /* screens as big as a real DS Lite's */
     float monitor_width_mm;      /* settings.ini override for the monitor's width (0 = ask the monitor) */
     int dlc;                     /* switch on the downloadable quests and special guests when the save loads */
-} g_opt = { 0, 1, 1, 1, 4, 0, 0, 0, 0, 0, 0, 0 };
+} g_opt = { 1, 1, 1, 1, 4, 0, 1, 0, 0, 0, 0, 0 };   /* a new install: the DS Lite screen inside the console photo (settings.ini keeps each player's choice) */
 
 /* Actual size: a DS Lite pixel is 0.238 mm (a 3-inch 4:3 screen, 256 pixels
  * across = 60.96 mm). Window pixels per DS pixel on the current monitor. */
