@@ -938,7 +938,7 @@ static const char* CONTROLS_TEXT =
     "F6 DS Lite screen   F7 DS Lite console   F8 actual size   F2 layout   F3 window size\n"
     "F4 3D resolution   F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
     "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit\n"
-    "In fullscreen, double-click to go back to the window.";
+    "In fullscreen, double-click outside the touch screen to go back to the window.";
 
 /* A message box whose long lines are wrapped (the system boxes size themselves
  * to the longest line, which made the help as wide as the screen). */
@@ -1406,8 +1406,13 @@ static void handle_events(void) {
             break;
         }
         case SDL_MOUSEBUTTONDOWN:
-            /* fullscreen: a double click anywhere goes back to the window */
-            if (g_fullscreen && e.button.button == SDL_BUTTON_LEFT && e.button.clicks == 2) do_action(MI_FULL);
+            /* fullscreen: a double click outside the touch screen (the top screen, the
+             * console, the edges) goes back to the window; on the touch screen
+             * clicks are the stylus */
+            if (g_fullscreen && e.button.button == SDL_BUTTON_LEFT && e.button.clicks == 2) {
+                int tx, ty;
+                if (!to_touch(e.button.x, e.button.y, &tx, &ty, 0)) do_action(MI_FULL);
+            }
             break;
         case SDL_MOUSEMOTION:
             /* fullscreen: the menu bar appears while the mouse is at the top edge */

@@ -30,8 +30,8 @@ adventure; try this one in its own folder with a copy of your save.
   Updating doesn't change your settings.
 - The photo of a real DS Lite is the default console; tidier help windows.
 - **The right stick turns the camera** while you walk around (like L and R,
-  slower with a light push). In fullscreen, **double-click** to go back to
-  the window.
+  slower with a light push). In fullscreen, **double-click** outside the
+  touch screen to go back to the window.
 - Fixed: A and B (and X and Y) were swapped on Switch controllers (Pro
   Controller, Joy-Cons). Every controller now uses the DS layout by
   position: right button A, bottom button B.

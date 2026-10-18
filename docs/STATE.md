@@ -231,7 +231,8 @@ to it: `git checkout bookmark-2026-10-15`.
   each way, the world map not at all), and keeps it on release; duty 25% to
   100% by how far the stick is pushed, so a light push turns slowly
   (checked: full push = holding L). DQIX_RSTICK=from,to,x for tests.
-  Double-click in fullscreen = leave it.
+  Double-click in fullscreen = leave it (nightly19: only outside the touch
+  screen, where clicks are the stylus; to_touch decides).
 - Not done yet: 3-4 players over the internet (tested on one PC, local:N:
   the same consoles and air as a session); joining a session that has
   started; a relay for hosts who can't open a port (virtual LAN for now).

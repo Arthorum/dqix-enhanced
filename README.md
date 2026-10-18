@@ -96,7 +96,8 @@ folder. **Don't share the `game` or `build` folders**: they contain the game.
 
 Every setting is in the **menu bar** at the top of the window. Handy keys:
 Tab (hold) fast forward, P pause, F5 Classic / Enhanced, F6 DS Lite screen,
-F7 DS Lite console, F11 fullscreen (double-click to leave it), F12
+F7 DS Lite console, F11 fullscreen (double-click outside the touch screen
+to leave it), F12
 screenshot, F10 bug report.
 
 ## Playing with friends
