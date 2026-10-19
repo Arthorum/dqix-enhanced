@@ -11,8 +11,11 @@ adventure; try this one in its own folder with a copy of your save.
   - Overlapping see-through layers no longer pile up into a solid colour or
     hide the sky behind them, and a cloud or glow no longer blends over
     itself.
-  - Outlines are soft like on the DS (blended with what's behind them)
-    instead of hard dark lines.
+  - Outlines: at 1x soft like on the DS; at higher resolutions thinner, so
+    characters' arms and legs keep their colour instead of turning into
+    outline (or, in v29-nightly1, looking see-through).
+  - Solid parts of models drawn with see-through edges now hide what's
+    behind them, as on the DS.
   - The DS's shadow effect only darkens where it should.
   Checked against the exact DS picture at the top of the Observatory: the
   difference went down by about three quarters.

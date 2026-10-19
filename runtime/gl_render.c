@@ -126,6 +126,7 @@ static const char* FS_POLY =
     "layout(location = 1) out vec4 o_attr;\n"
     "uniform sampler2D u_tex;\n"
     "uniform int u_highlight; uniform int u_alphatest; uniform float u_aref; uniform int u_wbuf; uniform float u_edgew;\n"
+    "uniform int u_part;\n"                       /* 0 every pixel; 1 only solid ones (alpha 31); 2 only see-through ones */
     "uniform vec3 u_toon[32];\n"
     "void main() {\n"
     /* distance (in pixels) to each of the triangle's edges that is also an edge of
@@ -148,6 +149,7 @@ static const char* FS_POLY =
     "  if (mode == 2 && u_highlight != 0) { ivec3 t = ivec3(u_toon[int(v_color.r + 0.5)] * 31.0 + 0.5); c = min(c + t, ivec3(31)); }\n"
     "  if (a == 0) discard;\n"
     "  if (u_alphatest != 0 && float(a) <= u_aref) discard;\n"
+    "  if ((u_part == 1 && a < 31) || (u_part == 2 && a >= 31)) discard;\n"
     "  float fa = a >= 31 ? 1.0 : float(a) / 31.0;\n"
     "  o_color = vec4(vec3(c) / 31.0, fa);\n"                  /* straight colour and alpha, like the DS's buffer */
     "  o_attr = vec4(v_attr.z, v_attr.w, eflag, 1.0);\n"
@@ -842,7 +844,10 @@ static void gl_render_(const Frame3D* f) {
     p_glBindBuffer(GL_ARRAY_BUFFER, vbo_poly);
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(float) * VTX_FLOATS * (size_t)nv), g_verts, GL_STREAM_DRAW);
     p_glUseProgram(prog_poly);
-    p_glUniform1f(p_glGetUniformLocation(prog_poly, "u_edgew"), (float)g_scale);
+    { static float ew = -1; if (ew < 0) { const char* e = getenv("DQIX_EDGEW"); ew = e ? (float)atof(e) : 0; }
+      /* outlines: one DS pixel wide at 1x; above that half of one, so a thin leg or
+       * arm keeps its colour inside the outline instead of becoming all outline */
+      p_glUniform1f(p_glGetUniformLocation(prog_poly, "u_edgew"), ew > 0 ? ew : g_scale >= 2 ? (float)g_scale * 0.5f : 1.0f); }
     p_glUniform1i(p_glGetUniformLocation(prog_poly, "u_tex"), 0);
     p_glUniform1i(p_glGetUniformLocation(prog_poly, "u_highlight"), (disp3d >> 1) & 1);
     p_glUniform1i(p_glGetUniformLocation(prog_poly, "u_alphatest"), (disp3d >> 2) & 1);
@@ -852,6 +857,8 @@ static void gl_render_(const Frame3D* f) {
     for (int i = 0; i < 32; i++) { uint16_t c = IO16_(0x380 + i * 2); toon[i * 3] = (float)(c & 31) / 31.0f; toon[i * 3 + 1] = (float)((c >> 5) & 31) / 31.0f; toon[i * 3 + 2] = (float)((c >> 10) & 31) / 31.0f; }
     p_glUniform3fv(p_glGetUniformLocation(prog_poly, "u_toon"), 32, toon);
     GLint loc_texsize = p_glGetUniformLocation(prog_poly, "u_texsize");
+    GLint loc_part = p_glGetUniformLocation(prog_poly, "u_part");
+    p_glUniform1i(loc_part, 0);
     p_glEnable(GL_DEPTH_TEST);
     p_glActiveTexture(GL_TEXTURE0);
     int blend_on = (disp3d >> 3) & 1;
@@ -897,6 +904,21 @@ static void gl_render_(const Frame3D* f) {
             p_glDrawArrays(prim, b->first, b->count);
             continue;
         }
+        /* a translucent polygon's solid pixels (alpha 31: most of a textured model with
+         * see-through edges) are drawn like an opaque polygon's on the DS: they hide
+         * what's behind, write depth, and aren't see-through pixels for the id rule */
+        if (b->shadow != 2) {
+            p_glUniform1i(loc_part, 1);
+            p_glDisablei(GL_BLEND, 0);
+            p_glColorMaski(1, 1, 1, 1, 1);
+            p_glDepthMask(GL_TRUE);
+            p_glStencilMask(0xFF);
+            p_glStencilFunc(GL_ALWAYS, ST_SOLID, 0xFF);
+            p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            p_glDrawArrays(prim, b->first, b->count);
+            p_glDepthMask(b->depth_write ? GL_TRUE : GL_FALSE);
+            p_glUniform1i(loc_part, 2);
+        }
         GLint ref = ST_SOLID | ST_TRANS | (b->pid & ST_ID);
         /* translucent pixels keep the opaque polygon id; their fog flag is the pixel's AND the
          * polygon's (the DS): a polygon with fog leaves it as it was, one without clears it */
@@ -908,6 +930,7 @@ static void gl_render_(const Frame3D* f) {
             p_glStencilFunc(GL_EQUAL, ref | ST_MASKBIT, ST_MASKBIT);   /* the marks stay for the next shadow, like the DS */
             p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
             p_glDrawArrays(prim, b->first, b->count);
+            p_glUniform1i(loc_part, 0);
             continue;
         }
         p_glStencilMask(0xFF);
@@ -928,6 +951,7 @@ static void gl_render_(const Frame3D* f) {
         }
         p_glStencilFunc(GL_NOTEQUAL, ref, ST_SOLID | ST_TRANS | ST_ID);
         p_glDrawArrays(prim, b->first, b->count);
+        p_glUniform1i(loc_part, 0);
     }
     p_glDisable(GL_STENCIL_TEST);
     p_glStencilMask(0xFF);
@@ -947,7 +971,10 @@ static void gl_render_(const Frame3D* f) {
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_attr"), 1);
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_depth"), 2);
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_edge"), (disp3d >> 5) & 1);
-    p_glUniform1i(p_glGetUniformLocation(prog_post, "u_aa"), (disp3d >> 4) & 1);
+    /* the DS's half-and-half outlines (anti-aliasing) only at 1x: at higher resolutions
+     * they turn into a see-through band around characters */
+    { static int eb = -2; if (eb == -2) eb = getenv("DQIX_EDGEBLEND") ? atoi(getenv("DQIX_EDGEBLEND")) : -1;
+      p_glUniform1i(p_glGetUniformLocation(prog_post, "u_aa"), (eb < 0 ? g_scale == 1 : eb) && ((disp3d >> 4) & 1)); }
     p_glUniform1i(p_glGetUniformLocation(prog_post, "u_scale"), g_scale);
     float ec[24];
     for (int i = 0; i < 8; i++) { uint16_t c = IO16_(0x330 + i * 2); ec[i * 3] = (float)(c & 31) / 31.0f; ec[i * 3 + 1] = (float)((c >> 5) & 31) / 31.0f; ec[i * 3 + 2] = (float)((c >> 10) & 31) / 31.0f; }
