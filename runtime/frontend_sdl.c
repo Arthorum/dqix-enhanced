@@ -54,6 +54,9 @@ static int g_swap;                                                /* the screens
 static int g_two;                                                 /* two windows, one screen in each (two monitors) */
 static SDL_Window* g_win2;                                        /* ...the second one (the top screen, or the bottom one when swapped) */
 static int g_win2_full, g_win2_rect[4];                           /* ...fullscreen; where it was as a window (w = 0: not yet) */
+static int g_wide_pop;                                            /* widescreen: the small screen in its own window (the field alone) */
+static int g_smooth = 1;                                          /* Enhanced: smooth (filtered) textures */
+static int g_res_auto = 1;                                        /* 3D resolution: as sharp as the screen shows it (else g_scale3d) */
 static int g_small_opacity = 100;                                 /* widescreen: how solid the small screen over the field is (O), % */
 static float g_small_alpha = 1.0f;                                /* ...as shown now (solid while the mouse is on it) */
 static uint64_t g_next_frame, g_perf_freq;
@@ -220,7 +223,8 @@ static void canvas_layout_for(GlPresent* v, int ww, int wh, int second) {
          * With the 3D on the top screen (battles), the touch screen (the
          * commands) sits at half size in the bottom left corner instead. */
         float S = (float)wide_side_target();
-        float t = which == 0 ? 1.0f : g_wide_mix * g_wide_mix * (3 - 2 * g_wide_mix);   /* eased */
+        int pop = g_wide_pop;                                     /* the small screen in the second window */
+        float t = which == 0 || pop ? 1.0f : g_wide_mix * g_wide_mix * (3 - 2 * g_wide_mix);   /* eased */
         v->cw = 256 + 2 * S; v->ch = 192;
         float* big = which == 0 ? v->top : v->bot, *small = which == 0 ? v->bot : v->top;
         float* bigx = which == 0 ? v->topx : v->botx;
@@ -235,6 +239,11 @@ static void canvas_layout_for(GlPresent* v, int ww, int wh, int second) {
         if (g_small_blank && t > 0.99f) small[2] = small[3] = 0;   /* black (battle intros, fades): leave the field whole */
         v->front = which == 0;                                   /* the small one in front */
         v->alpha = 1.0f + (g_small_alpha - 1.0f) * t;            /* see-through (O) while it is over the field */
+        if (pop) {                                                /* first window: the field alone; second: the small screen, whole */
+            v->alpha = 1.0f;
+            if (second) { v->cw = 256; v->ch = 192; big[0] = big[1] = big[2] = big[3] = 0; small[0] = small[1] = 0; small[2] = 256; small[3] = 192; }
+            else small[0] = small[1] = small[2] = small[3] = 0;
+        }
     } else if (two) {
         v->cw = 256; v->ch = 192;                                /* one screen; the other is in the other window */
     } else if (corner) {
@@ -341,6 +350,7 @@ static void settings_load(void) {
     FILE* f = fopen(SETTINGS, "r");
     if (!f) return;
     char line[200], color[64] = "";
+    int seen_rs = 0;                                              /* render_scale (v29) wins over the older resolution_3d */
     while (fgets(line, sizeof line, f)) {
         char key[64]; char val[64];
         if (line[0] == '#' || sscanf(line, " %63[^= ] = %63s", key, val) != 2) continue;
@@ -355,10 +365,13 @@ static void settings_load(void) {
         if (!strcmp(key, "session_port")) { int v = atoi(val); if (v > 0 && v < 65536) g_session_port = v; continue; }
         if (!strcmp(key, "session_consoles")) { if (!strcmp(val, "processes")) { static char e[] = "DQIX_PROCESSES=1"; putenv(e); } continue; }
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
-        else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
+        else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) { g_scale3d = v; if (!seen_rs) g_res_auto = v == 4; } }   /* before v29: 4 was the most (now Auto) */
+        else if (!strcmp(key, "render_scale")) { seen_rs = 1; int v = atoi(val); g_res_auto = !strcmp(val, "auto") || v < 1; if (!g_res_auto) g_scale3d = v > GL_MAX_SCALE ? GL_MAX_SCALE : v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
         else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); g_wide = !strcmp(val, "wide"); g_two = !strcmp(val, "two_windows"); }
         else if (!strcmp(key, "swap_screens")) g_swap = atoi(val) != 0;
+        else if (!strcmp(key, "widescreen_popout")) g_wide_pop = atoi(val) != 0;
+        else if (!strcmp(key, "smooth_textures")) g_smooth = atoi(val) != 0;
         else if (!strcmp(key, "small_screen_opacity")) { int v = atoi(val); if (v >= 10 && v <= 100) g_small_opacity = v; }
         else if (!strcmp(key, "second_window")) { int r[4]; if (sscanf(val, "%d,%d,%d,%d", &r[0], &r[1], &r[2], &r[3]) == 4 && r[2] > 0 && r[3] > 0) memcpy(g_win2_rect, r, sizeof r); }
         else if (!strcmp(key, "second_window_fullscreen")) g_win2_full = atoi(val) != 0;
@@ -401,8 +414,13 @@ static void settings_save(void) {
     fprintf(f, "# Dragon Quest IX (PC) settings. The game saves this when you change something.\n");
     fprintf(f, "# mode: classic (exactly like the DS) or enhanced (sharper 3D on the graphics card). F5 switches.\n");
     fprintf(f, "mode = %s\n", g_classic ? "classic" : "enhanced");
-    fprintf(f, "# 3D resolution in enhanced mode: 1 to 4 (F4)\n");
-    fprintf(f, "resolution_3d = %d\n", g_scale3d);
+    fprintf(f, "# 3D resolution in enhanced mode: 1 to 12, or auto (as sharp as the window shows it; F4)\n");
+    if (g_res_auto) fprintf(f, "render_scale = auto\n"); else fprintf(f, "render_scale = %d\n", g_scale3d);
+    fprintf(f, "resolution_3d = %d\n", g_res_auto || g_scale3d > 4 ? 4 : g_scale3d);   /* for versions before v29 */
+    fprintf(f, "# enhanced: smooth textures (filtered) instead of the DS's blocky texels: 0 or 1\n");
+    fprintf(f, "smooth_textures = %d\n", g_smooth);
+    fprintf(f, "# widescreen: the small screen (map, battle commands) in a window of its own: 0 or 1\n");
+    fprintf(f, "widescreen_popout = %d\n", g_wide_pop);
     fprintf(f, "# window size: 1 to 8 times the DS screens (F3)\n");
     fprintf(f, "window_scale = %d\n", g_scale);
     fprintf(f, "# stacked, side_by_side, corner (the top screen small beside the field), wide (widescreen)\n");
@@ -524,8 +542,10 @@ static int try_gl(void) {
     if (!g_glctx) { fprintf(stderr, "OpenGL 3.3 not available (%s): using the software renderer\n", SDL_GetError()); SDL_DestroyWindow(g_win); g_win = NULL; return 0; }
     SDL_GL_SetSwapInterval(0);                                   /* pacing follows the audio clock */
     const char* e = getenv("DQIX_SCALE3D");
-    if (e) g_scale3d = atoi(e);
-    if (!gl_render_init(g_scale3d)) {
+    if (e) { g_scale3d = atoi(e); g_res_auto = 0; }
+    if (getenv("DQIX_SMOOTH")) g_smooth = atoi(getenv("DQIX_SMOOTH")) != 0;   /* tests */
+    gl_set_smooth(g_smooth);
+    if (!gl_render_init(g_res_auto ? (getenv("DQIX_AUTO_FROM") ? 2 : 4) : g_scale3d)) {
         fprintf(stderr, "OpenGL renderer failed to start: using the software renderer\n");
         SDL_GL_DeleteContext(g_glctx); SDL_DestroyWindow(g_win); g_win = NULL; return 0;
     }
@@ -572,7 +592,7 @@ static void window_icon(void) { window_icon_for(g_win); }
  * window shares the first one's OpenGL context and opens on another monitor
  * if there is one (then where it was left). */
 static void second_window_title(void) {
-    if (g_win2) SDL_SetWindowTitle(g_win2, g_swap ? "Dragon Quest IX - bottom screen" : "Dragon Quest IX - top screen");
+    if (g_win2) SDL_SetWindowTitle(g_win2, g_wide ? "Dragon Quest IX - map and commands" : g_swap ? "Dragon Quest IX - bottom screen" : "Dragon Quest IX - top screen");
 }
 static void second_window_keep_rect(void) {                     /* remember where it is (as a window) */
     if (!g_win2 || g_win2_full) return;
@@ -580,7 +600,7 @@ static void second_window_keep_rect(void) {                     /* remember wher
     SDL_GetWindowSize(g_win2, &g_win2_rect[2], &g_win2_rect[3]);
 }
 static void second_window_sync(void) {
-    int want = g_gl && g_two && !g_side_by_side && g_win && !g_headless;
+    int want = g_gl && (g_two || (g_wide && g_wide_pop)) && !g_side_by_side && g_win && !g_headless;
     if (!want && g_win2) {
         second_window_keep_rect();
         SDL_GL_MakeCurrent(g_win, g_glctx);
@@ -608,16 +628,18 @@ static void second_window_sync(void) {
     g_win2 = SDL_CreateWindow("Dragon Quest IX", x, y, w, h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!g_win2) { fprintf(stderr, "second window: %s\n", SDL_GetError()); return; }
     window_icon_for(g_win2);
+    menu_init_second(g_win2);                                    /* its own bar: Fullscreen */
     second_window_title();
     if (SDL_GL_MakeCurrent(g_win2, g_glctx) == 0) SDL_GL_SetSwapInterval(0);
     SDL_GL_MakeCurrent(g_win, g_glctx);
-    if (g_win2_full) SDL_SetWindowFullscreen(g_win2, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    if (g_win2_full) { menu_show_second(0); SDL_SetWindowFullscreen(g_win2, SDL_WINDOW_FULLSCREEN_DESKTOP); }
     SDL_RaiseWindow(g_win);                                      /* the keyboard stays with the game's window */
 }
 static void second_window_fullscreen(void) {
     if (!g_win2) return;
     if (!g_win2_full) second_window_keep_rect();
     g_win2_full = !g_win2_full;
+    menu_show_second(!g_win2_full);
     SDL_SetWindowFullscreen(g_win2, g_win2_full ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
@@ -885,7 +907,7 @@ extern uint8_t g_comp_info[256 * 192 * 4];
 extern int g_comp_has3d;
 extern uint32_t g_engine_out[2][256 * 192];
 static void wide_update(int a_on_top) {
-    if (!g_wide) { g_wide_mix = 1.0f; return; }
+    if (!g_wide || g_wide_pop) { g_wide_mix = 1.0f; if (!g_wide) return; }
     int side = 0, which = gl_wide_shown(&side);
     {   /* the small screen: the one without the 3D (engine B), or the top one */
         int small_top = which != 0;
@@ -914,7 +936,36 @@ static void wide_update(int a_on_top) {
     else if (g_wide_mix > target) g_wide_mix = fmaxf(target, g_wide_mix - step);
 }
 
+/* 3D resolution Auto: render at 1.5 times the size the 3D is shown at (at
+ * least 2x, at most what the GPU holds), so it is never stretched and the
+ * extra detail smooths the edges. Changes after the size has stayed the same
+ * for half a second (resizing a window doesn't rebuild it every frame). */
+static void auto_scale(void) {
+    if (!g_res_auto || g_classic || getenv("DQIX_SCALE3D")) return;
+    { static long long from = -2; if (from == -2) { const char* e = getenv("DQIX_AUTO_FROM"); from = e ? atoll(e) : -1; }   /* tests: 2x until then */
+      if (from >= 0 && g_frame < (uint64_t)from) return; }
+    float need = 0;
+    SDL_Window* ws[2] = { g_win, g_win2 };
+    for (int k = 0; k < 2; k++) {
+        if (!ws[k]) continue;
+        int w, h; SDL_GL_GetDrawableSize(ws[k], &w, &h);
+        GlPresent v; canvas_layout_for(&v, w, h, k);
+        for (int i = 0; i < 2; i++) {
+            const float* r = i ? v.bot : v.top, *x = i ? v.botx : v.topx;
+            if (r[2] > 0 && x[1] > 0) { float p = v.sc * r[2] / x[1]; if (p > need) need = p; }
+        }
+    }
+    int want = (int)ceilf(need * 1.5f - 0.05f), top = gl_render_max_scale();
+    if (want < 2) want = 2;
+    if (want > top) want = top;
+    static int pending, frames;
+    if (want == gl_render_scale()) { pending = 0; frames = 0; return; }
+    if (want != pending) { pending = want; frames = 0; return; }
+    if (++frames >= 30) { gl_render_set_scale(want); pending = frames = 0; }
+}
+
 static void present_gl(void) {
+    auto_scale();
     g_wide_side = g_classic ? 0 : wide_side_target();            /* the next 3D frames (only the picture changes) */
     uint16_t pow; memcpy(&pow, &g_io[0x304], 2);
     gl_compose((pow >> 15) & 1, pow & 1);
@@ -1018,7 +1069,12 @@ static void menu_sync(void) {
     menu_check(MI_SRV_CUSTOM, wfc_custom()); menu_enable(MI_SRV_CUSTOM, wfc_custom());
     menu_check(MI_CLASSIC, g_classic); menu_check(MI_ENHANCED, !g_classic);
     menu_enable(MI_ENHANCED, g_gl);
-    for (int i = 0; i < 4; i++) { menu_check(MI_RES1 + i, g_scale3d == i + 1); menu_enable(MI_RES1 + i, g_gl && !g_classic); }
+    {
+        static const int ids[7] = { MI_RES1, MI_RES2, MI_RES3, MI_RES4, MI_RES6, MI_RES8, MI_RES_AUTO }, sc[7] = { 1, 2, 3, 4, 6, 8, 0 };
+        for (int i = 0; i < 7; i++) { menu_check(ids[i], sc[i] ? !g_res_auto && g_scale3d == sc[i] : g_res_auto); menu_enable(ids[i], g_gl && !g_classic); }
+    }
+    menu_check(MI_POPOUT, g_wide_pop && wide); menu_enable(MI_POPOUT, g_gl);
+    menu_check(MI_SMOOTH, g_smooth); menu_enable(MI_SMOOTH, g_gl && !g_classic);
     menu_check(MI_LCD, g_opt.lcd); menu_enable(MI_LCD, g_gl);
     int lcd = g_gl && g_opt.lcd;
     menu_check(MI_LCDCOL, g_opt.lcd_color); menu_enable(MI_LCDCOL, lcd);
@@ -1054,7 +1110,8 @@ static const char* CONTROLS_TEXT =
     "Tab (hold) fast forward   P pause   F5 Classic / Enhanced\n"
     "F6 DS Lite screen   F7 DS Lite console   F8 actual size   F2 layout   F3 window size\n"
     "F9 swap the screens   O widescreen: the small screen see-through (100/75/50/25%)\n"
-    "F4 3D resolution   F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
+    "F4 3D resolution: 1x, 2x, 3x, 4x, 6x, 8x, Auto (as sharp as your screen)\n"
+    "F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
     "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit\n"
     "In fullscreen, double-click outside the touch screen to go back to the window.";
 
@@ -1558,10 +1615,20 @@ static void do_action(int id) {
         if (!g_gl) break;
         g_classic = id == MI_CLASSIC; apply_mode(); g_fps_t0 = 0;
         break;
-    case MI_RES1: case MI_RES2: case MI_RES3: case MI_RES4:
+    case MI_RES1: case MI_RES2: case MI_RES3: case MI_RES4: case MI_RES6: case MI_RES8:
         if (!g_gl || g_classic) break;
-        g_scale3d = id - MI_RES1 + 1; gl_render_set_scale(g_scale3d);
+        g_res_auto = 0;
+        g_scale3d = id == MI_RES6 ? 6 : id == MI_RES8 ? 8 : id - MI_RES1 + 1; gl_render_set_scale(g_scale3d);
         break;
+    case MI_RES_AUTO: if (g_gl && !g_classic) g_res_auto = 1; break;          /* auto_scale() picks it */
+    case MI_SMOOTH: if (g_gl) { g_smooth = !g_smooth; gl_set_smooth(g_smooth); } break;
+    case MI_POPOUT:
+        if (!g_gl) break;
+        if (g_wide && !g_side_by_side) g_wide_pop = !g_wide_pop;
+        else { g_wide_pop = 1; g_wide = 1; g_corner = g_side_by_side = g_two = 0; }   /* turns widescreen on too */
+        relayout = 1;
+        break;
+    case MI_FULL2: second_window_fullscreen(); break;
     case MI_LCD: if (g_gl) g_opt.lcd = !g_opt.lcd; g_fps_t0 = 0; break;
     case MI_LCDCOL: g_opt.lcd_color = !g_opt.lcd_color; break;
     case MI_GRID: g_opt.grid = !g_opt.grid; break;
@@ -1650,7 +1717,11 @@ static void handle_events(void) {
             if (k == SDL_SCANCODE_F9) do_action(MI_SWAP);
             if (k == SDL_SCANCODE_O) do_action(MI_OPACITY1 + ((100 - g_small_opacity) / 25 + 1) % 4);
             if (k == SDL_SCANCODE_F3) do_action(MI_SIZE1 + g_scale % 4);
-            if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) do_action(MI_RES1 + g_scale3d % 4);
+            if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) {    /* 1x 2x 3x 4x 6x 8x Auto */
+                static const int ids[7] = { MI_RES1, MI_RES2, MI_RES3, MI_RES4, MI_RES6, MI_RES8, MI_RES_AUTO }, sc[7] = { 1, 2, 3, 4, 6, 8, 0 };
+                int cur = 6; for (int i = 0; i < 6; i++) if (!g_res_auto && g_scale3d == sc[i]) cur = i;
+                do_action(ids[(cur + 1) % 7]);
+            }
             if (k == SDL_SCANCODE_F5 && g_gl) do_action(g_classic ? MI_ENHANCED : MI_CLASSIC);
             if (k == SDL_SCANCODE_F6) do_action(MI_LCD);
             if (k == SDL_SCANCODE_F7) do_action(MI_SHELL);
@@ -1672,6 +1743,11 @@ static void handle_events(void) {
             break;
         case SDL_MOUSEMOTION:
             /* fullscreen: the menu bar appears while the mouse is at the top edge */
+            if (g_win2 && g_win2_full && e.motion.windowID == SDL_GetWindowID(g_win2)) {   /* the second window's bar, the same way */
+                static int peek2;
+                if (!peek2 && e.motion.y <= 1) { peek2 = 1; menu_show_second(1); }
+                else if (peek2 && e.motion.y > 80) { peek2 = 0; menu_show_second(0); }
+            }
             if (g_fullscreen && e.motion.windowID == SDL_GetWindowID(g_win)) {
                 if (!g_menu_peek && e.motion.y <= 1) { g_menu_peek = 1; menu_show(1); }
                 else if (g_menu_peek && e.motion.y > 80) { g_menu_peek = 0; menu_show(0); }

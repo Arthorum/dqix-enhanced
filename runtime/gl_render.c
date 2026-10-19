@@ -34,6 +34,7 @@
     X(void, glStencilOp, (GLenum, GLenum, GLenum)) \
     X(void, glStencilMask, (GLuint)) \
     X(void, glClearBufferiv, (GLenum, GLint, const GLint*)) \
+    X(void, glGetIntegerv, (GLenum, GLint*)) \
     X(void, glEnable, (GLenum)) \
     X(void, glDisable, (GLenum)) \
     X(void, glEnablei, (GLenum, GLuint)) \
@@ -126,7 +127,8 @@ static const char* FS_POLY =
     "layout(location = 1) out vec4 o_attr;\n"
     "uniform sampler2D u_tex;\n"
     "uniform int u_highlight; uniform int u_alphatest; uniform float u_aref; uniform int u_wbuf; uniform float u_edgew;\n"
-    "uniform int u_part;\n"                       /* 0 every pixel; 1 only solid ones (alpha 31); 2 only see-through ones */
+    "uniform int u_part;\n"
+    "uniform int u_sharpa;\n"                    /* smooth textures: a texture whose texels are see-through or not (no alpha levels): cut at half */                       /* 0 every pixel; 1 only solid ones (alpha 31); 2 only see-through ones */
     "uniform vec3 u_toon[32];\n"
     "void main() {\n"
     /* distance (in pixels) to each of the triangle's edges that is also an edge of
@@ -142,6 +144,7 @@ static const char* FS_POLY =
     "  ivec3 c = vc; int a = pa;\n"
     "  if (textured) {\n"
     "    vec4 t = texture(u_tex, v_tex);\n"
+    "    if (u_sharpa != 0) t.a = t.a >= 0.5 ? 1.0 : 0.0;\n"
     "    ivec3 tc = ivec3(t.rgb * 31.0 + 0.5); int ta = int(t.a * 31.0 + 0.5);\n"
     "    if (mode == 1) { c = (tc * ta + vc * (31 - ta)) / 31; a = pa; }\n"
     "    else { c = ((tc + 1) * (vc + 1) - 1) >> 5; a = ((ta + 1) * (pa + 1) - 1) >> 5; }\n"
@@ -458,7 +461,14 @@ static const char* FS_SCREEN =
     "    u_lo = vec2(tx.x / u_texw, in_bot ? 0.0 : 0.5); u_hi = vec2((tx.x + tx.y) / u_texw, in_bot ? 0.5 : 1.0);\n"
     "    g_duv = vec2(tx.y / (r.z * u_view.z * u_texw), 192.0 / (r.w * u_view.z * 384.0)); g_dp = tx.y / (r.z * u_view.z);\n"
     "    vec2 sp = (p - r.xy) * vec2(tx.y, 192.0) / r.zw;          // DS pixels\n"
-    "    if (u_lcd == 0) { vec2 uv = vec2((sp.x + tx.x) / u_texw, (in_bot ? 0.5 : 1.0) - sp.y / 384.0); return textureGrad(u_src, keep_in(uv, g_duv), vec2(g_duv.x, 0.0), vec2(0.0, g_duv.y)).rgb; }   // exact\n"
+    "    if (u_lcd == 0) {                             // sharp bilinear: exact pixels, even edges at any size\n"
+    "        vec2 tsz = vec2(textureSize(u_src, 0));\n"
+    "        vec2 t = vec2((sp.x + tx.x) / u_texw, (in_bot ? 0.5 : 1.0) - sp.y / 384.0) * tsz - 0.5;\n"
+    "        vec2 i = floor(t), f = t - i;\n"
+    "        vec2 s = 1.0 / max(g_duv * tsz, vec2(1e-4));\n"
+    "        f = clamp((f - 0.5) * s + 0.5, 0.0, 1.0);\n"
+    "        return textureGrad(u_src, keep_in((i + 0.5 + f) / tsz, g_duv), vec2(g_duv.x, 0.0), vec2(0.0, g_duv.y)).rgb;\n"
+    "    }\n"
     "    return pow(clamp(screen(sp, in_bot ? 1 : 0), 0.0, 1.0), vec3(1.0 / 2.2));\n"
     "}\n"
     "\n"
@@ -550,6 +560,7 @@ const int* g_gl_scale = &g_scale;
 typedef struct { uint32_t ti, pl; uint64_t hash; GLuint tex; int w, h; uint64_t checked, used; int live; } TexEntry;
 #define TEXCACHE 4096
 static TexEntry g_texcache[TEXCACHE];
+static int g_smooth;                                           /* smooth textures (bilinear filtering) */
 static uint64_t g_frameno;
 static uint8_t* g_decode;
 
@@ -582,6 +593,31 @@ const char* gl_renderer_name(void) { return g_gl_name; }
 int gl_render_scale(void) { return g_scale; }
 static double perf_ms(void) { return (double)SDL_GetPerformanceCounter() * 1000.0 / (double)SDL_GetPerformanceFrequency(); }
 
+/* Smooth textures: a see-through texel's colour is never shown, but filtering
+ * mixes it into its neighbours' (a dark fringe around every cut-out). Give
+ * each one the average colour of the solid texels around it (two rounds, so
+ * thin gaps fill too). Harmless without filtering: it stays see-through. */
+static void bleed(uint8_t* px, int w, int h) {
+    for (int round = 0; round < 2; round++) {
+        int changed = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                uint8_t* p = px + ((size_t)y * w + x) * 4;
+                if (p[3]) continue;                                   /* solid (or already filled: alpha 1) */
+                int r = 0, g = 0, b = 0, n = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int xx = (x + dx + w) % w, yy = (y + dy + h) % h;   /* textures usually repeat */
+                        const uint8_t* q = px + ((size_t)yy * w + xx) * 4;
+                        if (q[3]) { r += q[0]; g += q[1]; b += q[2]; n++; }
+                    }
+                if (n) { p[0] = (uint8_t)(r / n); p[1] = (uint8_t)(g / n); p[2] = (uint8_t)(b / n); p[3] = 1; changed = 1; }   /* alpha 1 for now: counts as solid next round */
+            }
+        if (!changed) break;
+    }
+    for (size_t i = 0; i < (size_t)w * h; i++) if (px[i * 4 + 3] == 1) px[i * 4 + 3] = 0;
+}
+
 static GLuint texture_for(uint32_t ti, uint32_t pl, int* w, int* h) {
     TexEntry* e = tex_lookup(ti, pl);
     gpu3d_tex_size(ti, w, h);
@@ -593,6 +629,7 @@ static GLuint texture_for(uint32_t ti, uint32_t pl, int* w, int* h) {
             double t0 = perf_ms();
             e->hash = hs; e->w = *w; e->h = *h;
             gpu3d_decode_texture(ti, pl, g_decode);
+            if (g_smooth) bleed(g_decode, *w, *h);
             p_glBindTexture(GL_TEXTURE_2D, e->tex);
             p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, *w, *h, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_decode);
             g_gl_stats.uploads++; g_gl_stats.upload_texels += *w * *h; g_gl_stats.upload_ms += perf_ms() - t0;
@@ -652,9 +689,18 @@ static void free_fbs(void) {
     p_glDeleteTextures(1, &final_tex); p_glDeleteFramebuffers(1, &final_fbo);
 }
 
+/* The largest 3D resolution this GPU can hold: widescreen up to 512 DS
+ * pixels across, both screens 384 high in one texture. */
+static int max_scale(void) {
+    GLint m = 4096; p_glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m);
+    int s = (int)m / 512;
+    return s < 1 ? 1 : s > GL_MAX_SCALE ? GL_MAX_SCALE : s;
+}
+int gl_render_max_scale(void) { return g_ready ? max_scale() : GL_MAX_SCALE; }
+
 int gl_render_init(int scale) {
     if (!load_gl()) return 0;
-    g_scale = scale < 1 ? 1 : scale > 8 ? 8 : scale;
+    g_scale = scale < 1 ? 1 : scale > max_scale() ? max_scale() : scale;
     prog_poly = program(VS_POLY, FS_POLY, 1);
     prog_post = program(VS_QUAD, FS_POST, 0);
     prog_comp = program(VS_QUAD, FS_COMP, 0);
@@ -680,8 +726,8 @@ int gl_render_init(int scale) {
     p_glGenSamplers(9, samplers);
     static const GLint wrap[3] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT };
     for (int i = 0; i < 9; i++) {
-        p_glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        p_glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, g_smooth ? GL_LINEAR : GL_NEAREST);
+        p_glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, g_smooth ? GL_LINEAR : GL_NEAREST);
         p_glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_S, wrap[i / 3]);
         p_glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_T, wrap[i % 3]);
     }
@@ -703,7 +749,23 @@ int gl_render_init(int scale) {
     return 1;
 }
 
+/* Smooth textures: filter the DS's textures (the DS shows each texel as a
+ * block). The textures are decoded again (see bleed). */
+void gl_set_smooth(int on) {
+    on = on != 0;
+    if (!g_ready) { g_smooth = on; return; }
+    if (on == g_smooth) return;
+    g_smooth = on;
+    for (int i = 0; i < 9; i++) {
+        p_glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, on ? GL_LINEAR : GL_NEAREST);
+        p_glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, on ? GL_LINEAR : GL_NEAREST);
+    }
+    for (int i = 0; i < TEXCACHE; i++) g_texcache[i].hash = 0;   /* decode again */
+}
+
 void gl_render_set_scale(int scale) {
+    if (scale < 1) scale = 1;
+    if (g_ready && scale > max_scale()) scale = max_scale();
     if (!g_ready || scale == g_scale) return;
     free_fbs();
     g_scale = scale;
@@ -740,7 +802,7 @@ static void push_vertex(int* nv, const SVtx* v, float alpha, const Poly* p, floa
 #define ST_TRANS 0x40                    /* a translucent polygon is on it (its id: bits 0-4, of the DS's 0-5) */
 #define ST_MASKBIT 0x20                  /* marked by the latest shadow mask */
 #define ST_ID 0x1F
-typedef struct { int first, count; GLuint tex; int sampler; float tw, th; int translucent, depth_write, depth_eq, lines, pid, shadow, fog; } Batch;
+typedef struct { int first, count; GLuint tex; int sampler; float tw, th; int translucent, depth_write, depth_eq, lines, pid, shadow, fog, alpha1; } Batch;
 static Batch* g_batches; static int g_bcap;
 
 static void gl_vblank(void) {
@@ -796,6 +858,7 @@ static void gl_render_(const Frame3D* f) {
             int sm = (p->teximg >> 16) & 1 ? ((p->teximg >> 18) & 1 ? 2 : 1) : 0;
             int tm = (p->teximg >> 17) & 1 ? ((p->teximg >> 19) & 1 ? 2 : 1) : 0;
             b.sampler = sm * 3 + tm;
+            b.alpha1 = fmt != 1 && fmt != 6;                      /* no alpha levels (only A3I5 and A5I3 have them) */
         }
         b.translucent = i >= f->n_opaque;
         b.depth_write = !b.translucent || (p->attr & 0x800);
@@ -865,6 +928,7 @@ static void gl_render_(const Frame3D* f) {
     for (int i = 0; i < 32; i++) { uint16_t c = IO16_(0x380 + i * 2); toon[i * 3] = (float)(c & 31) / 31.0f; toon[i * 3 + 1] = (float)((c >> 5) & 31) / 31.0f; toon[i * 3 + 2] = (float)((c >> 10) & 31) / 31.0f; }
     p_glUniform3fv(p_glGetUniformLocation(prog_poly, "u_toon"), 32, toon);
     GLint loc_texsize = p_glGetUniformLocation(prog_poly, "u_texsize");
+    GLint loc_sharpa = p_glGetUniformLocation(prog_poly, "u_sharpa");
     GLint loc_part = p_glGetUniformLocation(prog_poly, "u_part");
     p_glUniform1i(loc_part, 0);
     p_glEnable(GL_DEPTH_TEST);
@@ -887,6 +951,7 @@ static void gl_render_(const Frame3D* f) {
         p_glBindTexture(GL_TEXTURE_2D, b->tex);
         p_glBindSampler(0, samplers[b->sampler]);
         p_glUniform2f(loc_texsize, b->tw, b->th);
+        p_glUniform1i(loc_sharpa, g_smooth && b->alpha1);
         p_glDepthFunc(b->depth_eq ? GL_EQUAL : GL_LESS);
         p_glDepthMask(b->depth_write ? GL_TRUE : GL_FALSE);
         GLenum prim = b->lines ? GL_LINES : GL_TRIANGLES;
@@ -1116,14 +1181,15 @@ void gl_present(const GlPresent* v) {
     p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, src); p_glBindSampler(0, 0);
     /* Shown smaller than it was rendered (3D resolution above the window size):
      * average with mipmaps so the extra detail becomes smooth edges, not shimmer.
-     * Shown larger: nearest (exact pixels) or, with the LCD filter, linear
-     * (the shader keeps the pixels sharp). */
+     * Shown larger: linear, and the shader keeps the pixels sharp (sharp
+     * bilinear: every pixel the same size even at an uneven scale, where
+     * nearest made some rows and columns wider than others). */
     float px_top = v->sc * v->top[2] / (v->topx[1] * (float)g_scale), px_bot = v->sc * v->bot[2] / (v->botx[1] * (float)g_scale);
     float px_per_texel = px_top > px_bot ? px_top : px_bot;                 /* the bigger screen */
     int minify = px_per_texel < 0.99f;
     if (minify) p_glGenerateMipmap(GL_TEXTURE_2D);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minify ? GL_LINEAR_MIPMAP_LINEAR : v->lcd ? GL_LINEAR : GL_NEAREST);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, v->lcd ? GL_LINEAR : GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minify ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);   /* the shader keeps pixels sharp */
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     GLuint P = prog_screen;
     p_glUniform1i(p_glGetUniformLocation(P, "u_src"), 0);
     p_glUniform1i(p_glGetUniformLocation(P, "u_src_linear"), ghost);

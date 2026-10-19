@@ -14,6 +14,7 @@ enum {
     MI_NET = 180, MI_SRV_ALTWFC, MI_SRV_WIIMMFI, MI_SRV_CUSTOM, MI_NET_HELP, MI_SRV_BUILTIN,
     MI_SES_HOST = 190, MI_SES_JOIN, MI_SES_START, MI_SES_LEAVE, MI_SES_NAME, MI_SES_HELP,
     MI_ANALOG = 200, MI_CORNER, MI_MODERN_HELP, MI_WIDE, MI_SWAP, MI_TWO,
+    MI_FULL2 = 230, MI_POPOUT, MI_RES6, MI_RES8, MI_RES_AUTO, MI_SMOOTH,
     MI_OPACITY1 = 220,                                                  /* 100, 75, 50, 25% (+0..3) */
     MI_SEND_REPORT = 210,
 };
@@ -21,6 +22,9 @@ enum {
 /* shell_names: the console colours, in order (MI_SHELLC0 + i) */
 void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells);
 void menu_show(int on);                       /* hidden in fullscreen */
+/* the second window (two windows): a bar with only Fullscreen (MI_FULL2) */
+void menu_init_second(SDL_Window* win);
+void menu_show_second(int on);
 void menu_check(int id, int on);
 void menu_enable(int id, int on);
 int menu_command(const SDL_Event* e);         /* the chosen item, or 0 */

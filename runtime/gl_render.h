@@ -6,6 +6,9 @@
 
 int gl_render_init(int scale);                        /* 0 on failure (use the software path) */
 void gl_render_set_scale(int scale);
+#define GL_MAX_SCALE 12                               /* the highest 3D resolution offered */
+int gl_render_max_scale(void);                        /* ...that this GPU can hold */
+void gl_set_smooth(int on);                           /* smooth textures (filtered) instead of the DS's blocks */
 const Renderer3D* gl_renderer3d(void);
 void gl_compose(int a_on_top, int lcd_on);           /* at VBlank: 2D + 3D -> both screens */
 /* How to show the screens: canvas (DS pixels) placed in the window at

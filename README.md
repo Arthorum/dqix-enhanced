@@ -22,15 +22,18 @@ news, and friends to play with.
 - Saves in the DS's own format, so they work with save editors and tools.
 
 **Better than the DS**
-- **Enhanced mode**: the 3D drawn on your graphics card at up to 4x the DS's
-  resolution. Switch between Classic and Enhanced at any time (F5).
+- **Enhanced mode**: the 3D drawn on your graphics card at up to 12x the
+  DS's resolution, or Auto: as sharp as your monitor shows it, with smooth
+  textures. Switch between Classic and Enhanced at any time (F5).
 - **The DS Lite look** (on at first): a screen filter with the DS Lite's
   colours, pixel grid, motion blur and backlight levels, and the screens
   inside a photo of a real DS Lite (or a drawn one in six colours), even at
   actual size. F6 switches the screen filter, F7 the console.
 - Any window size, fullscreen, screens stacked or side by side, and sharp
   pixel scaling. F9 swaps the screens.
-- **Two windows**, one screen in each, for two monitors.
+- **Two windows**, one screen in each, for two monitors, each one
+  fullscreen if you like. In widescreen, the map can go in its own window
+  so the field is clean.
 - Keyboard, mouse (as the touch screen) and gamepads. Hold Tab to fast
   forward.
 - The game's own icon (the one the DS menu shows), made from your ROM.

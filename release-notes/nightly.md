@@ -2,6 +2,26 @@
 adventure; try this one in its own folder with a copy of your save.
 
 **New since stable v28**
+- **Sharper Enhanced mode**: the 3D resolution goes up to 12x, and the new
+  **Auto** setting (Graphics > 3D resolution, F4) renders at one and a half
+  times the size the game is shown at, so fullscreen on a big monitor is
+  never stretched and edges come out smooth. If you had 4x (the most
+  before), you now have Auto. Upscaling also keeps every pixel the same size
+  at any window size (it made some rows wider than others before).
+- **Smooth textures** (Graphics menu, on at first in Enhanced): the DS
+  shows every texel of a texture as a block, which at high resolutions
+  looks like a low-resolution picture on sharp 3D. Now textures are
+  smoothed, and cut-out shapes (leaves, grass, hair) get smooth edges.
+  Turn it off for the DS's blocky look at high resolution.
+- **Widescreen sky**: skies drawn as a backdrop behind everything (the top
+  of the Observatory) now fill the whole wide picture instead of only the
+  middle, with the game's bare backup sky showing at the sides.
+- **Widescreen with a clean field**: View > *Widescreen: the small screen in
+  its own window* puts the map (and the battle commands) in a second window,
+  so the field fills the first one with nothing over it.
+- **Two windows, both fullscreen**: the second window has its own bar with
+  *Fullscreen*, so each screen can fill its own monitor (F11 also works in
+  either window; move the mouse to the top to get the bar back).
 - **Screens your way** (View menu):
   - **Swap the screens** (F9): in stacked, side by side and top screen in
     the corner layouts, the two screens trade places.

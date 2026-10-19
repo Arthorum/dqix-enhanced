@@ -65,6 +65,9 @@ the same room.
 
 ## Done
 
+- [x] Enhanced: up to 12x and Auto resolution, sharp bilinear upscaling;
+      widescreen with the small screen in its own window; a Fullscreen bar
+      on the second window (v29-nightly4).
 - [x] Screens: swap them (F9), two windows for two monitors, widescreen
       battle commands in the top left corner, see-through small screen (O)
       (v29-nightly3).

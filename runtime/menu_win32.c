@@ -46,6 +46,11 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(res, MI_RES2, L"2x");
     item(res, MI_RES3, L"3x");
     item(res, MI_RES4, L"4x");
+    item(res, MI_RES6, L"6x");
+    item(res, MI_RES8, L"8x");
+    sep(res);
+    item(res, MI_RES_AUTO, L"&Auto: as sharp as your screen (up to 12x)");
+    item(gfx, MI_SMOOTH, L"&Smooth textures (Enhanced)");
 
     HMENU scr = sub(g_bar, L"&Screen");
     item(scr, MI_LCD, L"&DS Lite screen\tF6");
@@ -75,6 +80,7 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(view, MI_CORNER, L"Top screen in the &corner\tF2");
     item(view, MI_WIDE, L"&Widescreen (the field wider, top screen in the corner)\tF2");
     item(view, MI_TWO, L"Two wi&ndows (one screen in each, for two monitors)\tF2");
+    item(view, MI_POPOUT, L"Widescreen: the small screen in its own wi&ndow (a clean field)");
     sep(view);
     item(view, MI_SWAP, L"Swa&p the screens\tF9");
     HMENU op = sub(view, L"Widescreen: small screen &opacity\tO");
@@ -117,6 +123,7 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(modern, MI_ANALOG, L"Walk in any &direction with the left stick");
     item(modern, MI_WIDE, L"&Widescreen: the field wider, top screen in the corner");
     item(modern, MI_CORNER, L"Top screen in the &corner (the field as on the DS)");
+    item(modern, MI_POPOUT, L"Widescreen: the small screen in its own &window (a clean field)");
     sep(modern);
     item(modern, MI_MODERN_HELP, L"&What is this?");
     HMENU help = sub(g_bar, L"&Help");
@@ -135,6 +142,23 @@ void menu_show(int on) {
     if (g_hwnd) SetMenu(g_hwnd, on ? g_bar : NULL);
 }
 
+/* The second window (two windows): a bar with one command, fullscreen. */
+static HWND g_hwnd2;
+static HMENU g_bar2;
+void menu_init_second(SDL_Window* win) {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    g_hwnd2 = NULL;
+    if (!win || !SDL_GetWindowWMInfo(win, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return;
+    g_hwnd2 = info.info.win.window;
+    if (!g_bar2) { g_bar2 = CreateMenu(); item(g_bar2, MI_FULL2, L"&Fullscreen (F11)"); }
+    SetMenu(g_hwnd2, g_bar2);
+    SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
+}
+void menu_show_second(int on) {
+    if (g_hwnd2 && IsWindow(g_hwnd2)) SetMenu(g_hwnd2, on ? g_bar2 : NULL);
+}
+
 void menu_check(int id, int on) {
     if (g_bar) CheckMenuItem(g_bar, (UINT)id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
 }
@@ -144,7 +168,7 @@ void menu_enable(int id, int on) {
 }
 
 int menu_command(const SDL_Event* e) {
-    if (e->type != SDL_SYSWMEVENT || !g_bar) return 0;
+    if (e->type != SDL_SYSWMEVENT || (!g_bar && !g_bar2)) return 0;
     const SDL_SysWMmsg* m = e->syswm.msg;
     if (m->subsystem != SDL_SYSWM_WINDOWS || m->msg.win.msg != WM_COMMAND || HIWORD(m->msg.win.wParam) != 0) return 0;
     return LOWORD(m->msg.win.wParam);
@@ -498,6 +522,8 @@ char* ask_text(SDL_Window* win, const char* title, const char* prompt) { (void)w
 float display_mm_per_pixel(SDL_Window* win) { (void)win; return 0; }
 void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) { (void)win; (void)shell_names; (void)n_shells; }
 void menu_show(int on) { (void)on; }
+void menu_init_second(SDL_Window* win) { (void)win; }
+void menu_show_second(int on) { (void)on; }
 void menu_check(int id, int on) { (void)id; (void)on; }
 void menu_enable(int id, int on) { (void)id; (void)on; }
 int menu_command(const SDL_Event* e) { (void)e; return 0; }
