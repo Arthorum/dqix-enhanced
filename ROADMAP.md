@@ -65,6 +65,8 @@ the same room.
 
 ## Done
 
+- [x] Enhanced mode: the DS's rules for see-through effects, fog and soft
+      outlines (clouds and Yggdrasil's glow) (v29-nightly1).
 - [x] **v28 released as stable**: a real session across thousands of miles,
       both on apartment internet, through the relay (from v28-nightly2).
 - [x] The updater: a real update to v27 and a rollback, tested on Windows.

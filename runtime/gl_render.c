@@ -194,8 +194,9 @@ static const char* FS_POST =
     "    int step = 0x400 >> u_fogshift; float dens;\n"
     "    if (step <= 0) dens = u_fogtab[31];\n"
     "    else { int i = (z15 - u_fogoff) / step;\n"
-    "      if (z15 - u_fogoff < 0) dens = u_fogtab[0]; else if (i >= 31) dens = u_fogtab[31];\n"
-    "      else { float f = float((z15 - u_fogoff) - i * step) / float(step); dens = mix(u_fogtab[i], u_fogtab[i + 1], f); } }\n"
+    /* like the DS: step i blends table entries i-1 and i (entry -1 = entry 0) */
+    "      if (z15 - u_fogoff < 0) dens = u_fogtab[0]; else if (i >= 32) dens = u_fogtab[31];\n"
+    "      else { float f = float((z15 - u_fogoff) - i * step) / float(step); dens = mix(u_fogtab[max(i - 1, 0)], u_fogtab[i], f); } }\n"
     "    if (dens >= 127.0) dens = 128.0; dens /= 128.0;\n"
     "    float a = c.a; vec3 rgb = c.rgb;\n"
     "    if (u_fog_alpha_only == 0) rgb = mix(rgb, u_fogcol.rgb, dens);\n"
@@ -729,7 +730,7 @@ static void push_vertex(int* nv, const SVtx* v, float alpha, const Poly* p, floa
 #define ST_TRANS 0x40                    /* a translucent polygon is on it (its id: bits 0-4, of the DS's 0-5) */
 #define ST_MASKBIT 0x20                  /* marked by the latest shadow mask */
 #define ST_ID 0x1F
-typedef struct { int first, count; GLuint tex; int sampler; float tw, th; int translucent, depth_write, depth_eq, lines, pid, shadow; } Batch;
+typedef struct { int first, count; GLuint tex; int sampler; float tw, th; int translucent, depth_write, depth_eq, lines, pid, shadow, fog; } Batch;
 static Batch* g_batches; static int g_bcap;
 
 static void gl_vblank(void) {
@@ -791,6 +792,7 @@ static void gl_render_(const Frame3D* f) {
         b.depth_eq = (p->attr >> 14) & 1;
         b.lines = wire;
         b.pid = (p->attr >> 24) & 63;
+        b.fog = (p->attr >> 15) & 1;
         b.shadow = ((p->attr >> 4) & 3) == 3 ? (b.pid == 0 ? 1 : 2) : 0;   /* 1 the shadow's mask, 2 the shadow */
         b.first = nv;
         float a = wire ? 31.0f : (float)alpha;
@@ -809,7 +811,7 @@ static void gl_render_(const Frame3D* f) {
             Batch* l = &g_batches[nb - 1];
             if (l->tex == b.tex && l->sampler == b.sampler && l->translucent == b.translucent && l->depth_write == b.depth_write &&
                 l->depth_eq == b.depth_eq && l->lines == b.lines && l->first + l->count == b.first &&
-                (!b.translucent || l->pid == b.pid) && l->shadow == b.shadow && !b.shadow) { l->count += b.count; continue; }
+                (!b.translucent || (l->pid == b.pid && l->fog == b.fog)) && l->shadow == b.shadow && !b.shadow) { l->count += b.count; continue; }
         }
         if (nb == g_bcap) { g_bcap = g_bcap ? g_bcap * 2 : 1024; g_batches = realloc(g_batches, sizeof(Batch) * (size_t)g_bcap); }
         g_batches[nb++] = b;
@@ -896,7 +898,9 @@ static void gl_render_(const Frame3D* f) {
             continue;
         }
         GLint ref = ST_SOLID | ST_TRANS | (b->pid & ST_ID);
-        p_glColorMaski(1, 0, 1, 0, 0);                          /* translucent pixels keep the opaque polygon id */
+        /* translucent pixels keep the opaque polygon id; their fog flag is the pixel's AND the
+         * polygon's (the DS): a polygon with fog leaves it as it was, one without clears it */
+        p_glColorMaski(1, 0, b->fog ? 0 : 1, 0, 0);
         if (b->shadow == 2) {                                   /* the shadow: only on marked pixels; clears the marks */
             if (blend_on) { p_glEnablei(GL_BLEND, 0); p_glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE); p_glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX); }
             else p_glDisablei(GL_BLEND, 0);
