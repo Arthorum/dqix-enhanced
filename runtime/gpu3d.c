@@ -1598,7 +1598,10 @@ void gpu3d_vblank(void) {
         render_n = n_poly;
         new_list = 1;
         /* the widescreen list, if the whole frame was made with it */
-        w_render_side = w_frame_side > 0 && g_wide_side == w_frame_side ? w_frame_side : 0;
+        /* (a frame without polygons - the black of a scene change - keeps the
+         * current width: switching to 256 and back rebuilt the renderer's
+         * buffers, leaving one frame without 3D: the backdrop's magenta) */
+        w_render_side = w_frame_side > 0 && g_wide_side == w_frame_side ? w_frame_side : w_frame_side == -1 ? g_wide_side : 0;
         if (w_render_side) {
             u32 wo = 0, wt = n_wopaque;
             for (u32 i = 0; i < n_wpoly; i++) { HPoly* p = &wcur_pram[i]; if (p->translucent) wrender_list[wt++] = p; else wrender_list[wo++] = p; }

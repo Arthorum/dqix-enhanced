@@ -972,7 +972,7 @@ static void perf_write(FILE* f) {
 
 /* DQIX_WINSHOT_AT=frame[,frame...]: save the whole window as shown (tests) */
 static void window_shot_hook(int w, int h, int second) {
-    static char list[400]; static int init;
+    static char list[20000]; static int init;
     if (!init) { init = 1; const char* e = getenv("DQIX_WINSHOT_AT"); if (e) snprintf(list, sizeof list, ",%s,", e); }
     if (!list[0]) return;
     char key[32]; snprintf(key, sizeof key, ",%llu,", (unsigned long long)g_frame);
