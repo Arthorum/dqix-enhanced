@@ -63,6 +63,8 @@ the same room.
 
 ## Done
 
+- [x] **v30 released as stable** (from v30-nightly1): widescreen without
+      pop-in at the sides.
 - [x] Widescreen: people, doors, items and monsters at the sides no longer
       vanish (the DS's box test answers for the wide view) (v30-nightly1).
 - [x] **v29 released as stable** (from v29-nightly4): the sharper Enhanced
