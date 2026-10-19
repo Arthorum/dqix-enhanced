@@ -286,6 +286,8 @@ static const char* FS_SCREEN =
     "uniform vec2 u_topx, u_botx;     // each screen in the source texture: x offset, width (DS pixels)\n"
     "uniform float u_texw;            // the source texture's width (DS pixels)\n"
     "uniform int u_front;             // where the screens overlap: 1 = the bottom one in front\n"
+    "uniform float u_alpha;           // ...and how solid the one in front is (1 = hides the other)\n"
+    "uniform vec4 u_ctop, u_cbot;     // the console's upper and lower screen windows (the screens may be swapped)\n"
     "uniform int u_lcd, u_lcdcolor, u_grid;\n"
     "uniform float u_backlight;\n"
     "uniform int u_shell;\n"
@@ -382,7 +384,7 @@ static const char* FS_SCREEN =
     "    vec3 bg = vec3(0.055, 0.058, 0.065) * (1.0 - 0.35 * length((p - u_canvas * 0.5) / u_canvas));\n"
     "    vec3 col = bg;\n"
     "    float W = u_canvas.x;\n"
-    "    float hingeY = u_top.y + u_top.w + 40.0;\n"
+    "    float hingeY = u_ctop.y + u_ctop.w + 40.0;\n"
     "    // soft shadow of the console\n"
     "    float sh = sd_box(p, vec2(W * 0.5, u_canvas.y * 0.5 + 6.0), vec2(W * 0.5 - 4.0, u_canvas.y * 0.5 - 8.0), vec4(40.0));\n"
     "    col *= mix(0.55, 1.0, smoothstep(-4.0, 22.0, sh));\n"
@@ -404,8 +406,8 @@ static const char* FS_SCREEN =
     "    col += vec3(0.1, 0.5, 0.15) * exp(-max(led, 0.0) / 4.0) * 0.35;                                       // LED glow\n"
     "    // speakers beside the top screen\n"
     "    for (int s = 0; s < 2; s++) {\n"
-    "        float cx = s == 0 ? u_top.x * 0.5 : W - u_top.x * 0.5;\n"
-    "        float cy = u_top.y + u_top.w * 0.5;\n"
+    "        float cx = s == 0 ? u_ctop.x * 0.5 : W - u_ctop.x * 0.5;\n"
+    "        float cy = u_ctop.y + u_ctop.w * 0.5;\n"
     "        for (int r = 0; r < 5; r++) for (int c = 0; c < 3; c++) {\n"
     "            vec2 hc2 = vec2(cx + (float(c) - 1.0) * 9.0, cy + (float(r) - 2.0) * 9.0);\n"
     "            col = mix(col, u_lid * 0.25, cover(sd_circle(p, hc2, 2.4)));\n"
@@ -413,7 +415,7 @@ static const char* FS_SCREEN =
     "    }\n"
     "    // screen windows (black glass around each LCD)\n"
     "    for (int s = 0; s < 2; s++) {\n"
-    "        vec4 r = s == 0 ? u_top : u_bot;\n"
+    "        vec4 r = s == 0 ? u_ctop : u_cbot;\n"
     "        float m = s == 0 ? 13.0 : 9.0;\n"
     "        float dw = sd_box(p, r.xy + r.zw * 0.5, r.zw * 0.5 + m, vec4(s == 0 ? 7.0 : 4.0));\n"
     "        if (s == 1) {   // raised lip around the touch screen\n"
@@ -424,14 +426,14 @@ static const char* FS_SCREEN =
     "        col = mix(col, glass, cover(dw));\n"
     "    }\n"
     "    // D-pad\n"
-    "    vec2 dp = vec2(u_bot.x * 0.5, u_bot.y + 58.0);\n"
+    "    vec2 dp = vec2(u_cbot.x * 0.5, u_cbot.y + 58.0);\n"
     "    col = mix(col, u_base * 0.8, cover(min(sd_box(p, dp, vec2(45.0, 16.0), vec4(6.0)), sd_box(p, dp, vec2(16.0, 45.0), vec4(6.0)))) * 0.6);\n"
     "    float darm = min(sd_box(p, dp, vec2(42.0, 13.0), vec4(4.0)), sd_box(p, dp, vec2(13.0, 42.0), vec4(4.0)));\n"
     "    vec3 btn = shade_plastic(u_btn, darm, p, 0.5);\n"
     "    btn *= 1.0 - 0.18 * smoothstep(10.0, 0.0, length(p - dp));          // dimple in the middle\n"
     "    col = mix(col, btn, cover(darm));\n"
     "    // A B X Y\n"
-    "    vec2 ab = vec2(W - u_bot.x * 0.5, u_bot.y + 58.0);\n"
+    "    vec2 ab = vec2(W - u_cbot.x * 0.5, u_cbot.y + 58.0);\n"
     "    vec2 offs[4] = vec2[4](vec2(30.0, 0.0), vec2(0.0, 30.0), vec2(0.0, -30.0), vec2(-30.0, 0.0));\n"
     "    for (int k = 0; k < 4; k++) {\n"
     "        vec2 c = ab + offs[k];\n"
@@ -450,6 +452,16 @@ static const char* FS_SCREEN =
     "    return vec4(col, 1.0);\n"
     "}\n"
     "\n"
+    "vec3 shade(bool in_bot, vec2 p) {                 // one screen at canvas point p (gamma-encoded)\n"
+    "    vec4 r = in_bot ? u_bot : u_top;\n"
+    "    vec2 tx = in_bot ? u_botx : u_topx;\n"
+    "    u_lo = vec2(tx.x / u_texw, in_bot ? 0.0 : 0.5); u_hi = vec2((tx.x + tx.y) / u_texw, in_bot ? 0.5 : 1.0);\n"
+    "    g_duv = vec2(tx.y / (r.z * u_view.z * u_texw), 192.0 / (r.w * u_view.z * 384.0)); g_dp = tx.y / (r.z * u_view.z);\n"
+    "    vec2 sp = (p - r.xy) * vec2(tx.y, 192.0) / r.zw;          // DS pixels\n"
+    "    if (u_lcd == 0) { vec2 uv = vec2((sp.x + tx.x) / u_texw, (in_bot ? 0.5 : 1.0) - sp.y / 384.0); return textureGrad(u_src, keep_in(uv, g_duv), vec2(g_duv.x, 0.0), vec2(0.0, g_duv.y)).rgb; }   // exact\n"
+    "    return pow(clamp(screen(sp, in_bot ? 1 : 0), 0.0, 1.0), vec3(1.0 / 2.2));\n"
+    "}\n"
+    "\n"
     "void main() {\n"
     "    vec2 wp = vec2(gl_FragCoord.x, u_win.y - gl_FragCoord.y);\n"
     "    vec2 p = (wp - u_view.xy) / u_view.z;\n"
@@ -457,15 +469,11 @@ static const char* FS_SCREEN =
     "    vec3 outc;                                       // gamma-encoded result\n"
     "    bool in_top = all(greaterThanEqual(p, u_top.xy)) && all(lessThan(p, u_top.xy + u_top.zw));\n"
     "    bool in_bot = all(greaterThanEqual(p, u_bot.xy)) && all(lessThan(p, u_bot.xy + u_bot.zw));\n"
-    "    if (in_top && in_bot) { if (u_front != 0) in_top = false; else in_bot = false; }\n"
     "    if (in_top || in_bot) {\n"
-    "        vec4 r = in_top ? u_top : u_bot;\n"
-    "        vec2 tx = in_top ? u_topx : u_botx;\n"
-    "        u_lo = vec2(tx.x / u_texw, in_bot ? 0.0 : 0.5); u_hi = vec2((tx.x + tx.y) / u_texw, in_bot ? 0.5 : 1.0);\n"
-    "        g_duv = vec2(tx.y / (r.z * u_view.z * u_texw), 192.0 / (r.w * u_view.z * 384.0)); g_dp = tx.y / (r.z * u_view.z);\n"
-    "        vec2 sp = (p - r.xy) * vec2(tx.y, 192.0) / r.zw;          // DS pixels\n"
-    "        if (u_lcd == 0) { vec2 uv = vec2((sp.x + tx.x) / u_texw, (in_bot ? 0.5 : 1.0) - sp.y / 384.0); outc = textureGrad(u_src, keep_in(uv, g_duv), vec2(g_duv.x, 0.0), vec2(0.0, g_duv.y)).rgb; }   // exact\n"
-    "        else outc = pow(clamp(screen(sp, in_bot ? 1 : 0), 0.0, 1.0), vec3(1.0 / 2.2));\n"
+    "        bool both = in_top && in_bot;\n"
+    "        bool fb = both ? u_front != 0 : in_bot;      // the screen in front\n"
+    "        outc = shade(fb, p);\n"
+    "        if (both && u_alpha < 0.999) outc = mix(shade(!fb, p), outc, u_alpha);   // see-through: the other one behind it\n"
     "    } else if (u_shell != 0 && u_skinmode != 0) {\n"
     "        vec3 bg = vec3(0.055, 0.058, 0.065) * (1.0 - 0.35 * length((p - u_canvas * 0.5) / u_canvas));\n"
     "        vec4 c = texture(u_skintex, p * u_skinscale);\n"
@@ -1098,8 +1106,9 @@ static GLuint ghost_step(float keep) {
 void gl_present(const GlPresent* v) {
     int ghost = v->lcd && v->ghost;
     GLuint src = final_tex;
-    if (ghost) src = ghost_step(0.35f);
-    else ghost_cur = -1;
+    if (ghost && v->again && ghost_cur >= 0) src = ghost_tex[ghost_cur];   /* a second window: this frame's blur as it is */
+    else if (ghost) src = ghost_step(0.35f);
+    else if (!v->again) ghost_cur = -1;
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glViewport(0, 0, v->win_w, v->win_h);
     p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_BLEND);
@@ -1127,6 +1136,12 @@ void gl_present(const GlPresent* v) {
     p_glUniform2f(p_glGetUniformLocation(P, "u_botx"), v->botx[0], v->botx[1]);
     p_glUniform1f(p_glGetUniformLocation(P, "u_texw"), (float)(256 + 2 * g_wside));
     p_glUniform1i(p_glGetUniformLocation(P, "u_front"), v->front);
+    p_glUniform1f(p_glGetUniformLocation(P, "u_alpha"), v->alpha > 0 ? v->alpha : 1.0f);
+    {   /* the console's windows: upper and lower, wherever each screen is shown */
+        const float* up = v->top[1] <= v->bot[1] ? v->top : v->bot, *lo = up == v->top ? v->bot : v->top;
+        p_glUniform4f(p_glGetUniformLocation(P, "u_ctop"), up[0], up[1], up[2], up[3]);
+        p_glUniform4f(p_glGetUniformLocation(P, "u_cbot"), lo[0], lo[1], lo[2], lo[3]);
+    }
     p_glUniform1i(p_glGetUniformLocation(P, "u_lcd"), v->lcd);
     p_glUniform1i(p_glGetUniformLocation(P, "u_lcdcolor"), v->lcd_color);
     p_glUniform1i(p_glGetUniformLocation(P, "u_grid"), v->grid);

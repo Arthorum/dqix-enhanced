@@ -16,6 +16,8 @@ typedef struct {
     float top[4], bot[4];                             /* screen rects on the canvas: x, y, w, h */
     float topx[2], botx[2];                           /* each screen in the composed picture: x offset, width (DS pixels) */
     int front;                                        /* screens overlapping: 1 = the bottom one in front */
+    float alpha;                                      /* ...how solid the one in front is (0 or 1 = solid) */
+    int again;                                        /* another window, same frame: don't advance the motion blur */
     int lcd, lcd_color, grid, ghost;                  /* DS Lite screen filter and its parts */
     float backlight;                                  /* 0..1 */
     int shell;                                        /* draw the console around the screens */

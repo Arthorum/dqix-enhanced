@@ -74,6 +74,14 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(view, MI_SIDE, L"&Side by side\tF2");
     item(view, MI_CORNER, L"Top screen in the &corner\tF2");
     item(view, MI_WIDE, L"&Widescreen (the field wider, top screen in the corner)\tF2");
+    item(view, MI_TWO, L"Two wi&ndows (one screen in each, for two monitors)\tF2");
+    sep(view);
+    item(view, MI_SWAP, L"Swa&p the screens\tF9");
+    HMENU op = sub(view, L"Widescreen: small screen &opacity\tO");
+    item(op, MI_OPACITY1, L"100% (solid)");
+    item(op, MI_OPACITY1 + 1, L"75%");
+    item(op, MI_OPACITY1 + 2, L"50%");
+    item(op, MI_OPACITY1 + 3, L"25%");
     sep(view);
     HMENU size = sub(view, L"&Window size\tF3");
     item(size, MI_SIZE1, L"1x");

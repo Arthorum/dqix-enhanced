@@ -6,7 +6,8 @@
  *   L <- Q                  R <- W      START <- Enter         SELECT <- Right Shift / Backspace
  *   touch screen <- left mouse button on the bottom screen
  *   Tab (hold) = fast forward     F11 or Alt+Enter = fullscreen (mouse at the top edge shows the menu bar)
- *   F2 = screens side by side / stacked
+ *   F2 = layout: stacked, side by side, top screen in the corner, widescreen (two windows)
+ *   F9 = swap the screens       O = widescreen: the small screen see-through
  *   F3 = window size 1x..4x       F4 = 3D resolution 1x..4x (Enhanced)  F5 = Classic / Enhanced
  *   F6 = DS Lite screen filter    F7 = DS Lite console around the screens   P = pause
  *   F8 = actual size (the screens as big as a real DS Lite's)
@@ -49,6 +50,12 @@ static int g_side_by_side, g_corner, g_scale = 2, g_fullscreen;   /* g_corner: t
 static int g_wide;                                                /* widescreen: the 3D screen wider than the DS's, the other small in its corner */
 static float g_wide_mix = 1.0f;                                   /* widescreen: 1 = the field wide, 0 = beside the small screen (2D under its corner) */
 static int g_small_blank;                                         /* widescreen: the small screen shows nothing (all black): not drawn */
+static int g_swap;                                                /* the screens trade places (F9) */
+static int g_two;                                                 /* two windows, one screen in each (two monitors) */
+static SDL_Window* g_win2;                                        /* ...the second one (the top screen, or the bottom one when swapped) */
+static int g_win2_full, g_win2_rect[4];                           /* ...fullscreen; where it was as a window (w = 0: not yet) */
+static int g_small_opacity = 100;                                 /* widescreen: how solid the small screen over the field is (O), % */
+static float g_small_alpha = 1.0f;                                /* ...as shown now (solid while the mouse is on it) */
 static uint64_t g_next_frame, g_perf_freq;
 static int g_fast;
 static uint32_t g_fps_frames; static uint64_t g_fps_t0;
@@ -194,11 +201,13 @@ static int wide_side_target(void) {
     return side < 0 ? 0 : side > 128 ? 128 : side;
 }
 
-static void canvas_layout(GlPresent* v, int ww, int wh) {
+/* second: the layout of the second window (two windows) */
+static void canvas_layout_for(GlPresent* v, int ww, int wh, int second) {
     memset(v, 0, sizeof *v);
-    int wide = g_gl && g_wide && !g_side_by_side;
-    int corner = g_gl && g_corner && !g_side_by_side && !wide;
-    int shell = g_gl && g_opt.shell && !g_side_by_side && !corner && !wide;
+    int two = g_gl && g_two && !g_side_by_side;
+    int wide = g_gl && g_wide && !g_side_by_side && !two;
+    int corner = g_gl && g_corner && !g_side_by_side && !wide && !two;
+    int shell = g_gl && g_opt.shell && !g_side_by_side && !corner && !wide && !two;
     int side = 0, which = -1;
     if (g_gl) which = gl_wide_shown(&side);                       /* how the last picture was composed */
     v->topx[0] = v->botx[0] = (float)side; v->topx[1] = v->botx[1] = 256;
@@ -221,10 +230,13 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
         big[0] = cx0 + (wx0 - cx0) * t; big[2] = cww + (ww - cww) * t;
         bigx[0] = ctx0 + (wtx0 - ctx0) * t; bigx[1] = big[2];
         big[1] = 0; big[3] = 192;
-        if (which == 0) { small[2] = 128; small[3] = 96; small[0] = 2; small[1] = 192 - 96 - 2; }
+        if (which == 0) { small[2] = 128; small[3] = 96; small[0] = small[1] = 2; }   /* battles: top left, over the sky */
         else { small[0] = small[1] = 2 * t; small[2] = 256.0f / 3; small[3] = 64; }
         if (g_small_blank && t > 0.99f) small[2] = small[3] = 0;   /* black (battle intros, fades): leave the field whole */
         v->front = which == 0;                                   /* the small one in front */
+        v->alpha = 1.0f + (g_small_alpha - 1.0f) * t;            /* see-through (O) while it is over the field */
+    } else if (two) {
+        v->cw = 256; v->ch = 192;                                /* one screen; the other is in the other window */
     } else if (corner) {
         /* Modern: the bottom screen (the field) as big as the window allows, the
          * top screen (map, party) a third of its size in the top left corner:
@@ -252,6 +264,13 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
     }
     if (!wide) { v->top[2] = v->bot[2] = 256; v->top[3] = v->bot[3] = 192; }
     if (corner) { v->top[2] = 256.0f / 3; v->top[3] = 64; }
+    if (two) {                                                   /* this window's screen: the bottom one in the first, unless swapped */
+        float* off = (second ? !g_swap : g_swap) ? v->bot : v->top;
+        off[0] = off[1] = off[2] = off[3] = 0;
+    } else if (g_swap && !wide) {                                /* F9: the screens trade places */
+        for (int i = 0; i < 4; i++) { float t = v->top[i]; v->top[i] = v->bot[i]; v->bot[i] = t; }
+        for (int i = 0; i < 2; i++) { float t = v->topx[i]; v->topx[i] = v->botx[i]; v->botx[i] = t; }
+    }
     v->win_w = ww; v->win_h = wh;
     float sc = fminf((float)ww / v->cw, (float)wh / v->ch);
     if (g_opt.actual && g_actual_sc > 0) { if (g_actual_sc < sc) sc = g_actual_sc; }   /* real size (smaller if it doesn't fit) */
@@ -267,6 +286,7 @@ static void canvas_layout(GlPresent* v, int ww, int wh) {
     float* dst[4] = { v->lid, v->base, v->btn, v->hinge };
     for (int i = 0; i < 4; i++) for (int k = 0; k < 3; k++) dst[i][k] = (float)((cols[i] >> (16 - 8 * k)) & 255) / 255.0f;
 }
+static void canvas_layout(GlPresent* v, int ww, int wh) { canvas_layout_for(v, ww, wh, 0); }
 
 /* ---------------------------------------------------------------- settings.ini
  * Remembers the player's choices between launches (next to the game). */
@@ -337,7 +357,11 @@ static void settings_load(void) {
         if (!strcmp(key, "mode")) g_classic = strcmp(val, "enhanced") != 0;
         else if (!strcmp(key, "resolution_3d")) { int v = atoi(val); if (v >= 1 && v <= 4) g_scale3d = v; }
         else if (!strcmp(key, "window_scale")) { int v = atoi(val); if (v >= 1 && v <= 8) g_scale = v; }
-        else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); g_wide = !strcmp(val, "wide"); }
+        else if (!strcmp(key, "layout")) { g_side_by_side = !strcmp(val, "side_by_side"); g_corner = !strcmp(val, "corner"); g_wide = !strcmp(val, "wide"); g_two = !strcmp(val, "two_windows"); }
+        else if (!strcmp(key, "swap_screens")) g_swap = atoi(val) != 0;
+        else if (!strcmp(key, "small_screen_opacity")) { int v = atoi(val); if (v >= 10 && v <= 100) g_small_opacity = v; }
+        else if (!strcmp(key, "second_window")) { int r[4]; if (sscanf(val, "%d,%d,%d,%d", &r[0], &r[1], &r[2], &r[3]) == 4 && r[2] > 0 && r[3] > 0) memcpy(g_win2_rect, r, sizeof r); }
+        else if (!strcmp(key, "second_window_fullscreen")) g_win2_full = atoi(val) != 0;
         else if (!strcmp(key, "walk_any_direction")) g_analog_walk = atoi(val) != 0;   /* (the older analog_walk, off by default then, is ignored) */
         else if (!strcmp(key, "fullscreen")) g_fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "dslite_filter")) g_opt.lcd = atoi(val) != 0;
@@ -381,8 +405,16 @@ static void settings_save(void) {
     fprintf(f, "resolution_3d = %d\n", g_scale3d);
     fprintf(f, "# window size: 1 to 8 times the DS screens (F3)\n");
     fprintf(f, "window_scale = %d\n", g_scale);
-    fprintf(f, "# stacked, side_by_side, corner (the top screen small beside the field) or wide (widescreen; F2)\n");
-    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : g_wide ? "wide" : g_corner ? "corner" : "stacked");
+    fprintf(f, "# stacked, side_by_side, corner (the top screen small beside the field), wide (widescreen)\n");
+    fprintf(f, "# or two_windows (one screen in each, for two monitors); F2\n");
+    fprintf(f, "layout = %s\n", g_side_by_side ? "side_by_side" : g_wide ? "wide" : g_corner ? "corner" : g_two ? "two_windows" : "stacked");
+    fprintf(f, "# the screens trade places (F9): 0 or 1\n");
+    fprintf(f, "swap_screens = %d\n", g_swap);
+    fprintf(f, "# widescreen: how solid the small screen over the field is, in %% (O): 100, 75, 50 or 25\n");
+    fprintf(f, "small_screen_opacity = %d\n", g_small_opacity);
+    fprintf(f, "# two windows: where the second one goes (x,y,width,height) and whether it is fullscreen\n");
+    fprintf(f, "second_window = %d,%d,%d,%d\n", g_win2_rect[0], g_win2_rect[1], g_win2_rect[2], g_win2_rect[3]);
+    fprintf(f, "second_window_fullscreen = %d\n", g_win2_full);
     fprintf(f, "# Modern: the left stick walks in any direction, like the stylus (0 or 1)\n");
     fprintf(f, "walk_any_direction = %d\n", g_analog_walk);
     fprintf(f, "# 0 or 1 (F11)\n");
@@ -506,12 +538,12 @@ static int try_gl(void) {
  * the cartridge (in the ROM's banner). On Windows, dqix.exe normally carries
  * it already (made from the ROM by the build), and Windows takes it from there
  * at every size; this is for other systems and builds without it. */
-static void window_icon(void) {
+static void window_icon_for(SDL_Window* win) {
 #ifdef _WIN32
     if (FindResourceA(NULL, MAKEINTRESOURCEA(1), (LPCSTR)RT_GROUP_ICON)) return;
 #endif
     extern size_t g_rom_size;
-    if (!g_rom || g_rom_size < 0x200 || !g_win) return;
+    if (!g_rom || g_rom_size < 0x200 || !win) return;
     uint32_t off; memcpy(&off, g_rom + 0x68, 4);
     if (off == 0 || off + 0x240 > g_rom_size) return;
     const uint8_t* bits = g_rom + off + 0x20;                  /* 4x4 tiles of 8x8, 4 bits a pixel */
@@ -530,7 +562,63 @@ static void window_icon(void) {
             px[y * N + x] = pal[(sx & 1) ? v >> 4 : v & 15];
         }
     SDL_Surface* s = SDL_CreateRGBSurfaceWithFormatFrom(px, N, N, 32, N * 4, SDL_PIXELFORMAT_ARGB8888);
-    if (s) { SDL_SetWindowIcon(g_win, s); SDL_FreeSurface(s); }
+    if (s) { SDL_SetWindowIcon(win, s); SDL_FreeSurface(s); }
+}
+static void window_icon(void) { window_icon_for(g_win); }
+
+/* ---------------------------------------------------------------- two windows
+ * One screen in each, for two monitors: the first window (with the menu bar)
+ * shows the bottom screen, the second the top one; F9 swaps them. The second
+ * window shares the first one's OpenGL context and opens on another monitor
+ * if there is one (then where it was left). */
+static void second_window_title(void) {
+    if (g_win2) SDL_SetWindowTitle(g_win2, g_swap ? "Dragon Quest IX - bottom screen" : "Dragon Quest IX - top screen");
+}
+static void second_window_keep_rect(void) {                     /* remember where it is (as a window) */
+    if (!g_win2 || g_win2_full) return;
+    SDL_GetWindowPosition(g_win2, &g_win2_rect[0], &g_win2_rect[1]);
+    SDL_GetWindowSize(g_win2, &g_win2_rect[2], &g_win2_rect[3]);
+}
+static void second_window_sync(void) {
+    int want = g_gl && g_two && !g_side_by_side && g_win && !g_headless;
+    if (!want && g_win2) {
+        second_window_keep_rect();
+        SDL_GL_MakeCurrent(g_win, g_glctx);
+        SDL_DestroyWindow(g_win2); g_win2 = NULL;
+        return;
+    }
+    if (!want || g_win2) { second_window_title(); return; }
+    int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED, w = 256 * g_scale, h = 192 * g_scale, placed = 0;
+    if (g_win2_rect[2] > 0) {                                    /* where it was, if that is still on a monitor */
+        for (int d = 0; d < SDL_GetNumVideoDisplays(); d++) {
+            SDL_Rect r;
+            if (SDL_GetDisplayBounds(d, &r) == 0 && g_win2_rect[0] + 40 > r.x && g_win2_rect[0] + 40 < r.x + r.w && g_win2_rect[1] + 10 >= r.y && g_win2_rect[1] + 10 < r.y + r.h) placed = 1;
+        }
+        if (placed) { x = g_win2_rect[0]; y = g_win2_rect[1]; w = g_win2_rect[2]; h = g_win2_rect[3]; }
+    }
+    if (!placed && SDL_GetNumVideoDisplays() > 1) {              /* another monitor than the game's */
+        int d = SDL_GetWindowDisplayIndex(g_win) == 0 ? 1 : 0;
+        x = y = SDL_WINDOWPOS_CENTERED_DISPLAY(d); placed = 1;
+    }
+    if (!placed) {                                                /* one monitor: beside the game's window */
+        int mx, my, mw, mh; SDL_GetWindowPosition(g_win, &mx, &my); SDL_GetWindowSize(g_win, &mw, &mh);
+        SDL_Rect r;
+        if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(g_win), &r) == 0 && mx + mw + 16 + w <= r.x + r.w) { x = mx + mw + 16; y = my; }
+    }
+    g_win2 = SDL_CreateWindow("Dragon Quest IX", x, y, w, h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!g_win2) { fprintf(stderr, "second window: %s\n", SDL_GetError()); return; }
+    window_icon_for(g_win2);
+    second_window_title();
+    if (SDL_GL_MakeCurrent(g_win2, g_glctx) == 0) SDL_GL_SetSwapInterval(0);
+    SDL_GL_MakeCurrent(g_win, g_glctx);
+    if (g_win2_full) SDL_SetWindowFullscreen(g_win2, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_RaiseWindow(g_win);                                      /* the keyboard stays with the game's window */
+}
+static void second_window_fullscreen(void) {
+    if (!g_win2) return;
+    if (!g_win2_full) second_window_keep_rect();
+    g_win2_full = !g_win2_full;
+    SDL_SetWindowFullscreen(g_win2, g_win2_full ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
 static void lobby_hook(void);
@@ -587,6 +675,7 @@ void frontend_init(int argc, char** argv) {
         menu_sync();
         layout_window();
         if (g_fullscreen) { menu_show(0); SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP); }
+        second_window_sync();
         atexit(settings_save);
         session_lobby_hook = lobby_hook;
         air_idle_hook = idle_pump;
@@ -649,12 +738,13 @@ static uint16_t pad_bits(void) {
 /* Window pixel -> bottom-screen pixel; returns 0 when outside it, unless
  * clamp is set (a drag that started on the screen stays on its edge, as a
  * stylus would at the rim). */
-static int to_touch(int wx, int wy, int* tx, int* ty, int clamp) {
+static int to_touch_in(SDL_Window* win, int wx, int wy, int* tx, int* ty, int clamp) {
     float lx, ly;
     GlPresent v;
+    if (!win || (win != g_win && win != g_win2)) win = g_win;
     if (g_gl) {                                                  /* same layout as gl_present() */
-        int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
-        canvas_layout(&v, ww, wh);
+        int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
+        canvas_layout_for(&v, ww, wh, win == g_win2);
         lx = ((float)wx + 0.5f - v.ox) / v.sc; ly = ((float)wy + 0.5f - v.oy) / v.sc;
     } else { canvas_layout(&v, 1, 1); SDL_RenderWindowToLogical(g_ren, wx, wy, &lx, &ly); }
     if (v.front == 0 && v.top[2] < 256 && lx >= v.top[0] && lx < v.top[0] + v.top[2] && ly >= v.top[1] && ly < v.top[1] + v.top[3])
@@ -668,6 +758,7 @@ static int to_touch(int wx, int wy, int* tx, int* ty, int clamp) {
     *tx = x; *ty = y;
     return 1;
 }
+static int to_touch(int wx, int wy, int* tx, int* ty, int clamp) { return to_touch_in(g_win, wx, wy, tx, ty, clamp); }
 
 static int g_shot_req;
 static void save_bmp_screens(const uint32_t scr[2][256 * 192], const char* path) {
@@ -773,14 +864,14 @@ static void perf_write(FILE* f) {
 }
 
 /* DQIX_WINSHOT_AT=frame[,frame...]: save the whole window as shown (tests) */
-static void window_shot_hook(int w, int h) {
+static void window_shot_hook(int w, int h, int second) {
     static char list[400]; static int init;
     if (!init) { init = 1; const char* e = getenv("DQIX_WINSHOT_AT"); if (e) snprintf(list, sizeof list, ",%s,", e); }
     if (!list[0]) return;
     char key[32]; snprintf(key, sizeof key, ",%llu,", (unsigned long long)g_frame);
     if (!strstr(list, key)) return;
     uint8_t* rgb = gl_read_window(w, h);
-    char path[64]; snprintf(path, sizeof path, "win%06llu.ppm", (unsigned long long)g_frame);
+    char path[64]; snprintf(path, sizeof path, second ? "win%06llu_2.ppm" : "win%06llu.ppm", (unsigned long long)g_frame);
     FILE* f = fopen(path, "wb");
     if (f) { fprintf(f, "P6\n%d %d\n255\n", w, h); fwrite(rgb, 1, (size_t)w * h * 3, f); fclose(f); }
     free(rgb);
@@ -830,11 +921,32 @@ static void present_gl(void) {
     wide_update((pow >> 15) & 1);
     gl_dump_hook();
     test_hooks();
+    {   /* widescreen: the small screen see-through (O), but solid while the mouse is on it */
+        float target = (float)g_small_opacity / 100.0f;
+        int ww, wh, mx, my; SDL_GetWindowSize(g_win, &ww, &wh);
+        if (target < 1.0f && SDL_GetMouseFocus() == g_win) {
+            GlPresent m; canvas_layout(&m, ww, wh);
+            SDL_GetMouseState(&mx, &my);
+            float lx = ((float)mx + 0.5f - m.ox) / m.sc, ly = ((float)my + 0.5f - m.oy) / m.sc;
+            const float* r = m.front ? m.bot : m.top;
+            if (lx >= r[0] && lx < r[0] + r[2] && ly >= r[1] && ly < r[1] + r[3]) target = 1.0f;
+        }
+        g_small_alpha += (target - g_small_alpha) * 0.2f;
+        if (fabsf(target - g_small_alpha) < 0.01f) g_small_alpha = target;
+    }
     int w, h; SDL_GL_GetDrawableSize(g_win, &w, &h);
     GlPresent v; canvas_layout(&v, w, h);
     gl_present(&v);
-    window_shot_hook(w, h);
+    window_shot_hook(w, h, 0);
     SDL_GL_SwapWindow(g_win);
+    if (g_win2 && SDL_GL_MakeCurrent(g_win2, g_glctx) == 0) {   /* two windows: the other screen */
+        int w2, h2; SDL_GL_GetDrawableSize(g_win2, &w2, &h2);
+        GlPresent v2; canvas_layout_for(&v2, w2, h2, 1); v2.again = 1;
+        gl_present(&v2);
+        window_shot_hook(w2, h2, 1);
+        SDL_GL_SwapWindow(g_win2);
+        SDL_GL_MakeCurrent(g_win, g_glctx);
+    }
 }
 
 static void present(void) {
@@ -851,12 +963,13 @@ static void present(void) {
     }
     SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255);
     SDL_RenderClear(g_ren);
-    if (g_side_by_side) {
+    {   /* each screen where the layout puts it (stacked or side by side, maybe swapped) */
+        GlPresent v; canvas_layout(&v, 1, 1);
         SDL_Rect top = { 0, 0, 256, 192 }, bot = { 0, 192, 256, 192 };
-        SDL_Rect dt = { 0, 0, 256, 192 }, db = { 256, 0, 256, 192 };
+        SDL_Rect dt = { (int)v.top[0], (int)v.top[1], 256, 192 }, db = { (int)v.bot[0], (int)v.bot[1], 256, 192 };
         SDL_RenderCopy(g_ren, g_tex, &top, &dt);
         SDL_RenderCopy(g_ren, g_tex, &bot, &db);
-    } else SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
+    }
     test_hooks();
     SDL_RenderPresent(g_ren);
 }
@@ -892,7 +1005,8 @@ static void menu_sync(void) {
         menu_enable(MI_SES_HOST, !in); menu_enable(MI_SES_JOIN, !in);
         menu_enable(MI_NET, !in);                            /* a session uses the built-in Wi-Fi only (the PCs must agree) */
     }
-    int stacked = !g_side_by_side && !((g_corner || g_wide) && g_gl);
+    int stacked = !g_side_by_side && !((g_corner || g_wide || g_two) && g_gl);
+    int wide = g_wide && g_gl && !g_side_by_side;
     menu_check(MI_PAUSE, g_paused);
     menu_check(MI_UPDATE_AUTO, g_update_auto);
     menu_check(MI_TURBO, g_turbo);
@@ -917,6 +1031,9 @@ static void menu_sync(void) {
     menu_check(MI_STACKED, stacked); menu_check(MI_SIDE, g_side_by_side);
     menu_check(MI_CORNER, g_corner && !g_wide && !g_side_by_side); menu_enable(MI_CORNER, g_gl);
     menu_check(MI_WIDE, g_wide && !g_side_by_side); menu_enable(MI_WIDE, g_gl);
+    menu_check(MI_TWO, g_two && !g_side_by_side && g_gl); menu_enable(MI_TWO, g_gl);
+    menu_check(MI_SWAP, g_swap && !wide); menu_enable(MI_SWAP, !wide);
+    for (int i = 0; i < 4; i++) { menu_check(MI_OPACITY1 + i, g_small_opacity == 100 - 25 * i); menu_enable(MI_OPACITY1 + i, g_gl); }
     menu_check(MI_ANALOG, g_analog_walk);
     for (int i = 0; i < 4; i++) { menu_check(MI_SIZE1 + i, g_scale == i + 1); menu_enable(MI_SIZE1 + i, !g_opt.actual); }
     menu_check(MI_INTEGER, g_opt.integer); menu_enable(MI_INTEGER, !g_opt.actual);
@@ -936,6 +1053,7 @@ static const char* CONTROLS_TEXT =
     "Touch screen   left mouse button on the bottom screen\n\n"
     "Tab (hold) fast forward   P pause   F5 Classic / Enhanced\n"
     "F6 DS Lite screen   F7 DS Lite console   F8 actual size   F2 layout   F3 window size\n"
+    "F9 swap the screens   O widescreen: the small screen see-through (100/75/50/25%)\n"
     "F4 3D resolution   F11 or Alt+Enter fullscreen (mouse at the top: menu bar)\n"
     "F12 screenshot   F10 bug report (with a description)   Esc leave fullscreen / quit\n"
     "In fullscreen, double-click outside the touch screen to go back to the window.";
@@ -1451,9 +1569,12 @@ static void do_action(int id) {
     case MI_BL1: case MI_BL2: case MI_BL3: case MI_BL4: g_opt.backlight = id - MI_BL1 + 1; break;
     case MI_SHELL: if (g_gl && !g_side_by_side) { g_opt.shell = !g_opt.shell; relayout = 1; } break;
     case MI_GAP: if (g_gl) { g_opt.gap = !g_opt.gap; relayout = 1; } break;
-    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; g_corner = g_wide = 0; relayout = 1; break;
-    case MI_CORNER: if (g_gl) { g_corner = !(g_corner && !g_wide && !g_side_by_side); g_wide = g_side_by_side = 0; relayout = 1; } break;
-    case MI_WIDE: if (g_gl) { g_wide = !(g_wide && !g_side_by_side); g_corner = g_side_by_side = 0; relayout = 1; } break;
+    case MI_STACKED: case MI_SIDE: g_side_by_side = id == MI_SIDE; g_corner = g_wide = g_two = 0; relayout = 1; break;
+    case MI_CORNER: if (g_gl) { g_corner = !(g_corner && !g_wide && !g_side_by_side); g_wide = g_side_by_side = g_two = 0; relayout = 1; } break;
+    case MI_WIDE: if (g_gl) { g_wide = !(g_wide && !g_side_by_side); g_corner = g_side_by_side = g_two = 0; relayout = 1; } break;
+    case MI_TWO: if (g_gl) { g_two = !(g_two && !g_side_by_side); g_corner = g_wide = g_side_by_side = 0; relayout = 1; } break;
+    case MI_SWAP: if (!(g_wide && g_gl && !g_side_by_side)) { g_swap = !g_swap; relayout = 1; } break;
+    case MI_OPACITY1: case MI_OPACITY1 + 1: case MI_OPACITY1 + 2: case MI_OPACITY1 + 3: g_small_opacity = 100 - 25 * (id - MI_OPACITY1); break;
     case MI_ANALOG: g_analog_walk = !g_analog_walk; break;
     case MI_MODERN_HELP:
         info_box(SDL_MESSAGEBOX_INFORMATION, "Modern",
@@ -1466,7 +1587,10 @@ static void do_action(int id) {
             "and the touch screen's buttons stay in the middle, as on the DS. The game only expects to show what fits on the DS's screen, so "
             "now and then something at the far edges may appear a moment late. Enhanced mode only (the 3D on the graphics card).\n\n"
             "Top screen in the corner: the same layout with the field as on the DS (4:3).\n\n"
-            "Both are also under View; F2 goes through the layouts.", g_win);
+            "Two windows: one screen in each, to put them on two monitors (each can be fullscreen: F11 in that window).\n\n"
+            "F9 swaps the screens (in every layout but widescreen). In widescreen, O makes the small screen see-through "
+            "(it turns solid while the mouse is on it).\n\n"
+            "All are also under View; F2 goes through the layouts.", g_win);
         break;
     case MI_SIZE1: case MI_SIZE2: case MI_SIZE3: case MI_SIZE4: g_scale = id - MI_SIZE1 + 1; relayout = 1; break;
     case MI_INTEGER: g_opt.integer = !g_opt.integer; break;
@@ -1501,7 +1625,7 @@ static void do_action(int id) {
         if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) { g_opt.shell_color = id - MI_SHELLC0; g_color_chosen = 1; relayout = 1; }
         else return;
     }
-    if (relayout && g_win) layout_window();
+    if (relayout && g_win) { layout_window(); second_window_sync(); }
     menu_sync();
     if (id != MI_SHOT && id != MI_REPORT && id != MI_SEND_REPORT && id != MI_PAUSE && id != MI_TURBO) settings_save();
 }
@@ -1516,9 +1640,15 @@ static void handle_events(void) {
         case SDL_KEYDOWN: {
             if (e.key.repeat || !g_win) break;
             SDL_Scancode k = e.key.keysym.scancode;
-            if (k == SDL_SCANCODE_ESCAPE) { if (g_fullscreen) do_action(MI_FULL); else exit(0); break; }
-            if (k == SDL_SCANCODE_F11 || (k == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) { do_action(MI_FULL); break; }
-            if (k == SDL_SCANCODE_F2) do_action(g_side_by_side ? (g_gl ? MI_CORNER : MI_STACKED) : (g_corner && g_gl) ? MI_WIDE : (g_wide && g_gl) ? MI_STACKED : MI_SIDE);   /* stacked -> side by side -> corner -> widescreen */
+            int in2 = g_win2 && e.key.windowID == SDL_GetWindowID(g_win2);   /* typed in the second window */
+            if (k == SDL_SCANCODE_ESCAPE) { if (in2 && g_win2_full) second_window_fullscreen(); else if (g_fullscreen) do_action(MI_FULL); else exit(0); break; }
+            if (k == SDL_SCANCODE_F11 || (k == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) { if (in2) { second_window_fullscreen(); settings_save(); } else do_action(MI_FULL); break; }
+            if (k == SDL_SCANCODE_F2) {                           /* stacked -> side by side -> corner -> widescreen (-> two windows, with two monitors) */
+                int two_ok = SDL_GetNumVideoDisplays() > 1;
+                do_action(g_side_by_side ? (g_gl ? MI_CORNER : MI_STACKED) : (g_corner && g_gl) ? MI_WIDE : (g_wide && g_gl) ? (two_ok ? MI_TWO : MI_STACKED) : (g_two && g_gl) ? MI_STACKED : MI_SIDE);
+            }
+            if (k == SDL_SCANCODE_F9) do_action(MI_SWAP);
+            if (k == SDL_SCANCODE_O) do_action(MI_OPACITY1 + ((100 - g_small_opacity) / 25 + 1) % 4);
             if (k == SDL_SCANCODE_F3) do_action(MI_SIZE1 + g_scale % 4);
             if (k == SDL_SCANCODE_F4 && g_gl && !g_classic) do_action(MI_RES1 + g_scale3d % 4);
             if (k == SDL_SCANCODE_F5 && g_gl) do_action(g_classic ? MI_ENHANCED : MI_CLASSIC);
@@ -1534,19 +1664,29 @@ static void handle_events(void) {
             /* fullscreen: a double click outside the touch screen (the top screen, the
              * console, the edges) goes back to the window; on the touch screen
              * clicks are the stylus */
-            if (g_fullscreen && e.button.button == SDL_BUTTON_LEFT && e.button.clicks == 2) {
-                int tx, ty;
-                if (!to_touch(e.button.x, e.button.y, &tx, &ty, 0)) do_action(MI_FULL);
+            if (e.button.button == SDL_BUTTON_LEFT && e.button.clicks == 2) {
+                int tx, ty, in2 = g_win2 && e.button.windowID == SDL_GetWindowID(g_win2);
+                if (in2 && g_win2_full && !to_touch_in(g_win2, e.button.x, e.button.y, &tx, &ty, 0)) { second_window_fullscreen(); settings_save(); }
+                else if (!in2 && g_fullscreen && !to_touch(e.button.x, e.button.y, &tx, &ty, 0)) do_action(MI_FULL);
             }
             break;
         case SDL_MOUSEMOTION:
             /* fullscreen: the menu bar appears while the mouse is at the top edge */
-            if (g_fullscreen) {
+            if (g_fullscreen && e.motion.windowID == SDL_GetWindowID(g_win)) {
                 if (!g_menu_peek && e.motion.y <= 1) { g_menu_peek = 1; menu_show(1); }
                 else if (g_menu_peek && e.motion.y > 80) { g_menu_peek = 0; menu_show(0); }
             }
             break;
         case SDL_WINDOWEVENT:
+            if (e.window.event == SDL_WINDOWEVENT_CLOSE) {           /* two windows: closing the second one goes back to one */
+                if (g_win2 && e.window.windowID == SDL_GetWindowID(g_win2)) do_action(MI_STACKED);
+                else exit(0);
+                break;
+            }
+            if (g_win2 && e.window.windowID == SDL_GetWindowID(g_win2)) {
+                if ((e.window.event == SDL_WINDOWEVENT_MOVED || e.window.event == SDL_WINDOWEVENT_RESIZED) && !g_win2_full) second_window_keep_rect();
+                break;
+            }
             if (e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED && g_opt.actual) { update_actual(); if (!g_fullscreen) layout_window(); }
             break;
         case SDL_CONTROLLERDEVICEADDED:
@@ -1580,7 +1720,7 @@ void frontend_frame(void) {
         int tx, ty;
         static int dragging;                                  /* the press began on the touch screen */
         int held = (mb & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-        g_fe_touch = held && to_touch(mx, my, &tx, &ty, dragging);
+        g_fe_touch = held && to_touch_in(SDL_GetMouseFocus(), mx, my, &tx, &ty, dragging);
         dragging = g_fe_touch;
         if (g_fe_touch) { g_fe_tx = tx; g_fe_ty = ty; }
         uint64_t tp = SDL_GetPerformanceCounter();

@@ -29,7 +29,8 @@ news, and friends to play with.
   inside a photo of a real DS Lite (or a drawn one in six colours), even at
   actual size. F6 switches the screen filter, F7 the console.
 - Any window size, fullscreen, screens stacked or side by side, and sharp
-  pixel scaling.
+  pixel scaling. F9 swaps the screens.
+- **Two windows**, one screen in each, for two monitors.
 - Keyboard, mouse (as the touch screen) and gamepads. Hold Tab to fast
   forward.
 - The game's own icon (the one the DS menu shows), made from your ROM.
@@ -42,7 +43,8 @@ original)
 - **Widescreen**: the world drawn wider than the DS's screen, so you see
   more of it left and right, with the map and party small in the corner like
   a minimap. Menus slide over to make room; in battles the commands sit in
-  the corner. 16:9 in a window, as wide as your monitor in fullscreen.
+  the top left corner. 16:9 in a window, as wide as your monitor in
+  fullscreen. O makes the small screen see-through.
 - **Top screen in the corner**: the same, with the field as on the DS.
 - Coming: a free camera (see the roadmap).
 
@@ -106,9 +108,9 @@ folder. **Don't share the `game` or `build` folders**: they contain the game.
 
 Every setting is in the **menu bar** at the top of the window. Handy keys:
 Tab (hold) fast forward, P pause, F5 Classic / Enhanced, F6 DS Lite screen,
-F7 DS Lite console, F11 fullscreen (double-click outside the touch screen
-to leave it), F12
-screenshot, F10 bug report.
+F7 DS Lite console, F2 layout, F9 swap the screens, O see-through small
+screen (widescreen), F11 fullscreen (double-click outside the touch screen
+to leave it), F12 screenshot, F10 bug report.
 
 ## Playing with friends
 

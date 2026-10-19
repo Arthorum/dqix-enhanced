@@ -2,6 +2,17 @@
 adventure; try this one in its own folder with a copy of your save.
 
 **New since stable v28**
+- **Screens your way** (View menu):
+  - **Swap the screens** (F9): in stacked, side by side and top screen in
+    the corner layouts, the two screens trade places.
+  - **Two windows**: one screen in each, to put them on two monitors. The
+    second window opens on your other monitor and remembers where you leave
+    it; F11 in either window makes that one fullscreen. Also in the F2 cycle
+    when you have two monitors.
+  - **Widescreen battles**: the command screen now sits in the top left
+    corner, over the sky, instead of in front of your party and the enemies.
+  - **See-through small screen** (O, widescreen): 100%, 75%, 50% or 25%. It
+    turns solid while the mouse is on it, so you can still click it.
 - **Enhanced mode looks like the DS again where it didn't**: see-through
   effects now follow the DS's own rules, so clouds are soft and wispy instead
   of solid white blocks, the glow around Yggdrasil is a soft halo again, and

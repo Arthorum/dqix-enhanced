@@ -65,6 +65,9 @@ the same room.
 
 ## Done
 
+- [x] Screens: swap them (F9), two windows for two monitors, widescreen
+      battle commands in the top left corner, see-through small screen (O)
+      (v29-nightly3).
 - [x] Enhanced mode: the DS's rules for see-through effects, fog and soft
       outlines (clouds and Yggdrasil's glow) (v29-nightly1).
 - [x] **v28 released as stable**: a real session across thousands of miles,
