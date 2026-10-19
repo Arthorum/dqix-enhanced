@@ -564,12 +564,25 @@ static void audio_cb(void* u, Uint8* stream, int len) {
 
 /* Window size = canvas x scale, made smaller if it would not fit on the screen. */
 static void menu_sync(void);
-static void layout_window(void) {
+/* keep: the layout changed (swap, single screen, another layout): keep the
+ * size the player gave the window - the same if the picture keeps its shape,
+ * else the new shape at the same zoom. Otherwise (window size, actual size,
+ * the start) the chosen size. */
+static float g_last_cw, g_last_ch;                              /* the canvas the window was last sized for */
+static void layout_window_keep(int keep) {
     GlPresent v; canvas_layout(&v, 1, 1);
     int w = (int)v.cw, h = (int)v.ch;
     if (!g_gl) SDL_RenderSetLogicalSize(g_ren, w, h);
+    float lw = g_last_cw, lh = g_last_ch;
+    g_last_cw = v.cw; g_last_ch = v.ch;
     if (g_fullscreen) return;
     float s = g_opt.actual && g_actual_sc > 0 ? g_actual_sc : (float)g_scale;
+    if (keep && lw > 0 && lh > 0) {
+        if (fabsf(lw - v.cw) < 0.5f && fabsf(lh - v.ch) < 0.5f) return;   /* same shape: nothing to do */
+        int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
+        float cur = fminf((float)ww / lw, (float)wh / lh);       /* the zoom the window has now */
+        if (cur > 0.25f) s = cur;
+    }
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(g_win), &r) == 0) {
         float fit = fminf((float)(r.w - 16) / (float)w, (float)(r.h - 64) / (float)h);   /* room for the title and menu bars */
@@ -577,6 +590,7 @@ static void layout_window(void) {
     }
     SDL_SetWindowSize(g_win, (int)ceilf((float)w * s), (int)ceilf((float)h * s));
 }
+static void layout_window(void) { layout_window_keep(0); }
 
 /* OpenGL: a 3.3 core context; on any failure fall back to SDL_Renderer + software 3D. */
 static int try_gl(void) {
@@ -869,8 +883,25 @@ static void memfind_hook(void) {
     }
 }
 
+static void do_action(int id);
+/* tests: DQIX_TEST_ACTIONS="frame:menu id;frame:resize:w:h;...": menu actions and window resizes at given frames */
+static void test_actions_hook(void) {
+    static const char* e = (const char*)-1; if (e == (const char*)-1) e = getenv("DQIX_TEST_ACTIONS");
+    if (!e) return;
+    for (const char* c = e; c && *c; ) {
+        unsigned long long f = strtoull(c, NULL, 10); const char* a = strchr(c, ':');
+        if (a && f == g_frame) {
+            int w, h;
+            if (!strncmp(a + 1, "resize:", 7) && sscanf(a + 8, "%d:%d", &w, &h) == 2) SDL_SetWindowSize(g_win, w, h);
+            else do_action(atoi(a + 1));
+        }
+        c = strchr(c, ';'); if (c) c++;
+    }
+}
+
 static void test_hooks(void) {
     memfind_hook();
+    test_actions_hook();
     static long long report_at = -2;
     if (report_at == -2) { const char* e = getenv("DQIX_REPORT_AT"); report_at = e ? atoll(e) : -1; }
     if (report_at >= 0 && g_frame == (uint64_t)report_at) report_write("DQIX_REPORT_AT (test)");
@@ -1813,7 +1844,11 @@ static void do_action(int id) {
         if (id >= MI_SHELLC0 && id < MI_SHELLC0 + N_SHELLS) { g_opt.shell_color = id - MI_SHELLC0; g_color_chosen = 1; relayout = 1; }
         else return;
     }
-    if (relayout && g_win) { layout_window(); second_window_sync(); }
+    if (relayout && g_win) {                                   /* a new window size only when one was asked for */
+        int sized = (id >= MI_SIZE1 && id <= MI_SIZE4) || id == MI_ACTUAL;
+        layout_window_keep(!sized);
+        second_window_sync();
+    }
     menu_sync();
     if (id != MI_SHOT && id != MI_REPORT && id != MI_SEND_REPORT && id != MI_PAUSE && id != MI_TURBO) settings_save();
 }
