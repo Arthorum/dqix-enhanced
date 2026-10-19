@@ -23,8 +23,9 @@ news, and friends to play with.
 
 **Better than the DS**
 - **Enhanced mode**: the 3D drawn on your graphics card at up to 12x the
-  DS's resolution, or Auto: as sharp as your monitor shows it, with smooth
-  textures. Switch between Classic and Enhanced at any time (F5).
+  DS's resolution, or Auto: as sharp as your monitor shows it, and
+  optional smooth textures. Switch between Classic and Enhanced at any
+  time (F5).
 - **The DS Lite look** (on at first): a screen filter with the DS Lite's
   colours, pixel grid, motion blur and backlight levels, and the screens
   inside a photo of a real DS Lite (or a drawn one in six colours), even at

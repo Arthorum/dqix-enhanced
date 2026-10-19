@@ -55,7 +55,7 @@ static int g_two;                                                 /* two windows
 static SDL_Window* g_win2;                                        /* ...the second one (the top screen, or the bottom one when swapped) */
 static int g_win2_full, g_win2_rect[4];                           /* ...fullscreen; where it was as a window (w = 0: not yet) */
 static int g_wide_pop;                                            /* widescreen: the small screen in its own window (the field alone) */
-static int g_smooth = 1;                                          /* Enhanced: smooth (filtered) textures */
+static int g_smooth = 0;                                          /* Enhanced: smooth (filtered) textures */
 static int g_res_auto = 1;                                        /* 3D resolution: as sharp as the screen shows it (else g_scale3d) */
 static int g_small_opacity = 100;                                 /* widescreen: how solid the small screen over the field is (O), % */
 static float g_small_alpha = 1.0f;                                /* ...as shown now (solid while the mouse is on it) */

@@ -65,6 +65,8 @@ the same room.
 
 ## Done
 
+- [x] **v29 released as stable** (from v29-nightly4): the sharper Enhanced
+      mode and the new screen layouts.
 - [x] Enhanced: up to 12x and Auto resolution, sharp bilinear upscaling;
       widescreen with the small screen in its own window; a Fullscreen bar
       on the second window (v29-nightly4).
