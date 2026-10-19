@@ -1,8 +1,35 @@
 **The newest work, less tested.** Use the stable release for your main
 adventure; try this one in its own folder with a copy of your save.
 
-**Right now the nightly is the same as stable v30.** The next nightly
-(v31-nightly1) will bring new work; see ROADMAP.md for what's planned.
+**New since stable v30**
+- **Widescreen, two kinds** (View or Modern menu):
+  - **Widescreen** (the new usual one): the action is always the big
+    picture, the field while exploring and the fight in battles, and the
+    other screen (the map, the battle commands) sits small in a corner.
+    **K** or the **right stick click** moves it to the next corner
+    (clockwise), **I** changes its size (small, medium, large), **O** or the
+    **left stick click** how see-through it is. It starts medium, top left,
+    at 50%, and turns solid while the mouse is on it.
+  - **Widescreen, dynamic** (experimental): the one from before, where the
+    field slides over to make room for menus.
+  - Both start at 50% see-through now (once; after that your choice stays).
+- **Single screen**: **U** or the **left trigger** shows only one screen, as
+  big as it gets (the bottom one first); **F9** or the **right trigger**
+  switches to the other. In widescreen the left trigger hides the small
+  screen instead, and holding the right trigger (or F9) shows it big until
+  you let go.
+- **Reset** without closing the game: Game > Reset (it asks first),
+  **Ctrl+R**, or hold **Start + Select + L + R** on a controller for a second.
+  Not while playing with friends far away.
+- **Volume**: Game > Volume (a slider, live), **-** and **=**, and Mute.
+- **Controls**: Game > Controls changes any key or controller button, for
+  the DS's buttons and every shortcut; up to two keys and one controller
+  button for each. A key that another action had moves over to it (they
+  swap); Restore defaults puts everything back. Saved in `controls.ini`
+  (which you can also edit by hand). The sticks stay as they are.
+- Fixed: in Enhanced mode the character and the items on the equipment
+  screen were see-through. (The DS blends its 3D over the menu by the 3D's
+  own opacity; Enhanced used the menu's half-and-half setting instead.)
 
 **How to install**: download *Source code (zip)* below, unzip it and
 double-click `Install Dragon Quest IX.bat`. Already playing? Use Help >

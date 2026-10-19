@@ -3,6 +3,24 @@
 What's planned for DQIX Enhanced, roughly in order. Done items move to the
 bottom with the version they arrived in.
 
+## Next: Linux and Steam Deck
+
+The game already runs on Linux (every automated test is a Linux build);
+what's missing is everything around it.
+
+- [ ] **An in-game menu** drawn by the program (Esc or the controller's
+      Home button), usable with mouse, keyboard or controller: every
+      setting, bug reports, updates, hosting/joining, volume and controls
+      without the Windows-only menu bar and windows. Also gives Mac a menu.
+- [ ] **Installing on Linux**: a script that checks the compiler and
+      libraries, builds the game from the cartridge file (build-game.sh)
+      and adds a desktop shortcut; the updater without `.bat` files.
+- [ ] **Steam Deck**: building without a compiler on SteamOS (a bundled
+      toolchain for desktop mode, or build on any PC and copy over), adding
+      it to Steam as a non-Steam game with a controller layout (the menu on
+      a button), basic widescreen for the 16:10 screen. Until then, players
+      can try the Windows build through Proton (untested).
+
 ## Multiplayer polish
 
 - [ ] **Lower input delay over long distances**: base it on the one-way trip,
@@ -51,8 +69,15 @@ the same room.
 
 ## Reach
 
-- [ ] **European and Japanese ROMs** in BUILD.bat (only the USA version builds
-      today).
+- [ ] **The European version, with its five languages** (English, French,
+      German, Italian, Spanish; players have asked for them): a map of the
+      European game made with the decomp's `dsd` tool (only the USA and
+      Japanese maps exist), the USA-specific fixes found in it (the leak
+      patch, the anti-piracy functions, thread switching, the 3D queue, the
+      stylus-arrow tags), European DQVC and download data, and a Language
+      menu that sets the DS's language. Needs a European cartridge file to
+      build and test with. European and USA players can't play together.
+- [ ] **The Japanese version** (its map already exists in the decomp).
 
 ## Loose ends
 
@@ -63,6 +88,10 @@ the same room.
 
 ## Done
 
+- [x] Basic widescreen (corners, sizes, opacity on the stick clicks),
+      dynamic widescreen kept as experimental, single screen and the
+      triggers, reset (Ctrl+R, Start+Select+L+R), volume, Controls remapping
+      (v31-nightly1).
 - [x] **v30 released as stable** (from v30-nightly1): widescreen without
       pop-in at the sides.
 - [x] Widescreen: people, doors, items and monsters at the sides no longer

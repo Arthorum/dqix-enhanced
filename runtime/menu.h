@@ -16,6 +16,9 @@ enum {
     MI_ANALOG = 200, MI_CORNER, MI_MODERN_HELP, MI_WIDE, MI_SWAP, MI_TWO,
     MI_FULL2 = 230, MI_POPOUT, MI_RES6, MI_RES8, MI_RES_AUTO, MI_SMOOTH,
     MI_OPACITY1 = 220,                                                  /* 100, 75, 50, 25% (+0..3) */
+    MI_WIDE_DYN = 240, MI_SINGLE, MI_RESET, MI_VOLUME, MI_MUTE, MI_CONTROLS_EDIT,
+    MI_CORNER0 = 250,                                                   /* + 0..3: top left, top right, bottom right, bottom left */
+    MI_SSIZE0 = 254,                                                    /* + 0..2: small, medium, large */
     MI_SEND_REPORT = 210,
 };
 
@@ -61,5 +64,16 @@ typedef struct {
 } SessionWindow;
 int session_window_open(SDL_Window* win);          /* 1 if it is showing */
 void session_window_update(const SessionWindow* w);
-int session_window_action(void);                    /* 0 nothing, 1 start, 2 cancel (each reported once) */
+int session_window_action(void);
+
+/* Game > Volume...: a slider (0-100) and Mute, changing *volume / *mute live (Windows). */
+void volume_window_open(SDL_Window* win, int* volume, int* mute);
+void volume_window_refresh(void);                   /* the values changed elsewhere (keys) */
+/* Game > Controls...: the list of actions and their keys (controls.h). When the
+ * player asks to change one, controls_window_request() reports it once
+ * (what: 0 key, 1 second key, 2 controller button); the game then waits for
+ * the key in its own window and calls controls_window_refresh(). */
+void controls_window_open(SDL_Window* win);
+int controls_window_request(int* action, int* what);
+void controls_window_refresh(void);                    /* 0 nothing, 1 start, 2 cancel (each reported once) */
 void session_window_close(void);

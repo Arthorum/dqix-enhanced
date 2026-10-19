@@ -1,5 +1,6 @@
 /* Menu bar for the game window on Windows (see menu.h). */
 #include "menu.h"
+#include "controls.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -31,6 +32,11 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     HMENU game = sub(g_bar, L"&Game");
     item(game, MI_PAUSE, L"&Pause\tP");
     item(game, MI_TURBO, L"&Fast forward\t(or hold Tab)");
+    item(game, MI_RESET, L"&Reset...\tCtrl+R");
+    sep(game);
+    item(game, MI_VOLUME, L"&Volume...\t- / =");
+    item(game, MI_MUTE, L"&Mute");
+    item(game, MI_CONTROLS_EDIT, L"&Controls...");
     sep(game);
     item(game, MI_SHOT, L"Save &screenshot\tF12");
     item(game, MI_REPORT, L"Save &bug report\tF10");
@@ -78,16 +84,28 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
     item(view, MI_STACKED, L"S&tacked\tF2");
     item(view, MI_SIDE, L"&Side by side\tF2");
     item(view, MI_CORNER, L"Top screen in the &corner\tF2");
-    item(view, MI_WIDE, L"&Widescreen (the field wider, top screen in the corner)\tF2");
+    item(view, MI_WIDE, L"&Widescreen (the action wide, the other screen in a corner)\tF2");
+    item(view, MI_WIDE_DYN, L"Widescreen, d&ynamic (experimental: makes room for menus)\tF2");
     item(view, MI_TWO, L"Two wi&ndows (one screen in each, for two monitors)\tF2");
-    item(view, MI_POPOUT, L"Widescreen: the small screen in its own wi&ndow (a clean field)");
     sep(view);
-    item(view, MI_SWAP, L"Swa&p the screens\tF9");
-    HMENU op = sub(view, L"Widescreen: small screen &opacity\tO");
-    item(op, MI_OPACITY1, L"100% (solid)");
-    item(op, MI_OPACITY1 + 1, L"75%");
-    item(op, MI_OPACITY1 + 2, L"50%");
-    item(op, MI_OPACITY1 + 3, L"25%");
+    item(view, MI_SINGLE, L"Single scr&een (widescreen: hide the small screen)\tU");
+    item(view, MI_SWAP, L"Swa&p the screens (widescreen: hold to see the other)\tF9");
+    HMENU sm = sub(view, L"Widescreen: the small scr&een");
+    item(sm, MI_CORNER0, L"Top left\tK");
+    item(sm, MI_CORNER0 + 1, L"Top right\tK");
+    item(sm, MI_CORNER0 + 2, L"Bottom right\tK");
+    item(sm, MI_CORNER0 + 3, L"Bottom left\tK");
+    sep(sm);
+    item(sm, MI_SSIZE0, L"Small\tI");
+    item(sm, MI_SSIZE0 + 1, L"Medium\tI");
+    item(sm, MI_SSIZE0 + 2, L"Large\tI");
+    sep(sm);
+    item(sm, MI_OPACITY1, L"100% (solid)\tO");
+    item(sm, MI_OPACITY1 + 1, L"75%\tO");
+    item(sm, MI_OPACITY1 + 2, L"50%\tO");
+    item(sm, MI_OPACITY1 + 3, L"25%\tO");
+    sep(sm);
+    item(sm, MI_POPOUT, L"In its own &window (a clean field)");
     sep(view);
     HMENU size = sub(view, L"&Window size\tF3");
     item(size, MI_SIZE1, L"1x");
@@ -121,7 +139,8 @@ void menu_init(SDL_Window* win, const char* const* shell_names, int n_shells) {
 
     HMENU modern = sub(g_bar, L"&Modern");
     item(modern, MI_ANALOG, L"Walk in any &direction with the left stick");
-    item(modern, MI_WIDE, L"&Widescreen: the field wider, top screen in the corner");
+    item(modern, MI_WIDE, L"&Widescreen: the action wide, the other screen in a corner");
+    item(modern, MI_WIDE_DYN, L"Widescreen, d&ynamic (experimental)");
     item(modern, MI_CORNER, L"Top screen in the &corner (the field as on the DS)");
     item(modern, MI_POPOUT, L"Widescreen: the small screen in its own &window (a clean field)");
     sep(modern);
@@ -508,6 +527,170 @@ void session_window_update(const SessionWindow* w) {
     o->can_start = start;
 }
 
+
+/* ---------------------------------------------------------------- volume (Game > Volume...) */
+#define ID_VOL_BAR 4000
+#define ID_VOL_TEXT 4001
+#define ID_VOL_MUTE 4002
+static HWND g_vol;
+static int* g_vol_val; static int* g_vol_mute;
+static void vol_show(HWND h) {
+    wchar_t t[32]; swprintf(t, 32, L"%d%%", *g_vol_val); SetDlgItemTextW(h, ID_VOL_TEXT, t);
+    CheckDlgButton(h, ID_VOL_MUTE, *g_vol_mute ? BST_CHECKED : BST_UNCHECKED);
+}
+static INT_PTR CALLBACK vol_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SCROLLINFO si = { sizeof si, SIF_RANGE | SIF_POS | SIF_PAGE, 0, 100 + 9, 10, *g_vol_val, 0 };
+        SetScrollInfo(GetDlgItem(h, ID_VOL_BAR), SB_CTL, &si, TRUE);
+        vol_show(h);
+        return TRUE;
+    }
+    case WM_HSCROLL: {
+        HWND bar = GetDlgItem(h, ID_VOL_BAR);
+        int v = *g_vol_val;
+        switch (LOWORD(wp)) {
+        case SB_LINELEFT: v -= 1; break; case SB_LINERIGHT: v += 1; break;
+        case SB_PAGELEFT: v -= 10; break; case SB_PAGERIGHT: v += 10; break;
+        case SB_LEFT: v = 0; break; case SB_RIGHT: v = 100; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: v = HIWORD(wp); break;
+        default: return TRUE;
+        }
+        v = v < 0 ? 0 : v > 100 ? 100 : v;
+        *g_vol_val = v; if (v > 0) *g_vol_mute = 0;
+        SetScrollPos(bar, SB_CTL, v, TRUE);
+        vol_show(h);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_VOL_MUTE) { *g_vol_mute = IsDlgButtonChecked(h, ID_VOL_MUTE) == BST_CHECKED; return TRUE; }
+        if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) { DestroyWindow(h); g_vol = NULL; return TRUE; }
+        break;
+    case WM_CLOSE: DestroyWindow(h); g_vol = NULL; return TRUE;
+    }
+    (void)lp;
+    return FALSE;
+}
+void volume_window_open(SDL_Window* win, int* volume, int* mute) {
+    g_vol_val = volume; g_vol_mute = mute;
+    if (g_vol) { vol_show(g_vol); SetForegroundWindow(g_vol); return; }
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(win, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return;
+    static WORD buf[1024];
+    memset(buf, 0, sizeof buf);
+    DLGTEMPLATE* d = (DLGTEMPLATE*)align4(buf);
+    d->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    d->cdit = 4; d->cx = 220; d->cy = 70;
+    WORD* p = (WORD*)(d + 1);
+    *p++ = 0; *p++ = 0;
+    p = put_str(p, L"Volume");
+    *p++ = 10; p = put_str(p, L"Segoe UI");
+    p = put_item(p, WS_TABSTOP | SBS_HORZ, 8, 10, 168, 12, ID_VOL_BAR, 0x84, L"");
+    p = put_item(p, 0, 182, 11, 32, 10, ID_VOL_TEXT, 0x82, L"");
+    p = put_item(p, WS_TABSTOP | BS_AUTOCHECKBOX, 8, 30, 120, 12, ID_VOL_MUTE, 0x80, L"Mute");
+    p = put_item(p, WS_TABSTOP | BS_DEFPUSHBUTTON, 160, 48, 54, 15, IDOK, 0x80, L"Close");
+    g_vol = CreateDialogIndirectParamW(GetModuleHandleW(NULL), d, info.info.win.window, vol_proc, 0);
+}
+void volume_window_refresh(void) { if (g_vol) { SetScrollPos(GetDlgItem(g_vol, ID_VOL_BAR), SB_CTL, *g_vol_val, TRUE); vol_show(g_vol); } }
+
+/* ---------------------------------------------------------------- controls (Game > Controls...) */
+#define ID_CTL_LIST 4100
+#define ID_CTL_K1 4101
+#define ID_CTL_K2 4102
+#define ID_CTL_PAD 4103
+#define ID_CTL_CLEAR 4104
+#define ID_CTL_DEFAULTS 4105
+#define ID_CTL_STATUS 4106
+static HWND g_ctlw;
+static int g_ctl_req = -1, g_ctl_req_what;
+static void ctl_fill(HWND h) {
+    HWND l = GetDlgItem(h, ID_CTL_LIST);
+    int sel = (int)SendMessageW(l, LB_GETCURSEL, 0, 0), top = (int)SendMessageW(l, LB_GETTOPINDEX, 0, 0);
+    SendMessageW(l, LB_RESETCONTENT, 0, 0);
+    for (int a = 0; a < CA_N; a++) {
+        char k0[64], k1[64], pd[64], row[300];
+        controls_key_name(g_ctl_key[a][0], k0, sizeof k0); controls_key_name(g_ctl_key[a][1], k1, sizeof k1);
+        controls_pad_name(g_ctl_pad[a], pd, sizeof pd);
+        snprintf(row, sizeof row, "%s\t%s\t%s\t%s", g_ctl[a].name, k0, k1, pd);
+        wchar_t w[300]; MultiByteToWideChar(CP_UTF8, 0, row, -1, w, 300); w[299] = 0;
+        SendMessageW(l, LB_ADDSTRING, 0, (LPARAM)w);
+    }
+    SendMessageW(l, LB_SETTOPINDEX, (WPARAM)top, 0);
+    if (sel >= 0) SendMessageW(l, LB_SETCURSEL, (WPARAM)sel, 0);
+}
+static INT_PTR CALLBACK ctl_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)lp;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        int tabs[3] = { 172, 228, 284 };                          /* dialog units: action | key | key | controller */
+        SendDlgItemMessageW(h, ID_CTL_LIST, LB_SETTABSTOPS, 3, (LPARAM)tabs);
+        ctl_fill(h);
+        SendDlgItemMessageW(h, ID_CTL_LIST, LB_SETCURSEL, 0, 0);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        int sel = (int)SendDlgItemMessageW(h, ID_CTL_LIST, LB_GETCURSEL, 0, 0);
+        switch (LOWORD(wp)) {
+        case ID_CTL_LIST: if (HIWORD(wp) == LBN_DBLCLK && sel >= 0) { g_ctl_req = sel; g_ctl_req_what = 0; } return TRUE;
+        case ID_CTL_K1: if (sel >= 0) { g_ctl_req = sel; g_ctl_req_what = 0; } return TRUE;
+        case ID_CTL_K2: if (sel >= 0) { g_ctl_req = sel; g_ctl_req_what = 1; } return TRUE;
+        case ID_CTL_PAD: if (sel >= 0) { g_ctl_req = sel; g_ctl_req_what = 2; } return TRUE;
+        case ID_CTL_CLEAR:
+            if (sel >= 0) {
+                if (g_ctl_key[sel][1]) g_ctl_key[sel][1] = 0;
+                else if (g_ctl_key[sel][0]) g_ctl_key[sel][0] = 0;
+                else g_ctl_pad[sel] = CTL_NONE;
+                controls_save(); ctl_fill(h);
+            }
+            return TRUE;
+        case ID_CTL_DEFAULTS:
+            if (MessageBoxW(h, L"Put every key and button back to how the game came?", L"Controls", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                controls_defaults(); controls_save(); ctl_fill(h);
+            }
+            return TRUE;
+        case IDOK: case IDCANCEL: DestroyWindow(h); g_ctlw = NULL; return TRUE;
+        }
+        break;
+    }
+    case WM_CLOSE: DestroyWindow(h); g_ctlw = NULL; return TRUE;
+    }
+    return FALSE;
+}
+void controls_window_open(SDL_Window* win) {
+    if (g_ctlw) { SetForegroundWindow(g_ctlw); return; }
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(win, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return;
+    static WORD buf[4096];
+    memset(buf, 0, sizeof buf);
+    DLGTEMPLATE* d = (DLGTEMPLATE*)align4(buf);
+    d->style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    d->cdit = 10; d->cx = 400; d->cy = 290;
+    WORD* p = (WORD*)(d + 1);
+    *p++ = 0; *p++ = 0;
+    p = put_str(p, L"Controls");
+    *p++ = 9; p = put_str(p, L"Segoe UI");
+    p = put_item(p, 0, 8, 6, 384, 18, 0xFFFF, 0x82, L"Pick an action, then change one of its keys or its controller button. A key or button that "
+                 "another action has moves over to it (they swap). Esc and Alt+Enter, and the sticks, stay as they are.");
+    p = put_item(p, 0, 8, 28, 170, 9, 0xFFFF, 0x82, L"Action");
+    p = put_item(p, 0, 180, 28, 210, 9, 0xFFFF, 0x82, L"Key          Second key    Controller");
+    p = put_item(p, WS_BORDER | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_USETABSTOPS | LBS_NOINTEGRALHEIGHT, 8, 39, 384, 196, ID_CTL_LIST, 0x83, L"");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 8, 241, 72, 15, ID_CTL_K1, 0x80, L"Change key...");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 84, 241, 82, 15, ID_CTL_K2, 0x80, L"Second key...");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 170, 241, 92, 15, ID_CTL_PAD, 0x80, L"Controller button...");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 266, 241, 54, 15, ID_CTL_CLEAR, 0x80, L"Clear");
+    p = put_item(p, WS_TABSTOP | BS_PUSHBUTTON, 8, 266, 100, 15, ID_CTL_DEFAULTS, 0x80, L"Restore defaults");
+    p = put_item(p, WS_TABSTOP | BS_DEFPUSHBUTTON, 338, 266, 54, 15, IDOK, 0x80, L"Close");
+    g_ctlw = CreateDialogIndirectParamW(GetModuleHandleW(NULL), d, info.info.win.window, ctl_proc, 0);
+}
+int controls_window_request(int* action, int* what) {
+    if (g_ctl_req < 0) return 0;
+    *action = g_ctl_req; *what = g_ctl_req_what; g_ctl_req = -1;
+    return 1;
+}
+void controls_window_refresh(void) { if (g_ctlw) { ctl_fill(g_ctlw); SetForegroundWindow(g_ctlw); } }
+
 int session_window_action(void) { int a = g_ses_action; g_ses_action = 0; return a; }
 
 void session_window_close(void) {
@@ -528,6 +711,11 @@ void menu_check(int id, int on) { (void)id; (void)on; }
 void menu_enable(int id, int on) { (void)id; (void)on; }
 int menu_command(const SDL_Event* e) { (void)e; return 0; }
 int session_window_open(SDL_Window* win) { (void)win; return 0; }
+void volume_window_open(SDL_Window* win, int* volume, int* mute) { (void)win; (void)volume; (void)mute; }
+void volume_window_refresh(void) {}
+void controls_window_open(SDL_Window* win) { (void)win; }
+int controls_window_request(int* action, int* what) { (void)action; (void)what; return 0; }
+void controls_window_refresh(void) {}
 void session_window_update(const SessionWindow* w) { (void)w; }
 int session_window_action(void) { return 0; }
 void session_window_close(void) {}

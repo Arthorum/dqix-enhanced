@@ -35,8 +35,9 @@ news, and friends to play with.
 - **Two windows**, one screen in each, for two monitors, each one
   fullscreen if you like. In widescreen, the map can go in its own window
   so the field is clean.
-- Keyboard, mouse (as the touch screen) and gamepads. Hold Tab to fast
-  forward.
+- Keyboard, mouse (as the touch screen) and gamepads, every key and button
+  changeable (Game > Controls). Hold Tab to fast forward.
+- Reset without closing the game, and a volume slider.
 - The game's own icon (the one the DS menu shows), made from your ROM.
 
 **Modern options** (in the Modern menu; with them all off, the game is the
@@ -44,11 +45,13 @@ original)
 - **Walk in any direction with the left stick** (on at first): the stick
   steers like the DS stylus while you walk around, instead of the D-pad's 8
   directions (without the stylus's arrow on the screen).
-- **Widescreen**: the world drawn wider than the DS's screen, so you see
-  more of it left and right, with the map and party small in the corner like
-  a minimap. Menus slide over to make room; in battles the commands sit in
-  the top left corner. 16:9 in a window, as wide as your monitor in
-  fullscreen. O makes the small screen see-through.
+- **Widescreen**: the action drawn wider than the DS's screen, so you see
+  more of the world left and right, with the other screen (the map, the
+  battle commands) small in a corner: pick the corner, size and how
+  see-through it is, also from a controller. 16:9 in a window, as wide as
+  your monitor in fullscreen. A dynamic version (experimental) slides the
+  field over to make room for menus.
+- **Single screen**: one screen as big as it gets, switched with a trigger.
 - **Top screen in the corner**: the same, with the field as on the DS.
 - Coming: a free camera (see the roadmap).
 
@@ -110,11 +113,14 @@ folder. **Don't share the `game` or `build` folders**: they contain the game.
 | START / SELECT | Enter / Right Shift | Start / Back |
 | touch screen | left mouse button on the bottom screen | |
 
-Every setting is in the **menu bar** at the top of the window. Handy keys:
-Tab (hold) fast forward, P pause, F5 Classic / Enhanced, F6 DS Lite screen,
-F7 DS Lite console, F2 layout, F9 swap the screens, O see-through small
-screen (widescreen), F11 fullscreen (double-click outside the touch screen
-to leave it), F12 screenshot, F10 bug report.
+Every setting is in the **menu bar** at the top of the window, and
+**Game > Controls** changes any key or button. Handy keys: Tab (hold) fast
+forward, P pause, Ctrl+R reset, - / = volume, F5 Classic / Enhanced, F2
+layout, U single screen, F9 swap the screens, K / I / O the widescreen small
+screen's corner, size and opacity, F11 fullscreen (double-click outside the
+touch screen to leave it), F12 screenshot, F10 bug report. On a controller:
+the triggers for single screen and swap, the stick clicks for the small
+screen's corner and opacity, Start+Select+L+R held to reset.
 
 ## Playing with friends
 

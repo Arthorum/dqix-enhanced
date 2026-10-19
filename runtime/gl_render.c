@@ -253,9 +253,11 @@ static const char* FS_COMP =
     "  vec3 o;\n"
     "  if (mode == 1) {\n"
     "    bool sec = (info.r & 4u) != 0u; int eff = int((info.r >> 3) & 3u);\n"
+    /* The 3D layer over a 2nd blend target: the DS blends by the 3D pixel's own
+     * alpha, never by EVA/EVB (solid models stay solid: the equipment screen
+     * asks for 10/16 over its background), whatever the effect is set to */
     "    if (A <= 0.0) o = col;\n"
-    "    else if (A < 0.999 && sec) o = c3 * A + c2 * (1.0 - A);\n"
-    "    else if (eff == 1 && sec) o = min(c3 * eva + c2 * evb, vec3(1.0));\n"
+    "    else if (sec) o = A < 0.999 ? c3 * A + c2 * (1.0 - A) : c3;\n"
     "    else if (eff == 2) o = c3 + (1.0 - c3) * evy;\n"
     "    else if (eff == 3) o = c3 - c3 * evy;\n"
     "    else o = c3;\n"
@@ -822,7 +824,7 @@ static void gl_render_(const Frame3D* f) {
         static int pn = -2, px, py; const char* e;
         if (pn == -2) { pn = -1; if ((e = getenv("DQIX_GL_PROBE"))) sscanf(e, "%d,%d,%d", &pn, &px, &py); }
         static int done; if (pn >= 0 && (int)g_frame >= pn && !done && (done = 1)) {
-            fprintf(stderr, "probe: frame %llu disp3d %04x wbuf %d fogcol %04x/%02x fogoff %04x fogtab", (unsigned long long)g_frame, IO16_(0x060), f->wbuf, IO16_(0x358), g_io[0x35A], IO16_(0x35C));
+            fprintf(stderr, "probe: frame %llu disp3d %04x wbuf %d bldcnt %04x bldalpha %04x clear %08x fogcol %04x/%02x fogoff %04x fogtab", (unsigned long long)g_frame, IO16_(0x060), f->wbuf, IO16_(0x050), IO16_(0x052), IO32_(0x350), IO16_(0x358), g_io[0x35A], IO16_(0x35C));
             for (int k = 0; k < 32; k++) fprintf(stderr, " %d", g_io[0x360 + k] & 127);
             fprintf(stderr, "\n");
         }
