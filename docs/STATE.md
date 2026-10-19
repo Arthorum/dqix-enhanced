@@ -1,15 +1,15 @@
 # Where the project stands
 
-Git tag `v30` (and `bookmark-2026-10-19b`) marks the current stable version.
-The ones before: `v29`, `v28`, `v27`, `v26`. To go back: `git checkout v29`.
+Git tag `v31` (and `bookmark-2026-10-19c`) marks the current stable version.
+The ones before: `v30`, `v29`, `v28`, `v27`, `v26`. To go back: `git checkout v30`.
 
 ## Stable and nightly
 
-- **Stable** = git branch `stable` (now v30, tag `v30`): the
+- **Stable** = git branch `stable` (now v31, tag `v31`): the
   version to play your main save on. Changes only by promoting a proven
   nightly, or a small safe fix (made on `stable`, then merged into `main`).
   Keep it in its own folder, built with BUILD.bat.
-- **Nightly** = branch `main`, versions `v31-nightly1`, `-nightly2`... (next)
+- **Nightly** = branch `main`, versions `v32-nightly1`, `-nightly2`... (next)
   Experimental. Its own folder and saves.
 - **Promoting**: when a nightly is solid, it becomes the next stable: set the
   version to `v27`, bookmark (tag), move `stable` to it, make the stable zips.
@@ -270,6 +270,11 @@ The ones before: `v29`, `v28`, `v27`, `v26`. To go back: `git checkout v29`.
   30 ms coalescing, keepalive 25 s), relay_url.h. Host window by reach
   (direct / code / home only). connect_within 10 s; home_address warning.
   Tested with a Node stand-in for the Workers runtime.
+- **v31 stable** (2026-10-19): v31-nightly1 promoted. Basic widescreen
+  (corner/size/opacity) and dynamic (experimental); single screen; triggers
+  and stick clicks; reset (relaunch, DQIX_WINPOS); volume; controls.c /
+  controls.ini remapping with a Windows Controls window; Enhanced 3D over a
+  2nd blend target blends by its own alpha (equipment screen).
 - **v30 stable** (2026-10-19): v30-nightly1 promoted. Widescreen: a
   BOX_TEST outside the DS's view is retried against the wide view
   (Model3D::TestVisible culls with it), so the sides keep their people,

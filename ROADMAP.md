@@ -88,6 +88,7 @@ the same room.
 
 ## Done
 
+- [x] **v31 released as stable** (from v31-nightly1).
 - [x] Basic widescreen (corners, sizes, opacity on the stick clicks),
       dynamic widescreen kept as experimental, single screen and the
       triggers, reset (Ctrl+R, Start+Select+L+R), volume, Controls remapping
