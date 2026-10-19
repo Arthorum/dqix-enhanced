@@ -549,6 +549,16 @@ static void calc_lighting(void) {
     for (int k = 0; k < 3; k++) vtx_color[k] = (u8)((buf[k] >> 14) > 31 ? 31 : (buf[k] >> 14));
 }
 
+/* Widescreen: the game asks the DS whether a box (an object's bounds) is in
+ * view before drawing it, and leaves out what isn't. Against the DS's view,
+ * people, doors and monsters near the wide picture's edges vanished. With
+ * g_wide_cull set (widescreen on, not in a session: there every PC must
+ * decide exactly alike) the box is tested against the wide view instead. */
+int g_wide_cull;
+void gpu3d_debug_proj(void) {
+    fprintf(stderr, "proj:"); for (int i = 0; i < 16; i++) fprintf(stderr, " %08x", (u32)m_proj[i]); fprintf(stderr, "\n");
+}
+unsigned g_box_tests, g_box_in, g_box_widened;   /* tests (DQIX_BOXLOG) */
 static void box_test(const u32* p) {
     Vtx cube[8], face[10];
     gxstat &= ~2u;
@@ -563,9 +573,17 @@ static void box_test(const u32* p) {
             cube[i].pos[c] = (s32)(((s64)cx[i] * m_clip[c] + (s64)cy[i] * m_clip[4 + c] + (s64)cz[i] * m_clip[8 + c] + (s64)0x1000 * m_clip[12 + c]) >> 12);
     }
     static const int faces[6][4] = { { 0, 1, 2, 3 }, { 4, 5, 6, 7 }, { 0, 3, 4, 5 }, { 1, 2, 7, 6 }, { 0, 1, 6, 5 }, { 2, 3, 4, 7 } };
+    g_box_tests++;
     for (int f = 0; f < 6; f++) {
         for (int k = 0; k < 4; k++) face[k] = cube[faces[f][k]];
-        if (clip_polygon(face, 4, 0, 0) > 0) { gxstat |= 2; return; }
+        if (clip_polygon(face, 4, 0, 0) > 0) { gxstat |= 2; g_box_in++; return; }
+    }
+    if (g_wide_cull > 0 && viewport[0] == 0 && viewport[4] == 256) {   /* out of the DS's view: in the wide one? */
+        for (int i = 0; i < 8; i++) cube[i].pos[0] = (s32)(((s64)cube[i].pos[0] * 256) / (256 + 2 * g_wide_cull));
+        for (int f = 0; f < 6; f++) {
+            for (int k = 0; k < 4; k++) face[k] = cube[faces[f][k]];
+            if (clip_polygon(face, 4, 0, 0) > 0) { gxstat |= 2; g_box_in++; g_box_widened++; return; }
+        }
     }
 }
 
@@ -591,7 +609,18 @@ static int cmd_valid(uint8_t c) {
         else { op(m_pos, p); if (mtx_mode == 2 && (both_vec)) op(m_vec, p); clip_dirty = 1; } \
     } while (0)
 
+/* tests: DQIX_PROJTRACE=frame: each projection load in that frame, with the functions before it */
+extern void trace_dump(FILE* f, int n);
+static void proj_trace(uint8_t cmd, const u32* p) {
+    static long long at = -2; if (at == -2) { const char* e = getenv("DQIX_PROJTRACE"); at = e ? atoll(e) : -1; }
+    if (at < 0 || g_frame != (uint64_t)at) return;
+    int n = param_count[cmd];
+    fprintf(stderr, "projload %02x:", cmd); for (int i = 0; i < n; i++) fprintf(stderr, " %08x", p[i]); fprintf(stderr, "\n");
+    trace_dump(stderr, 12);
+}
+
 static void exec(uint8_t cmd, const u32* p) {
+    if (mtx_mode == 0 && cmd >= 0x16 && cmd <= 0x19) proj_trace(cmd, p);
     switch (cmd) {
     case 0x10: mtx_mode = p[0] & 3; break;
     case 0x11:                                                       /* PUSH */

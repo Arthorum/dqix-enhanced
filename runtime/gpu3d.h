@@ -40,6 +40,9 @@ extern int g_renderer3d_verify;                /* also run the software renderer
 /* Widescreen (GPU renderer only): DS pixels added left and right of the 3D
  * picture; 0 = off. The game sees no difference. */
 extern int g_wide_side;
+/* Widescreen: the DS's box test (the game's "is it in view?") uses the wide
+ * view too: DS pixels added each side, 0 = the DS's own view. */
+extern int g_wide_cull;
 
 /* Texture helpers for renderers. */
 int  gpu3d_tex_size(uint32_t teximg, int* w, int* h);          /* 0 if no texture (format 0) */

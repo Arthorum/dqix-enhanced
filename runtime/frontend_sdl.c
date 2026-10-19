@@ -816,7 +816,30 @@ static void save_screenshot(void) {
     SDL_FreeSurface(sf);
 }
 
+/* tests: DQIX_MEMFIND="frame,hex,hex...": at that frame, the main RAM / DTCM
+ * addresses holding each 32-bit value, and the projection matrix */
+static void memfind_hook(void) {
+    static long long at = -2; static unsigned vals[8]; static int nv;
+    if (at == -2) {
+        at = -1; const char* e = getenv("DQIX_MEMFIND");
+        if (e) { at = atoll(e); const char* c = e; while ((c = strchr(c, ',')) && nv < 8) { c++; vals[nv++] = (unsigned)strtoul(c, NULL, 16); } }
+    }
+    if (at < 0 || g_frame != (uint64_t)at) return;
+    extern void gpu3d_debug_proj(void);
+    gpu3d_debug_proj();
+    {   const char* d = getenv("DQIX_MEMDUMP");                  /* "addr,addr,...": 0x20 bytes before and after each */
+        while (d && *d) { uint32_t a = (uint32_t)strtoul(d, NULL, 16) & 0x3FFFFC;
+            fprintf(stderr, "dump %08x:", 0x02000000u + a - 0x20); for (int i = -8; i < 8; i++) { uint32_t v; memcpy(&v, g_main_ram + a + i * 4, 4); fprintf(stderr, " %08x", v); } fprintf(stderr, "\n");
+            d = strchr(d, ','); if (d) d++; } }
+    for (int k = 0; k < nv; k++) {
+        int n = 0;
+        for (uint32_t a = 0; a + 4 <= MAIN_RAM_SIZE && n < 200; a += 2) { uint32_t v; memcpy(&v, g_main_ram + a, 4); if (v == vals[k]) { fprintf(stderr, "memfind %08x at %08x\n", vals[k], 0x02000000u + a); n++; } }
+        for (uint32_t a = 0; a + 4 <= DTCM_SIZE; a += 2) { uint32_t v; memcpy(&v, g_dtcm + a, 4); if (v == vals[k]) fprintf(stderr, "memfind %08x at dtcm+%04x\n", vals[k], a); }
+    }
+}
+
 static void test_hooks(void) {
+    memfind_hook();
     static long long report_at = -2;
     if (report_at == -2) { const char* e = getenv("DQIX_REPORT_AT"); report_at = e ? atoll(e) : -1; }
     if (report_at >= 0 && g_frame == (uint64_t)report_at) report_write("DQIX_REPORT_AT (test)");
@@ -967,6 +990,14 @@ static void auto_scale(void) {
 static void present_gl(void) {
     auto_scale();
     g_wide_side = g_classic ? 0 : wide_side_target();            /* the next 3D frames (only the picture changes) */
+    {   /* ...and what the game counts as in view (not in a session: every PC must decide alike) */
+        static int off = -1; if (off < 0) off = getenv("DQIX_NO_WIDE_CULL") != NULL;
+        g_wide_cull = off || session_requested() ? 0 : g_wide_side;
+        extern unsigned g_box_tests, g_box_in, g_box_widened;
+        static int lg = -1; if (lg < 0) lg = getenv("DQIX_BOXLOG") != NULL;
+        if (lg && g_frame % 60 == 0) fprintf(stderr, "box: frame %llu tests %u in %u widened %u\n", (unsigned long long)g_frame, g_box_tests, g_box_in, g_box_widened);
+        if (lg && g_frame % 60 == 0) g_box_tests = g_box_in = g_box_widened = 0;
+    }
     uint16_t pow; memcpy(&pow, &g_io[0x304], 2);
     gl_compose((pow >> 15) & 1, pow & 1);
     wide_update((pow >> 15) & 1);
@@ -1651,8 +1682,8 @@ static void do_action(int id) {
             "battles the stick stays a D-pad. Friends in a session don't need it on.\n\n"
             "Widescreen: the field is drawn wider than the DS's screen, so you see more of the world left and right, and the top screen "
             "(map and party) sits small in the corner like a minimap. In a window it is 16:9; in fullscreen it fills the monitor. Text, menus "
-            "and the touch screen's buttons stay in the middle, as on the DS. The game only expects to show what fits on the DS's screen, so "
-            "now and then something at the far edges may appear a moment late. Enhanced mode only (the 3D on the graphics card).\n\n"
+            "and the touch screen's buttons stay in the middle, as on the DS. People and things at the sides stay in view (except while "
+            "playing with friends far away, where they can vanish near the edges). Enhanced mode only (the 3D on the graphics card).\n\n"
             "Top screen in the corner: the same layout with the field as on the DS (4:3).\n\n"
             "Two windows: one screen in each, to put them on two monitors (each can be fullscreen: F11 in that window).\n\n"
             "F9 swaps the screens (in every layout but widescreen). In widescreen, O makes the small screen see-through "

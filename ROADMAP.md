@@ -14,11 +14,9 @@ bottom with the version they arrived in.
 
 Optional ways to play the DS never had, all off by default (Modern menu).
 
-- [ ] **Widescreen, finishing touches**: things the game thinks are off
-      screen can appear a moment late at the far edges; find where the game
-      decides what's on screen and widen it (only for the picture). In
-      battles the sky picture is only as wide as the DS's screen, so the far
-      sides show the game's paler backup sky.
+- [ ] **Widescreen, finishing touches**: in battles the sky picture is
+      only as wide as the DS's screen, so the far sides show the game's
+      paler backup sky. Pop-in at the sides while playing with friends.
 - [ ] **A free camera**: turning further than the game allows in each place,
       and maybe tilt and zoom (the right stick already turns the camera as
       far as the game allows).
@@ -65,6 +63,8 @@ the same room.
 
 ## Done
 
+- [x] Widescreen: people, doors, items and monsters at the sides no longer
+      vanish (the DS's box test answers for the wide view) (v30-nightly1).
 - [x] **v29 released as stable** (from v29-nightly4): the sharper Enhanced
       mode and the new screen layouts.
 - [x] Enhanced: up to 12x and Auto resolution, sharp bilinear upscaling;
