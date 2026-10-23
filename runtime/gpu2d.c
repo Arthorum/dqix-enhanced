@@ -91,6 +91,9 @@ typedef struct {
     uint32_t col2[256];                                                 /* HD text: the sprite pixel under the one shown (0: none) */
 } ObjLine;
 
+/* HD text: lines with letters this frame, and the ones near those last frame */
+uint8_t g_tx_line_now[2][192], g_tx_line_near[2][192];
+
 /* HD text: a label pixel's kind (row bits): 0 its letters' own colour, 0x80 its
  * outline (the outline colour, or any other when none is named), 0x40 other
  * shades (a gradient: neither) */
@@ -697,11 +700,26 @@ static void compose_line(Engine* e, int eng, int y, uint32_t disp, uint32_t* lin
     int bg_tagged = 0;
     if (tx) for (int bg = 0; bg < 4; bg++) if (bg_on[bg] && !(bg == 0 && bg_3d) && bgl[bg].tagged) bg_tagged = 1;
     int obj_tagged = tx && obj_on && objl.tagged;
+    /* the per-pixel work only on lines with letters, and the ones next to them
+     * (from the last frame: a letter's HD shape can reach a row beyond its pixels) */
+    int txa = 0, txb = 255;                                         /* ...and there, near its letters (a letter is at most 16 wide; labels: tagged across) */
+    if (tx) {
+        if (bg_tagged || obj_tagged) {
+            g_tx_line_now[eng][y] = 1;
+            int lo = 256, hi = -1;
+            for (int bg = 0; bg < 4; bg++) if (bg_on[bg] && !(bg == 0 && bg_3d) && bgl[bg].tagged)
+                for (int x = 0; x < 256; x++) if (bgl[bg].tag[x]) { if (x < lo) lo = x; if (x > hi) hi = x; }
+            if (obj_tagged) for (int x = 0; x < 256; x++) if (objl.tag[x]) { if (x < lo) lo = x; if (x > hi) hi = x; }
+            txa = lo - 18 < 0 ? 0 : lo - 18; txb = hi + 18 > 255 ? 255 : hi + 18;
+        } else if (!g_tx_line_near[eng][y]) tx = 0;
+        if (!tx || txa > 0 || txb < 255) memset(&g_tx_vis[eng][y * 256], 0, 256);
+    }
     static uint16_t ink_at[256], ink2_at[256];                                    /* list index + 1 of a letter whose own pixel this is */
+    if (tx) { memset(ink_at, 0, sizeof ink_at); memset(ink2_at, 0, sizeof ink2_at); }
     for (int x = 0; x < 256; x++) {
         uint32_t v1 = backdrop, v2 = 0, v3 = 0;
         uint8_t wm = winmask[x];
-        if (tx) {
+        if (tx && x >= txa && x <= txb) {
             int idx = y * 256 + x;
             uint8_t vis = 0; int covered = 0, any = 0;
             /* a pixel blended (alpha) with the one behind it: that one shows through too */

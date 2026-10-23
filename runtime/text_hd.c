@@ -342,6 +342,12 @@ void tx_frame_done(void) {
           fprintf(stderr, "[f%llu] tx: active %d any %d ram pages %d (%d tags) vram pages %d (%d tags) seen %d/%d next %u\n", (unsigned long long)g_frame, g_tx_active, g_tx_any, r, rt, v, vt, g_tx_n[0], g_tx_n[1], g_inst_next);
       } }
     if (!g_tx_active) return;
+    {   extern uint8_t g_tx_line_now[2][192], g_tx_line_near[2][192];
+        for (int e = 0; e < 2; e++) {
+            for (int y = 0; y < 192; y++) g_tx_line_near[e][y] = g_tx_line_now[e][y] | (y > 0 ? g_tx_line_now[e][y - 1] : 0) | (y < 191 ? g_tx_line_now[e][y + 1] : 0);
+            memset(g_tx_line_now[e], 0, 192);
+        }
+    }
     memset(g_tx_slot, 0, sizeof g_tx_slot);
     for (int eng = 0; eng < 2; eng++) {
         /* labels drawn with their outline (style outline): a second instance,
@@ -396,6 +402,30 @@ __attribute__((constructor)) static void tx_env(void) {
 /* ---------------------------------------------------------------- textures
  * Letters copied into texture VRAM (the game draws some text as 3D quads):
  * the tagged texels of a texture (TEXIMAGE_PARAM). */
+/* does a texture have any letters (tags)? Fast: stops at the first, skips
+ * the 4 KB pages that have no tags at all (the GPU renderer asks every frame) */
+int tx_tex_any(uint32_t teximg) {
+    if (!g_tx_any) return 0;
+    uint32_t a = (teximg & 0xFFFF) << 3;
+    int w = 8 << ((teximg >> 20) & 7), h = 8 << ((teximg >> 23) & 7), fmt = (teximg >> 26) & 7;
+    static const int bpp[8] = { 0, 8, 2, 4, 8, 2, 8, 16 };
+    if (!fmt) return 0;
+    uint32_t bytes = (uint32_t)(w * h * bpp[fmt] / 8);
+    for (uint32_t o = 0; o < bytes;) {
+        uint32_t b = a + o;
+        uint8_t* p = g_tex_slot[(b >> 17) & 3];
+        uint32_t off = p ? (uint32_t)(p + (b & 0x1FFFF) - g_vram) : 0;
+        uint32_t run = TX_PAGE - off % TX_PAGE;
+        if (run > bytes - o) run = bytes - o;
+        if (p && off < sizeof g_vram && g_vram_pages[off / TX_PAGE]) {
+            const TxTag* t = &g_vram_pages[off / TX_PAGE][(off % TX_PAGE) * 2];
+            for (uint32_t k = 0; k < run * 2; k++) if (t[k].inst) return 1;
+        }
+        o += run;
+    }
+    return 0;
+}
+
 int tx_tex_tagged(uint32_t teximg) {
     if (!g_tx_any) return 0;
     uint32_t a = (teximg & 0xFFFF) << 3;
@@ -585,11 +615,25 @@ TxInst* tx_label_inst(int label, int eng, int ox, int oy) {
  * label at that place a tile of its own confirmed (this frame or the last). */
 TxInst* tx_label_at(const uint8_t* t, int eng, int tsx, int tsy, int* dx, int* dy) {
     if (!g_nlkeys) return NULL;
+    /* the tiles seen recently, by place in VRAM, with what they matched: a
+     * tile is looked at on every line it shows, its contents rarely change */
+    enum { NC = 8192 };
+    static struct { const uint8_t* p; uint8_t bytes[32]; uint8_t n; uint16_t cand[4]; int8_t cdx[4], cdy[4]; } cache[NC];
+    static const TxLabel* cache_db;
+    if (cache_db != g_tx_labels) { memset(cache, 0, sizeof cache); cache_db = g_tx_labels; }
+    uint32_t ci = (uint32_t)(((uintptr_t)t >> 5) & (NC - 1));
     int cand[8], cdx[8], cdy[8], n = 0;
-    uint64_t th = fnv64(t, 32);
-    for (uint32_t h = (uint32_t)th & (LHASH - 1), k = 0; g_lhash[h] && k < LHASH; h = (h + 1) & (LHASH - 1), k++) {
-        LabelKey* K = &g_lkeys[g_lhash[h] - 1];
-        if (K->hash == th && n < 8) { cand[n] = K->label; cdx[n] = K->dx; cdy[n] = K->dy; n++; }
+    if (cache[ci].p == t && !memcmp(cache[ci].bytes, t, 32)) {
+        n = cache[ci].n;
+        for (int i = 0; i < n; i++) { cand[i] = cache[ci].cand[i]; cdx[i] = cache[ci].cdx[i]; cdy[i] = cache[ci].cdy[i]; }
+    } else {
+        uint64_t th = fnv64(t, 32);
+        for (uint32_t h = (uint32_t)th & (LHASH - 1), k = 0; g_lhash[h] && k < LHASH; h = (h + 1) & (LHASH - 1), k++) {
+            LabelKey* K = &g_lkeys[g_lhash[h] - 1];
+            if (K->hash == th && n < 4) { cand[n] = K->label; cdx[n] = K->dx; cdy[n] = K->dy; n++; }
+        }
+        cache[ci].p = t; memcpy(cache[ci].bytes, t, 32); cache[ci].n = (uint8_t)n;
+        for (int i = 0; i < n; i++) { cache[ci].cand[i] = (uint16_t)cand[i]; cache[ci].cdx[i] = (int8_t)cdx[i]; cache[ci].cdy[i] = (int8_t)cdy[i]; }
     }
     if (!n) return NULL;
     if (n == 1) {

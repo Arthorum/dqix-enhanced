@@ -120,4 +120,5 @@ void tx_labels_load(const char* path);
  * of (NULL: none), and where the tile is in the label's box */
 TxInst* tx_label_at(const uint8_t* tile32, int eng, int tsx, int tsy, int* dx, int* dy);
 TxInst* tx_label_inst(int label, int eng, int ox, int oy);
+int tx_tex_any(uint32_t teximage_param);   /* a texture has letters (tags) */
 int tx_label_texture(uint32_t teximage_param, int* bx, int* by);   /* -1: not a label */

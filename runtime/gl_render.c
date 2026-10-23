@@ -602,7 +602,7 @@ static int g_ready;
 const int* g_gl_scale = &g_scale;
 
 /* ---------------------------------------------------------------- textures */
-typedef struct { uint32_t ti, pl; uint64_t hash; GLuint tex; int w, h; uint64_t checked, used; int live, hd; } TexEntry;
+typedef struct { uint32_t ti, pl; uint64_t hash; GLuint tex; int w, h; uint64_t checked, used; int live, hd; int lab, lbx, lby, labok; } TexEntry;
 #define TEXCACHE 4096
 static TexEntry g_texcache[TEXCACHE];
 static int g_smooth;                                           /* smooth textures (bilinear filtering) */
@@ -673,8 +673,11 @@ static GLuint texture_for(uint32_t ti, uint32_t pl, int* w, int* h, int* hd) {
     if (e->checked != g_frameno) {
         e->checked = g_frameno;
         uint64_t hs = gpu3d_texture_hash(ti, pl);
-        int want_hd = g_hd_text && g_tx_any && ((ti >> 26) & 7) == 3 && *w <= 64 && *h <= 64 && tx_tex_tagged(ti);
-        int lbx = 0, lby = 0, lab = (!want_hd && g_hd_text && *w <= 64 && *h <= 64) ? tx_label_texture(ti, &lbx, &lby) : -1;   /* a label as a texture */
+        int small16 = g_hd_text && ((ti >> 26) & 7) == 3 && *w <= 64 && *h <= 64;
+        int want_hd = small16 && g_tx_any && tx_tex_any(ti);
+        int lbx = e->lbx, lby = e->lby, lab = e->lab;               /* a label as a texture: looked up when its contents change */
+        if (small16 && !want_hd && (hs != e->hash || !e->labok)) { lab = tx_label_texture(ti, &lbx, &lby); e->lab = lab; e->lbx = lbx; e->lby = lby; e->labok = 1; }
+        if (!small16 || want_hd) lab = -1;
         if (lab >= 0) want_hd = 2 + lab;
         if (hs != e->hash || e->w != *w || e->h != *h || want_hd != e->hd) {
             double t0 = perf_ms();
